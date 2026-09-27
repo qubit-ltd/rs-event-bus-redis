@@ -1,3 +1,10 @@
+// =============================================================================
+//    Copyright (c) 2025 - 2026 Haixing Hu.
+//
+//    SPDX-License-Identifier: Apache-2.0
+//
+//    Licensed under the Apache License, Version 2.0.
+// =============================================================================
 use std::sync::Arc;
 
 use qubit_event_bus::EventBusConfig;
@@ -9,10 +16,12 @@ use qubit_event_bus::facade::EventBusFacadeConfig;
 use qubit_event_bus::model::ContentType;
 use qubit_event_bus::model::ProviderOptions;
 use qubit_event_bus::model::PublishRequest;
+use qubit_event_bus::model::SchemaId;
 use qubit_event_bus::model::StartPosition;
 use qubit_event_bus::model::SubscribeRequest;
 use qubit_event_bus::model::SubscriptionDurability;
 use qubit_event_bus::model::Topic;
+use qubit_event_bus::SubscriberId;
 use qubit_spi::ProviderSelection;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -37,7 +46,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (sender, receiver) = std::sync::mpsc::channel();
     let subscription = bus.subscribe(
         SubscribeRequest::builder()
-            .subscriber_id(qubit_event_bus::SubscriberId::new("business-consumer")?)
+            .subscriber_id(SubscriberId::new("business-consumer")?)
             .topic(topic.clone())
             .start_position(StartPosition::Earliest)
             .durability(SubscriptionDurability::Durable)
@@ -62,7 +71,7 @@ impl EventCodec<String> for Utf8Codec {
         &self.0
     }
 
-    fn schema_id(&self) -> Option<&qubit_event_bus::model::SchemaId> {
+    fn schema_id(&self) -> Option<&SchemaId> {
         None
     }
 

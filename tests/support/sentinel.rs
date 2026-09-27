@@ -13,6 +13,8 @@ use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
+use redis::Client;
+use redis::cmd;
 use tempfile::TempDir;
 
 /// Owns the Redis and Sentinel containers used by a failover test.
@@ -179,19 +181,19 @@ impl SentinelServer {
             let all_sentinels_ready = self.sentinel_ports.iter().all(|port| {
                 self.master_port_at(*port)
                     .is_ok_and(|master_port| master_port == self.master_port)
-                    && redis::Client::open(format!("redis://127.0.0.1:{port}/"))
+                    && Client::open(format!("redis://127.0.0.1:{port}/"))
                         .and_then(|client| client.get_connection())
                         .and_then(|mut connection| {
-                            redis::cmd("SENTINEL")
+                            cmd("SENTINEL")
                                 .arg("CKQUORUM")
                                 .arg("qeventbus")
                                 .query::<String>(&mut connection)
                         })
                         .is_ok_and(|result| result.starts_with("OK"))
             });
-            let replica_ready = redis::Client::open(format!("redis://127.0.0.1:{}/", self.master_port))
+            let replica_ready = Client::open(format!("redis://127.0.0.1:{}/", self.master_port))
                 .and_then(|client| client.get_connection())
-                .and_then(|mut connection| redis::cmd("INFO").arg("replication").query::<String>(&mut connection))
+                .and_then(|mut connection| cmd("INFO").arg("replication").query::<String>(&mut connection))
                 .is_ok_and(|info| info.contains("connected_slaves:1"));
             if all_sentinels_ready && replica_ready {
                 return Ok(());
@@ -204,9 +206,9 @@ impl SentinelServer {
 
 /// Queries one Sentinel for the configured service's current master port.
 fn master_port_from(sentinel_port: u16) -> Result<u16, Box<dyn std::error::Error>> {
-    let client = redis::Client::open(format!("redis://127.0.0.1:{sentinel_port}/"))?;
+    let client = Client::open(format!("redis://127.0.0.1:{sentinel_port}/"))?;
     let mut connection = client.get_connection()?;
-    let (_, port): (String, u16) = redis::cmd("SENTINEL")
+    let (_, port): (String, u16) = cmd("SENTINEL")
         .arg("GET-MASTER-ADDR-BY-NAME")
         .arg("qeventbus")
         .query(&mut connection)?;

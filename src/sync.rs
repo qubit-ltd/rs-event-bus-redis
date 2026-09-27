@@ -7,6 +7,8 @@
 // =============================================================================
 //! Synchronous Redis Streams provider.
 
+mod internal;
+mod redis_event_bus;
 mod redis_event_bus_provider;
 mod subscription;
 

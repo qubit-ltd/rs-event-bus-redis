@@ -25,6 +25,7 @@ use qubit_event_bus::model::ContentType;
 use qubit_event_bus::model::EventId;
 use qubit_event_bus::model::Headers;
 use qubit_event_bus::model::ProviderOptions;
+use qubit_event_bus::model::PublishAcknowledgement;
 use qubit_event_bus::model::StartPosition;
 use qubit_event_bus::model::SubscriberId;
 use qubit_event_bus::model::SubscriptionDurability;
@@ -42,7 +43,10 @@ use qubit_event_bus::spi::conformance::ConformanceHooks;
 use qubit_event_bus::spi::conformance::run_async;
 use qubit_event_bus_redis::r#async::AsyncRedisEventBusProvider;
 use qubit_event_bus_redis::naming::stream_key;
+use qubit_id::Id;
 use qubit_spi::AsyncServiceProvider;
+use redis::Client;
+use redis::cmd;
 use support::redis_server::RedisServer;
 
 static SUBSCRIPTION_IDS: AtomicU64 = AtomicU64::new(100);
@@ -79,7 +83,7 @@ fn message(topic: &str, id: &str, payload: &[u8]) -> Result<OutboundMessage, Box
 
 fn request(topic: &str, subscriber: &str) -> Result<SpiSubscriptionRequest, Box<dyn std::error::Error>> {
     Ok(SpiSubscriptionRequest::new(
-        qubit_id::Id::new(SUBSCRIPTION_IDS.fetch_add(1, Ordering::Relaxed)),
+        Id::new(SUBSCRIPTION_IDS.fetch_add(1, Ordering::Relaxed)),
         TopicAddress::new(topic)?,
         SubscriberId::new(subscriber)?,
         Some(ConsumerGroup::new("workers")?),
@@ -301,7 +305,7 @@ fn test_async_replay_from_stream_position_and_new_tail() -> Result<(), Box<dyn s
             .publish(message("async-positions", "async-position-1", b"one")?)
             .await?;
         let first_id = match first {
-            qubit_event_bus::model::PublishAcknowledgement::Accepted {
+            PublishAcknowledgement::Accepted {
                 provider_message_id: Some(id),
                 ..
             } => id,
@@ -311,7 +315,7 @@ fn test_async_replay_from_stream_position_and_new_tail() -> Result<(), Box<dyn s
             .await?;
         let mut at = bus
             .subscribe(SpiSubscriptionRequest::new(
-                qubit_id::Id::new(SUBSCRIPTION_IDS.fetch_add(1, Ordering::Relaxed)),
+                Id::new(SUBSCRIPTION_IDS.fetch_add(1, Ordering::Relaxed)),
                 TopicAddress::new("async-positions")?,
                 SubscriberId::new("at-position")?,
                 Some(ConsumerGroup::new("position-group")?),
@@ -331,7 +335,7 @@ fn test_async_replay_from_stream_position_and_new_tail() -> Result<(), Box<dyn s
 
         let mut new = bus
             .subscribe(SpiSubscriptionRequest::new(
-                qubit_id::Id::new(SUBSCRIPTION_IDS.fetch_add(1, Ordering::Relaxed)),
+                Id::new(SUBSCRIPTION_IDS.fetch_add(1, Ordering::Relaxed)),
                 TopicAddress::new("async-positions")?,
                 SubscriberId::new("new-position")?,
                 Some(ConsumerGroup::new("new-position-group")?),
@@ -365,8 +369,8 @@ fn test_async_reports_gap_for_removed_pending_entries() -> Result<(), Box<dyn st
             return Err("pending gap fixture was not received".into());
         };
         first.close().await?;
-        let mut connection = redis::Client::open(server.url())?.get_connection()?;
-        redis::cmd("XTRIM")
+        let mut connection = Client::open(server.url())?.get_connection()?;
+        cmd("XTRIM")
             .arg(stream_key("async-tests", "async-gaps"))
             .arg("MAXLEN")
             .arg(0)
@@ -399,8 +403,8 @@ fn test_async_reject_acks_and_malformed_wire_is_reported() -> Result<(), Box<dyn
                 DeliveryDisposition::Reject,
             )
             .await?;
-        let mut connection = redis::Client::open(server.url())?.get_connection()?;
-        redis::cmd("XADD")
+        let mut connection = Client::open(server.url())?.get_connection()?;
+        cmd("XADD")
             .arg(stream_key("async-tests", "async-malformed"))
             .arg("*")
             .arg("other")
@@ -417,11 +421,8 @@ fn test_async_redis_command_failures_are_returned_without_details() -> Result<()
     let bus = create_bus(&server)?;
     block_on(async {
         let key = stream_key("async-tests", "async-wrong-type");
-        let mut connection = redis::Client::open(server.url())?.get_connection()?;
-        redis::cmd("SET")
-            .arg(&key)
-            .arg("not-a-stream")
-            .query::<()>(&mut connection)?;
+        let mut connection = Client::open(server.url())?.get_connection()?;
+        cmd("SET").arg(&key).arg("not-a-stream").query::<()>(&mut connection)?;
         assert!(
             bus.publish(message("async-wrong-type", "failed-write", b"x")?)
                 .await
@@ -442,10 +443,7 @@ fn test_async_redis_command_failures_are_returned_without_details() -> Result<()
             return Err("valid stream event was not received".into());
         };
         let key = stream_key("async-tests", "async-failed-ack");
-        redis::cmd("SET")
-            .arg(key)
-            .arg("not-a-stream")
-            .query::<()>(&mut connection)?;
+        cmd("SET").arg(key).arg("not-a-stream").query::<()>(&mut connection)?;
         let error = receiver
             .settle(
                 received.settlement().ok_or("missing settlement token")?,
@@ -566,7 +564,7 @@ fn test_async_recovers_pending_message_after_redis_restart() -> Result<(), Box<d
 
 fn group_request(topic: &str, subscriber: &str, group: &str) -> SpiSubscriptionRequest {
     SpiSubscriptionRequest::new(
-        qubit_id::Id::new(SUBSCRIPTION_IDS.fetch_add(1, Ordering::Relaxed)),
+        Id::new(SUBSCRIPTION_IDS.fetch_add(1, Ordering::Relaxed)),
         TopicAddress::new(topic).expect("static topic is valid"),
         SubscriberId::new(subscriber).expect("static subscriber is valid"),
         Some(ConsumerGroup::new(group).expect("static group is valid")),

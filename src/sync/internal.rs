@@ -5,11 +5,9 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-//! Runtime-neutral asynchronous Redis Streams provider.
+//! Private synchronous subscription state shared with settlement tokens.
 
-mod async_redis_event_bus;
-mod async_redis_event_bus_provider;
-mod internal;
-mod subscription;
+#[path = "internal/settlement_state.rs"]
+mod settlement_state;
 
-pub use async_redis_event_bus_provider::AsyncRedisEventBusProvider;
+pub(super) use settlement_state::SettlementState;

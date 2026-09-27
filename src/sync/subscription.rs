@@ -22,33 +22,23 @@ use qubit_event_bus::spi::InboundMessage;
 use qubit_event_bus::spi::ReceiveOutcome;
 use qubit_event_bus::spi::SettlementToken;
 use qubit_event_bus::spi::TopicAddress;
+use qubit_id::Id;
 use redis::FromRedisValue;
+use redis::cmd;
 use redis::streams::StreamAutoClaimReply;
 use redis::streams::StreamId;
 use redis::streams::StreamReadReply;
 
-use super::redis_event_bus_provider::spi_error;
+use super::internal::SettlementState;
+use super::redis_event_bus::spi_error;
+use crate::client::Client;
 use crate::error::RedisProviderError;
 use crate::wire::WireFields;
 
-/// Redis coordinates and settlement status carried by a delivery token.
-pub(crate) struct SettlementState {
-    /// Redis stream key.
-    stream: String,
-    /// Consumer group name.
-    group: String,
-    /// Redis message ID.
-    message_id: String,
-    /// Final state applied through this token.
-    disposition: Arc<Mutex<Option<DeliveryDisposition>>>,
-    /// Number of currently unsettled records owned by the receiver.
-    outstanding: Arc<AtomicUsize>,
-}
-
 /// One blocking consumer owned by a facade subscription.
-pub(crate) struct RedisSubscription {
-    /// Client used to create a dedicated blocking connection.
-    pub(crate) client: std::sync::Arc<crate::client::RedisClient>,
+pub(crate) struct Subscription {
+    /// Shared factory used to create a blocking connection per operation.
+    pub(crate) client: Arc<Client>,
     /// Redis stream key.
     pub(crate) key: String,
     /// Consumer group name.
@@ -58,21 +48,40 @@ pub(crate) struct RedisSubscription {
     /// Original typed topic address.
     pub(crate) topic: TopicAddress,
     /// Facade subscription identifier.
-    pub(crate) subscription_id: qubit_id::Id,
+    pub(crate) subscription_id: Id,
     /// Whether this receiver is closed.
     pub(crate) closed: bool,
-    /// Resume cursor for bounded `XAUTOCLAIM` scans.
+    /// Resume cursor used so each `XAUTOCLAIM` call scans one pending entry.
     pub(crate) claim_cursor: String,
-    /// Pending-message idle duration before another consumer can claim it.
+    /// Minimum pending idle milliseconds before another consumer may claim it.
     pub(crate) claim_min_idle_ms: usize,
     /// Maximum unsettled record count before reads pause.
     pub(crate) max_unsettled: usize,
-    /// Current unsettled record count shared with delivery tokens.
+    /// In-flight count shared with tokens and updated atomically across
+    /// callers.
     pub(crate) outstanding: Arc<AtomicUsize>,
 }
 
-impl EventSubscriptionSpi for RedisSubscription {
+impl EventSubscriptionSpi for Subscription {
     /// Reads a pending item first, then a new group item with a finite block.
+    ///
+    /// The call scans reclaimable entries, this consumer's pending entries, and
+    /// then new group entries. Closing the receiver does not acknowledge a
+    /// record, so pending deliveries remain recoverable. Redis block intervals
+    /// are capped to let the call observe the requested deadline.
+    ///
+    /// # Parameters
+    ///
+    /// - `timeout`: Maximum wait for a new stream entry.
+    ///
+    /// # Returns
+    ///
+    /// A message, a gap for removed pending entries, a timeout, or `Closed`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an SPI operation error when a Redis command fails or a record
+    /// cannot be decoded.
     fn receive(&mut self, timeout: Duration) -> Result<ReceiveOutcome, SpiError> {
         if self.closed {
             return Ok(ReceiveOutcome::Closed);
@@ -85,7 +94,7 @@ impl EventSubscriptionSpi for RedisSubscription {
             .get_connection()
             .map_err(|_| spi_error("receive", Some(&self.topic), RedisProviderError::Operation("connect")))?;
         let deadline = Instant::now().checked_add(timeout).unwrap_or_else(Instant::now);
-        let claim: StreamAutoClaimReply = redis::cmd("XAUTOCLAIM")
+        let claim: StreamAutoClaimReply = cmd("XAUTOCLAIM")
             .arg(&self.key)
             .arg(&self.group)
             .arg(&self.consumer)
@@ -111,7 +120,7 @@ impl EventSubscriptionSpi for RedisSubscription {
         if let Some(entry) = claim.claimed.into_iter().next() {
             return decode_entry(self, entry);
         }
-        let pending: Option<StreamReadReply> = redis::cmd("XREADGROUP")
+        let pending: Option<StreamReadReply> = cmd("XREADGROUP")
             .arg("GROUP")
             .arg(&self.group)
             .arg(&self.consumer)
@@ -137,7 +146,7 @@ impl EventSubscriptionSpi for RedisSubscription {
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             let block_ms = remaining.as_millis().clamp(1, 1_000) as usize;
-            let reply: Option<StreamReadReply> = redis::cmd("XREADGROUP")
+            let reply: Option<StreamReadReply> = cmd("XREADGROUP")
                 .arg("GROUP")
                 .arg(&self.group)
                 .arg(&self.consumer)
@@ -169,6 +178,25 @@ impl EventSubscriptionSpi for RedisSubscription {
     }
 
     /// Acknowledges terminal dispositions and leaves retries in the PEL.
+    ///
+    /// Accept and Reject issue `XACK`; Retry only releases the receiver's local
+    /// in-flight slot and leaves the Redis entry pending. Repeating the same
+    /// disposition succeeds, but a different disposition for an applied token
+    /// is rejected.
+    ///
+    /// # Parameters
+    ///
+    /// - `token`: Settlement token produced by this receiver.
+    /// - `disposition`: Terminal action or retry decision to apply.
+    ///
+    /// # Returns
+    ///
+    /// Success after the requested disposition is recorded.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid-token error for foreign, unknown, or conflicting
+    /// tokens, or an operation error if Redis settlement fails.
     fn settle(&mut self, token: &SettlementToken, disposition: DeliveryDisposition) -> Result<(), SpiError> {
         if !token.belongs_to(self.subscription_id) {
             return Err(invalid_token("token belongs to another subscription", &self.topic));
@@ -199,7 +227,7 @@ impl EventSubscriptionSpi for RedisSubscription {
             .client
             .get_connection()
             .map_err(|_| spi_error("settle", Some(&self.topic), RedisProviderError::Operation("connect")))?;
-        let _: usize = redis::cmd("XACK")
+        let _: usize = cmd("XACK")
             .arg(&state.stream)
             .arg(&state.group)
             .arg(&state.message_id)
@@ -211,14 +239,36 @@ impl EventSubscriptionSpi for RedisSubscription {
     }
 
     /// Closes the receiver without acknowledging pending messages.
+    ///
+    /// # Returns
+    ///
+    /// Success after subsequent receive calls begin returning `Closed`.
     fn close(&mut self) -> Result<(), SpiError> {
         self.closed = true;
         Ok(())
     }
 }
 
-/// Converts one Redis record to the transport-neutral inbound form.
-fn decode_entry(subscription: &RedisSubscription, entry: StreamId) -> Result<ReceiveOutcome, SpiError> {
+/// Decodes one Redis record and tracks its unsettled delivery slot.
+///
+/// Missing or malformed wire data is surfaced as a secret-safe operation
+/// error; this helper does not delete or acknowledge the record on failure.
+///
+/// # Parameters
+///
+/// - `subscription`: Receiver supplying the topic, group, and in-flight
+///   counter.
+/// - `entry`: Stream entry returned by a read or claim command.
+///
+/// # Returns
+///
+/// A message outcome containing a token bound to this receiver.
+///
+/// # Errors
+///
+/// Returns an operation error when the wire field is absent, malformed, or
+/// cannot be converted to typed event metadata.
+fn decode_entry(subscription: &Subscription, entry: StreamId) -> Result<ReceiveOutcome, SpiError> {
     let Some(value) = entry.map.get("wire") else {
         return Err(spi_error(
             "receive",
@@ -266,7 +316,16 @@ fn decode_entry(subscription: &RedisSubscription, entry: StreamId) -> Result<Rec
     )))
 }
 
-/// Builds the structured invalid-token SPI error.
+/// Describes a settlement token that this receiver cannot apply.
+///
+/// # Parameters
+///
+/// - `reason`: Stable explanation suitable for the caller.
+/// - `topic`: Topic associated with the receiver rejecting the token.
+///
+/// # Returns
+///
+/// A non-retryable invalid-settlement-token error.
 fn invalid_token(reason: &'static str, topic: &TopicAddress) -> SpiError {
     SpiError::InvalidSettlementToken {
         provider_id: "redis-streams".into(),

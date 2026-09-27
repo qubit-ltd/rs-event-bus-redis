@@ -24,6 +24,7 @@ use qubit_event_bus::model::ContentType;
 use qubit_event_bus::model::EventId;
 use qubit_event_bus::model::Headers;
 use qubit_event_bus::model::ProviderOptions;
+use qubit_event_bus::model::PublishAcknowledgement;
 use qubit_event_bus::model::StartPosition;
 use qubit_event_bus::model::SubscriberId;
 use qubit_event_bus::model::SubscriptionDurability;
@@ -42,7 +43,10 @@ use qubit_event_bus::spi::conformance::run_sync;
 use qubit_event_bus_redis::naming::stream_key;
 use qubit_event_bus_redis::sync::RedisEventBusProvider;
 use qubit_event_bus_redis::wire::WireFields;
+use qubit_id::Id;
 use qubit_spi::ServiceProvider;
+use redis::Client;
+use redis::cmd;
 use support::redis_server::RedisServer;
 
 static SUBSCRIPTION_IDS: AtomicU64 = AtomicU64::new(1);
@@ -85,7 +89,7 @@ fn request(
     position: StartPosition,
 ) -> Result<SpiSubscriptionRequest, Box<dyn std::error::Error>> {
     Ok(SpiSubscriptionRequest::new(
-        qubit_id::Id::new(SUBSCRIPTION_IDS.fetch_add(1, Ordering::Relaxed)),
+        Id::new(SUBSCRIPTION_IDS.fetch_add(1, Ordering::Relaxed)),
         TopicAddress::new(topic)?,
         SubscriberId::new(subscriber)?,
         group.map(ConsumerGroup::new).transpose()?,
@@ -260,7 +264,7 @@ fn test_sync_replay_from_stream_position_and_new_tail() -> Result<(), Box<dyn st
     let bus = create_bus(&server)?;
     let first = bus.publish(message("positions", "position-1", b"one")?)?;
     let first_id = match first {
-        qubit_event_bus::model::PublishAcknowledgement::Accepted {
+        PublishAcknowledgement::Accepted {
             provider_message_id: Some(id),
             ..
         } => id,
@@ -304,8 +308,8 @@ fn test_sync_reports_gap_for_removed_pending_entries() -> Result<(), Box<dyn std
         return Err("pending gap fixture was not received".into());
     };
     first.close()?;
-    let mut connection = redis::Client::open(server.url())?.get_connection()?;
-    redis::cmd("XTRIM")
+    let mut connection = Client::open(server.url())?.get_connection()?;
+    cmd("XTRIM")
         .arg(stream_key("sync-tests", "gaps"))
         .arg("MAXLEN")
         .arg(0)
@@ -339,8 +343,8 @@ fn test_sync_reject_acks_and_malformed_wire_is_reported() -> Result<(), Box<dyn 
         rejected.settlement().ok_or("missing settlement token")?,
         DeliveryDisposition::Reject,
     )?;
-    let mut connection = redis::Client::open(server.url())?.get_connection()?;
-    redis::cmd("XADD")
+    let mut connection = Client::open(server.url())?.get_connection()?;
+    cmd("XADD")
         .arg(stream_key("sync-tests", "malformed"))
         .arg("*")
         .arg("other")
@@ -355,11 +359,8 @@ fn test_sync_redis_command_failures_are_returned_without_details() -> Result<(),
     let server = RedisServer::start()?;
     let bus = create_bus(&server)?;
     let key = stream_key("sync-tests", "wrong-type");
-    let mut connection = redis::Client::open(server.url())?.get_connection()?;
-    redis::cmd("SET")
-        .arg(&key)
-        .arg("not-a-stream")
-        .query::<()>(&mut connection)?;
+    let mut connection = Client::open(server.url())?.get_connection()?;
+    cmd("SET").arg(&key).arg("not-a-stream").query::<()>(&mut connection)?;
     assert!(bus.publish(message("wrong-type", "failed-write", b"x")?).is_err());
     assert!(
         bus.subscribe(request(
@@ -382,10 +383,7 @@ fn test_sync_redis_command_failures_are_returned_without_details() -> Result<(),
         return Err("valid stream event was not received".into());
     };
     let key = stream_key("sync-tests", "failed-ack");
-    redis::cmd("SET")
-        .arg(key)
-        .arg("not-a-stream")
-        .query::<()>(&mut connection)?;
+    cmd("SET").arg(key).arg("not-a-stream").query::<()>(&mut connection)?;
     let error = receiver
         .settle(
             received.settlement().ok_or("missing settlement token")?,

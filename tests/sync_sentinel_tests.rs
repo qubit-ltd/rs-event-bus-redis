@@ -35,7 +35,10 @@ use qubit_event_bus::spi::TopicAddress;
 use qubit_event_bus::spi::TransportPayload;
 use qubit_event_bus_redis::naming::stream_key;
 use qubit_event_bus_redis::sync::RedisEventBusProvider;
+use qubit_id::Id;
 use qubit_spi::ServiceProvider;
+use redis::Client;
+use redis::cmd;
 use support::sentinel::SentinelServer;
 
 #[test]
@@ -53,9 +56,9 @@ fn test_sync_sentinel_reconnects_after_master_failover() -> Result<(), Box<dyn s
         .map_err(|failure| failure.into_error())?;
     let original_master_port = sentinel.master_port()?;
     bus.publish(message("events", "pending-before-failover", b"pending")?)?;
-    let direct_client = redis::Client::open(format!("redis://127.0.0.1:{original_master_port}/"))?;
+    let direct_client = Client::open(format!("redis://127.0.0.1:{original_master_port}/"))?;
     let mut direct_connection = direct_client.get_connection()?;
-    let replicas: usize = redis::cmd("WAIT").arg(1).arg(5_000).query(&mut direct_connection)?;
+    let replicas: usize = cmd("WAIT").arg(1).arg(5_000).query(&mut direct_connection)?;
     assert_eq!(replicas, 1, "replica must contain the pending record before promotion");
     let mut first = bus.subscribe(subscription_request(1001, "worker-one")?)?;
     let ReceiveOutcome::Message(received) = first.receive(Duration::from_secs(2))? else {
@@ -65,9 +68,9 @@ fn test_sync_sentinel_reconnects_after_master_failover() -> Result<(), Box<dyn s
     first.close()?;
     sentinel.stop_original_master()?;
     bus.publish(message("events", "after-failover", b"after")?)?;
-    let promoted_client = redis::Client::open(format!("redis://127.0.0.1:{}/", sentinel.master_port()?))?;
+    let promoted_client = Client::open(format!("redis://127.0.0.1:{}/", sentinel.master_port()?))?;
     let mut promoted_connection = promoted_client.get_connection()?;
-    let stream_length: usize = redis::cmd("XLEN")
+    let stream_length: usize = cmd("XLEN")
         .arg(stream_key("sentinel-sync", "events"))
         .query(&mut promoted_connection)?;
     assert_eq!(stream_length, 2, "promoted master must contain both stream records");
@@ -89,7 +92,7 @@ fn test_sync_sentinel_reconnects_after_master_failover() -> Result<(), Box<dyn s
 
 fn subscription_request(id: u64, subscriber: &str) -> Result<SpiSubscriptionRequest, Box<dyn std::error::Error>> {
     Ok(SpiSubscriptionRequest::new(
-        qubit_id::Id::new(id),
+        Id::new(id),
         TopicAddress::new("events")?,
         SubscriberId::new(subscriber)?,
         Some(ConsumerGroup::new("sentinel-group")?),

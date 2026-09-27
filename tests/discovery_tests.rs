@@ -14,6 +14,7 @@ mod support;
 use qubit_event_bus::AsyncEventBusRegistry;
 use qubit_event_bus::EventBusConfig;
 use qubit_event_bus::EventBusRegistry;
+use qubit_event_bus::SubscriberId;
 use qubit_event_bus::codec::CodecRegistry;
 use qubit_event_bus::codec::EventCodec;
 use qubit_event_bus::error::CodecError;
@@ -21,6 +22,7 @@ use qubit_event_bus::facade::EventBusFacadeConfig;
 use qubit_event_bus::model::ContentType;
 use qubit_event_bus::model::ProviderOptions;
 use qubit_event_bus::model::PublishRequest;
+use qubit_event_bus::model::SchemaId;
 use qubit_event_bus::model::StartPosition;
 use qubit_event_bus::model::SubscribeRequest;
 use qubit_event_bus::model::SubscriptionDurability;
@@ -47,7 +49,7 @@ fn test_sync_registry_discovers_and_creates_redis_provider() -> Result<(), Box<d
     let (sender, receiver) = std::sync::mpsc::channel();
     let subscription = bus.subscribe(
         SubscribeRequest::builder()
-            .subscriber_id(qubit_event_bus::SubscriberId::new("discovery-worker")?)
+            .subscriber_id(SubscriberId::new("discovery-worker")?)
             .topic(topic.clone())
             .start_position(StartPosition::Earliest)
             .durability(SubscriptionDurability::Durable)
@@ -71,7 +73,7 @@ impl EventCodec<String> for Utf8Codec {
     fn content_type(&self) -> &ContentType {
         &self.0
     }
-    fn schema_id(&self) -> Option<&qubit_event_bus::model::SchemaId> {
+    fn schema_id(&self) -> Option<&SchemaId> {
         None
     }
     fn encode(&self, value: &String) -> Result<std::sync::Arc<[u8]>, CodecError> {

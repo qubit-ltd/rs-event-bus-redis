@@ -12,18 +12,21 @@
 mod support;
 
 use futures_lite::future::block_on;
+use redis::Client;
+use redis::RedisError;
+use redis::cmd;
 use redis::streams::StreamAutoClaimReply;
 use redis::streams::StreamReadReply;
 use support::redis_server::RedisServer;
 
-async fn ping(url: &str) -> Result<String, redis::RedisError> {
-    let client = redis::Client::open(url)?;
+async fn ping(url: &str) -> Result<String, RedisError> {
+    let client = Client::open(url)?;
     let mut connection = client.get_multiplexed_async_connection().await?;
-    redis::cmd("PING").query_async(&mut connection).await
+    cmd("PING").query_async(&mut connection).await
 }
 
 #[test]
-fn smol_host_can_ping() -> Result<(), Box<dyn std::error::Error>> {
+fn test_smol_host_can_ping() -> Result<(), Box<dyn std::error::Error>> {
     let server = RedisServer::start()?;
     let response = block_on(ping(server.url()))?;
     assert_eq!(response, "PONG");
@@ -31,7 +34,7 @@ fn smol_host_can_ping() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[tokio::test]
-async fn tokio_host_can_ping() -> Result<(), Box<dyn std::error::Error>> {
+async fn test_tokio_host_can_ping() -> Result<(), Box<dyn std::error::Error>> {
     let server = RedisServer::start()?;
     let response = ping(server.url()).await?;
     assert_eq!(response, "PONG");
@@ -39,7 +42,7 @@ async fn tokio_host_can_ping() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
-fn unified_redis_features_do_not_require_global_preference() -> Result<(), Box<dyn std::error::Error>> {
+fn test_unified_redis_features_do_not_require_global_preference() -> Result<(), Box<dyn std::error::Error>> {
     let server = RedisServer::start()?;
     let response = block_on(ping(server.url()))?;
     assert_eq!(response, "PONG");
@@ -47,7 +50,7 @@ fn unified_redis_features_do_not_require_global_preference() -> Result<(), Box<d
 }
 
 #[test]
-fn redis_6_2_supports_stream_ping() -> Result<(), Box<dyn std::error::Error>> {
+fn test_redis_6_2_supports_stream_ping() -> Result<(), Box<dyn std::error::Error>> {
     let server = RedisServer::start_version("6.2-alpine")?;
     let response = block_on(ping(server.url()))?;
     assert_eq!(response, "PONG");
@@ -55,23 +58,23 @@ fn redis_6_2_supports_stream_ping() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
-fn redis_6_2_supports_pending_entry_recovery() -> Result<(), Box<dyn std::error::Error>> {
+fn test_redis_6_2_supports_pending_entry_recovery() -> Result<(), Box<dyn std::error::Error>> {
     let server = RedisServer::start_version("6.2-alpine")?;
-    let client = redis::Client::open(server.url())?;
+    let client = Client::open(server.url())?;
     let mut connection = client.get_connection()?;
-    let _: String = redis::cmd("XADD")
+    let _: String = cmd("XADD")
         .arg("test:stream")
         .arg("*")
         .arg("wire")
         .arg("value")
         .query(&mut connection)?;
-    let _: () = redis::cmd("XGROUP")
+    let _: () = cmd("XGROUP")
         .arg("CREATE")
         .arg("test:stream")
         .arg("test-group")
         .arg("0-0")
         .query(&mut connection)?;
-    let read: Option<StreamReadReply> = redis::cmd("XREADGROUP")
+    let read: Option<StreamReadReply> = cmd("XREADGROUP")
         .arg("GROUP")
         .arg("test-group")
         .arg("first-consumer")
@@ -83,7 +86,7 @@ fn redis_6_2_supports_pending_entry_recovery() -> Result<(), Box<dyn std::error:
         read.map(|reply| reply.keys.into_iter().map(|stream| stream.ids.len()).sum::<usize>()),
         Some(1)
     );
-    let claimed: StreamAutoClaimReply = redis::cmd("XAUTOCLAIM")
+    let claimed: StreamAutoClaimReply = cmd("XAUTOCLAIM")
         .arg("test:stream")
         .arg("test-group")
         .arg("second-consumer")

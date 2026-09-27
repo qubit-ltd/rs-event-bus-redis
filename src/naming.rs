@@ -7,12 +7,62 @@
 // =============================================================================
 //! Collision-safe Redis key construction.
 
-/// Builds a namespaced stream key from length-prefixed components.
+/// Builds a Redis stream key whose length-prefixed components cannot collide.
+///
+/// The namespace and topic are encoded as UTF-8 byte lengths followed by their
+/// original contents. This keeps component boundaries unambiguous even when a
+/// value contains `:`. The function does not validate either input; callers
+/// that accept user configuration should validate it before key construction.
+///
+/// # Parameters
+///
+/// - `namespace`: Application scope shared by related providers.
+/// - `topic`: Logical topic whose events are stored in the stream.
+///
+/// # Returns
+///
+/// A stable Redis key for this namespace and topic pair.
+///
+/// # Examples
+///
+/// ```
+/// use qubit_event_bus_redis::naming::stream_key;
+///
+/// let key = stream_key("orders", "created");
+/// assert_eq!(key, "qubit:stream:6:orders:7:created");
+/// ```
 pub fn stream_key(namespace: &str, topic: &str) -> String {
     format!("qubit:stream:{}:{namespace}:{}:{topic}", namespace.len(), topic.len())
 }
 
-/// Builds a stable Redis consumer-group name.
+/// Builds a stable Redis consumer-group name from subscription identity.
+///
+/// When `group` is `None`, the subscriber ID becomes the group identity. An
+/// explicit group lets several subscribers share work while a different group
+/// receives its own copy of every stream entry. Component lengths count UTF-8
+/// bytes, so values containing `:` remain unambiguous.
+///
+/// # Parameters
+///
+/// - `namespace`: Application scope used by the corresponding stream key.
+/// - `topic`: Logical topic consumed by the group.
+/// - `subscriber`: Stable subscriber identity used when no group is supplied.
+/// - `group`: Optional shared group identity.
+///
+/// # Returns
+///
+/// A deterministic Redis consumer-group name.
+///
+/// # Examples
+///
+/// ```
+/// use qubit_event_bus_redis::naming::group_name;
+///
+/// assert_eq!(
+///     group_name("orders", "created", "billing", None),
+///     group_name("orders", "created", "billing", Some("billing")),
+/// );
+/// ```
 pub fn group_name(namespace: &str, topic: &str, subscriber: &str, group: Option<&str>) -> String {
     let group = group.unwrap_or(subscriber);
     format!(

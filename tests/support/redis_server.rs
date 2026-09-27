@@ -12,6 +12,8 @@ use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
+use redis::Client;
+
 /// Owns a Redis container and removes it when dropped.
 pub struct RedisServer {
     container_id: String,
@@ -50,7 +52,7 @@ impl RedisServer {
             url: format!("redis://127.0.0.1:{port}/"),
         };
         for _ in 0..50 {
-            if redis::Client::open(server.url.as_str())
+            if Client::open(server.url.as_str())
                 .and_then(|client| client.get_connection())
                 .is_ok()
             {
@@ -73,7 +75,7 @@ impl RedisServer {
             .into());
         }
         for _ in 0..100 {
-            if redis::Client::open(self.url.as_str())
+            if Client::open(self.url.as_str())
                 .and_then(|client| client.get_connection())
                 .is_ok()
             {

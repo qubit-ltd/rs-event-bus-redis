@@ -35,7 +35,10 @@ use qubit_event_bus::spi::SpiSubscriptionRequest;
 use qubit_event_bus::spi::TopicAddress;
 use qubit_event_bus::spi::TransportPayload;
 use qubit_event_bus_redis::r#async::AsyncRedisEventBusProvider;
+use qubit_id::Id;
 use qubit_spi::AsyncServiceProvider;
+use redis::Client;
+use redis::cmd;
 use support::sentinel::SentinelServer;
 
 #[test]
@@ -56,7 +59,7 @@ fn test_async_sentinel_reconnects_after_master_failover() -> Result<(), Box<dyn 
         bus.publish(message("events", "after-failover-async", b"after")?)
             .await?;
         let request = SpiSubscriptionRequest::new(
-            qubit_id::Id::new(2002),
+            Id::new(2002),
             TopicAddress::new("events")?,
             SubscriberId::new("worker-two")?,
             Some(ConsumerGroup::new("sentinel-workers")?),
@@ -99,13 +102,13 @@ fn test_async_sentinel_claims_unsettled_record_after_promotion() -> Result<(), B
     let original_port = sentinel.master_port()?;
     let pending_message = message("events", "pending-before-async-promotion", b"pending")?;
     block_on(async { bus.publish(pending_message).await })?;
-    let client = redis::Client::open(format!("redis://127.0.0.1:{original_port}/"))?;
+    let client = Client::open(format!("redis://127.0.0.1:{original_port}/"))?;
     let mut connection = client.get_connection()?;
-    let replicas: usize = redis::cmd("WAIT").arg(1).arg(5_000).query(&mut connection)?;
+    let replicas: usize = cmd("WAIT").arg(1).arg(5_000).query(&mut connection)?;
     assert_eq!(replicas, 1);
     block_on(async {
         let request = SpiSubscriptionRequest::new(
-            qubit_id::Id::new(2101),
+            Id::new(2101),
             TopicAddress::new("events")?,
             SubscriberId::new("worker-one")?,
             Some(ConsumerGroup::new("sentinel-workers")?),
@@ -128,7 +131,7 @@ fn test_async_sentinel_claims_unsettled_record_after_promotion() -> Result<(), B
     sentinel.stop_original_master()?;
     block_on(async {
         let request = SpiSubscriptionRequest::new(
-            qubit_id::Id::new(2102),
+            Id::new(2102),
             TopicAddress::new("events")?,
             SubscriberId::new("worker-two")?,
             Some(ConsumerGroup::new("sentinel-workers")?),

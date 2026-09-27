@@ -33,10 +33,10 @@ pub mod wire;
 /// Versioned Redis wire fields.
 mod wire_fields;
 
-#[cfg(feature = "sync")]
 /// Synchronous SPI implementation.
+#[cfg(feature = "sync")]
 pub mod sync;
 
-#[cfg(feature = "async")]
 /// Asynchronous SPI implementation.
+#[cfg(feature = "async")]
 pub mod r#async;
