@@ -30,6 +30,7 @@ use qubit_event_bus::spi::ShutdownMode;
 use qubit_event_bus::spi::ShutdownOutcome;
 use qubit_event_bus::spi::SpiFuture;
 use qubit_event_bus::spi::SpiSubscriptionRequest;
+use qubit_event_bus::spi::SubscriptionModes;
 use redis::RedisError;
 use redis::cmd;
 
@@ -71,6 +72,7 @@ impl AsyncEventBusSpi for AsyncRedisEventBus {
             PublishGuarantee::Accepted,
             PublishVisibility::Opaque,
         )
+        .with_subscription_modes(SubscriptionModes::DURABLE)
     }
 
     /// Appends an encoded event to the topic stream with Redis `XADD`.
@@ -109,8 +111,12 @@ impl AsyncEventBusSpi for AsyncRedisEventBus {
                 .get_async_connection()
                 .await
                 .map_err(|_| spi_error("publish", Some(&topic), RedisProviderError::Operation("connect")))?;
-            let result: Result<String, RedisError> = cmd("XADD")
-                .arg(key)
+            let mut command = cmd("XADD");
+            command.arg(key);
+            if let Some(maxlen) = self.settings.stream_maxlen_approx() {
+                command.arg("MAXLEN").arg("~").arg(maxlen.get());
+            }
+            let result: Result<String, RedisError> = command
                 .arg("*")
                 .arg("wire")
                 .arg(payload)
@@ -303,6 +309,7 @@ mod tests {
     use qubit_event_bus::spi::ShutdownMode;
     use qubit_event_bus::spi::ShutdownOutcome;
     use qubit_event_bus::spi::SpiSubscriptionRequest;
+    use qubit_event_bus::spi::SubscriptionModes;
     use qubit_event_bus::spi::TopicAddress;
     use qubit_event_bus::spi::TransportPayload;
     use qubit_id::Id;
@@ -320,6 +327,7 @@ mod tests {
         };
 
         assert_eq!(bus.capabilities().payload_modes(), PayloadModes::Encoded);
+        assert_eq!(bus.capabilities().subscription_modes(), SubscriptionModes::DURABLE);
         assert_eq!(
             block_on(bus.shutdown(ShutdownMode::Immediate)).expect("shutdown succeeds"),
             ShutdownOutcome::Complete

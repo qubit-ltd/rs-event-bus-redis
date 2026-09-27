@@ -29,6 +29,7 @@ use qubit_event_bus::spi::SettlementCapabilities;
 use qubit_event_bus::spi::ShutdownMode;
 use qubit_event_bus::spi::ShutdownOutcome;
 use qubit_event_bus::spi::SpiSubscriptionRequest;
+use qubit_event_bus::spi::SubscriptionModes;
 use qubit_event_bus::spi::TopicAddress;
 use redis::RedisError;
 use redis::cmd;
@@ -98,8 +99,12 @@ impl EventBusSpi for RedisEventBus {
                 RedisProviderError::Operation("connect"),
             )
         })?;
-        let message_id: String = cmd("XADD")
-            .arg(&key)
+        let mut command = cmd("XADD");
+        command.arg(&key);
+        if let Some(maxlen) = self.settings.stream_maxlen_approx() {
+            command.arg("MAXLEN").arg("~").arg(maxlen.get());
+        }
+        let message_id: String = command
             .arg("*")
             .arg("wire")
             .arg(payload)
@@ -260,6 +265,7 @@ pub(super) const fn redis_capabilities() -> EventBusCapabilities {
         PublishGuarantee::Accepted,
         PublishVisibility::Opaque,
     )
+    .with_subscription_modes(SubscriptionModes::DURABLE)
 }
 
 /// Wraps a provider failure without retaining raw Redis diagnostics.
@@ -306,6 +312,7 @@ mod tests {
     use qubit_event_bus::spi::ShutdownMode;
     use qubit_event_bus::spi::ShutdownOutcome;
     use qubit_event_bus::spi::SpiSubscriptionRequest;
+    use qubit_event_bus::spi::SubscriptionModes;
     use qubit_event_bus::spi::TopicAddress;
     use qubit_event_bus::spi::TransportPayload;
     use qubit_id::Id;
@@ -323,6 +330,7 @@ mod tests {
         };
 
         assert_eq!(bus.capabilities().payload_modes(), PayloadModes::Encoded);
+        assert_eq!(bus.capabilities().subscription_modes(), SubscriptionModes::DURABLE);
         assert_eq!(
             bus.shutdown(ShutdownMode::Immediate).expect("shutdown succeeds"),
             ShutdownOutcome::Complete

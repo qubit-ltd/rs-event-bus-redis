@@ -9,6 +9,8 @@
 
 mod redis_credentials;
 
+use std::num::NonZeroUsize;
+
 use qubit_event_bus::model::ProviderOptions;
 use qubit_event_bus::registry::EventBusConfig;
 use redis::Client as RedisClient;
@@ -52,6 +54,8 @@ pub struct RedisEventBusConfig {
     max_unsettled_per_subscription: usize,
     /// Maximum number of idle synchronous standalone connections retained.
     max_idle_connections: usize,
+    /// Optional approximate maximum length for each Redis stream.
+    stream_maxlen_approx: Option<NonZeroUsize>,
 }
 
 impl std::fmt::Debug for RedisEventBusConfig {
@@ -72,6 +76,7 @@ impl std::fmt::Debug for RedisEventBusConfig {
             .field("claim_min_idle_ms", &self.claim_min_idle_ms)
             .field("max_unsettled_per_subscription", &self.max_unsettled_per_subscription)
             .field("max_idle_connections", &self.max_idle_connections)
+            .field("stream_maxlen_approx", &self.stream_maxlen_approx)
             .finish()
     }
 }
@@ -89,6 +94,7 @@ impl Default for RedisEventBusConfig {
             claim_min_idle_ms: 30_000,
             max_unsettled_per_subscription: 100,
             max_idle_connections: 8,
+            stream_maxlen_approx: None,
         }
     }
 }
@@ -119,6 +125,7 @@ impl RedisEventBusConfig {
             claim_min_idle_ms: 30_000,
             max_unsettled_per_subscription: 100,
             max_idle_connections: 8,
+            stream_maxlen_approx: None,
         }
     }
 
@@ -233,6 +240,15 @@ impl RedisEventBusConfig {
         self.max_idle_connections
     }
 
+    /// Returns the optional approximate maximum entry count per stream.
+    ///
+    /// Redis may trim entries that are still needed by consumers when this
+    /// option is enabled.
+    #[must_use]
+    pub const fn stream_maxlen_approx(&self) -> Option<NonZeroUsize> {
+        self.stream_maxlen_approx
+    }
+
     /// Parses and validates Redis settings from facade provider options.
     ///
     /// Credential options contain environment-variable names, not secret
@@ -304,6 +320,16 @@ impl RedisEventBusConfig {
             })
             .transpose()?
             .unwrap_or(8);
+        let stream_maxlen_approx = options
+            .get("redis.stream_maxlen_approx")
+            .map(|value| {
+                value
+                    .parse::<usize>()
+                    .ok()
+                    .and_then(NonZeroUsize::new)
+                    .ok_or(RedisProviderError::Configuration("invalid redis.stream_maxlen_approx"))
+            })
+            .transpose()?;
         if sentinel_nodes.as_ref().is_some_and(Vec::is_empty) {
             return Err(RedisProviderError::Configuration(
                 "redis.sentinel.nodes must contain endpoints",
@@ -322,6 +348,7 @@ impl RedisEventBusConfig {
         config.claim_min_idle_ms = claim_min_idle_ms;
         config.max_unsettled_per_subscription = max_unsettled_per_subscription;
         config.max_idle_connections = max_idle_connections;
+        config.stream_maxlen_approx = stream_maxlen_approx;
         Ok(config)
     }
 

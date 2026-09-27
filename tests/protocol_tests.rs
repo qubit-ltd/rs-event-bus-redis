@@ -150,6 +150,8 @@ fn test_provider_options_validate_boundaries_and_sentinel_pairing() {
         [("redis.max_unsettled_per_subscription".into(), "NaN".into())].into(),
         [("redis.max_idle_connections".into(), "0".into())].into(),
         [("redis.max_idle_connections".into(), "65".into())].into(),
+        [("redis.stream_maxlen_approx".into(), "0".into())].into(),
+        [("redis.stream_maxlen_approx".into(), "nope".into())].into(),
         [("redis.claim_min_idle_ms".into(), "forever".into())].into(),
         [("redis.sentinel.nodes".into(), " , ".into())].into(),
         [("redis.sentinel.service_name".into(), "master".into())].into(),
@@ -166,6 +168,7 @@ fn test_provider_options_defaults_and_sentinel_credentials_are_redacted() {
     assert_eq!(defaults.connection_url(), "redis://127.0.0.1/");
     assert_eq!(defaults.namespace(), "qubit");
     assert_eq!(defaults.max_idle_connections(), 8);
+    assert_eq!(defaults.stream_maxlen_approx(), None);
     let options: ProviderOptions = [
         ("redis.sentinel.nodes".into(), "127.0.0.1:26379, 127.0.0.1:26380".into()),
         ("redis.sentinel.service_name".into(), "primary".into()),
@@ -181,6 +184,13 @@ fn test_provider_options_defaults_and_sentinel_credentials_are_redacted() {
     let config = RedisEventBusConfig::from_provider_options(&options).unwrap();
     assert_eq!(config.sentinel_nodes().unwrap().len(), 2);
     assert_eq!(config.sentinel_service(), Some("primary"));
+}
+
+#[test]
+fn stream_maxlen_approx_is_an_optional_positive_limit() {
+    let options: ProviderOptions = [("redis.stream_maxlen_approx".into(), "4096".into())].into();
+    let config = RedisEventBusConfig::from_provider_options(&options).unwrap();
+    assert_eq!(config.stream_maxlen_approx().map(|value| value.get()), Some(4096));
 }
 
 #[test]

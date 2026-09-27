@@ -66,6 +66,67 @@ fn test_async_close_makes_future_receives_return_closed() -> Result<(), Box<dyn 
     })
 }
 
+#[test]
+fn test_async_approximate_stream_limit_trims_old_entries_when_enabled() -> Result<(), Box<dyn std::error::Error>> {
+    use qubit_spi::AsyncServiceProvider;
+
+    let server = RedisServer::start()?;
+    let options: ProviderOptions = [
+        ("redis.url".into(), server.url().into()),
+        ("redis.namespace".into(), "async-limit-tests".into()),
+        ("redis.stream_maxlen_approx".into(), "10".into()),
+    ]
+    .into();
+    let bus = block_on(
+        AsyncRedisEventBusProvider.create_configured(&EventBusConfig::default().with_provider_options(options)),
+    )
+    .map_err(|failure| failure.into_error())?;
+    block_on(async {
+        for index in 0..250 {
+            bus.publish(message("trim-events", &format!("trim-{index}"), b"payload")?)
+                .await?;
+        }
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })?;
+
+    let mut connection = Client::open(server.url())?.get_connection()?;
+    let length: usize = cmd("XLEN")
+        .arg(stream_key("async-limit-tests", "trim-events"))
+        .query(&mut connection)?;
+    assert!(length < 250, "approximate trim left {length} entries");
+    Ok(())
+}
+
+#[test]
+fn test_async_stream_is_untrimmed_by_default() -> Result<(), Box<dyn std::error::Error>> {
+    use qubit_spi::AsyncServiceProvider;
+
+    let server = RedisServer::start()?;
+    let options: ProviderOptions = [
+        ("redis.url".into(), server.url().into()),
+        ("redis.namespace".into(), "async-default-retention".into()),
+    ]
+    .into();
+    let bus = block_on(
+        AsyncRedisEventBusProvider.create_configured(&EventBusConfig::default().with_provider_options(options)),
+    )
+    .map_err(|failure| failure.into_error())?;
+    block_on(async {
+        for index in 0..250 {
+            bus.publish(message("default-events", &format!("default-{index}"), b"payload")?)
+                .await?;
+        }
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })?;
+
+    let mut connection = Client::open(server.url())?.get_connection()?;
+    let length: usize = cmd("XLEN")
+        .arg(stream_key("async-default-retention", "default-events"))
+        .query(&mut connection)?;
+    assert_eq!(length, 250);
+    Ok(())
+}
+
 fn create_bus(server: &RedisServer) -> Result<Arc<dyn AsyncEventBusSpi>, Box<dyn std::error::Error>> {
     let options: ProviderOptions = [
         ("redis.url".into(), server.url().into()),

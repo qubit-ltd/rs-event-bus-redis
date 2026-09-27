@@ -67,6 +67,57 @@ fn test_sync_close_makes_future_receives_return_closed() -> Result<(), Box<dyn s
     Ok(())
 }
 
+#[test]
+fn test_sync_approximate_stream_limit_trims_old_entries_when_enabled() -> Result<(), Box<dyn std::error::Error>> {
+    use qubit_spi::ServiceProvider;
+
+    let server = RedisServer::start()?;
+    let options: ProviderOptions = [
+        ("redis.url".into(), server.url().into()),
+        ("redis.namespace".into(), "sync-limit-tests".into()),
+        ("redis.stream_maxlen_approx".into(), "10".into()),
+    ]
+    .into();
+    let bus = RedisEventBusProvider
+        .create_configured(&EventBusConfig::default().with_provider_options(options))
+        .map_err(|failure| failure.into_error())?;
+    for index in 0..250 {
+        bus.publish(message("trim-events", &format!("trim-{index}"), b"payload")?)?;
+    }
+
+    let mut connection = Client::open(server.url())?.get_connection()?;
+    let length: usize = cmd("XLEN")
+        .arg(stream_key("sync-limit-tests", "trim-events"))
+        .query(&mut connection)?;
+    assert!(length < 250, "approximate trim left {length} entries");
+    Ok(())
+}
+
+#[test]
+fn test_sync_stream_is_untrimmed_by_default() -> Result<(), Box<dyn std::error::Error>> {
+    use qubit_spi::ServiceProvider;
+
+    let server = RedisServer::start()?;
+    let options: ProviderOptions = [
+        ("redis.url".into(), server.url().into()),
+        ("redis.namespace".into(), "sync-default-retention".into()),
+    ]
+    .into();
+    let bus = RedisEventBusProvider
+        .create_configured(&EventBusConfig::default().with_provider_options(options))
+        .map_err(|failure| failure.into_error())?;
+    for index in 0..250 {
+        bus.publish(message("default-events", &format!("default-{index}"), b"payload")?)?;
+    }
+
+    let mut connection = Client::open(server.url())?.get_connection()?;
+    let length: usize = cmd("XLEN")
+        .arg(stream_key("sync-default-retention", "default-events"))
+        .query(&mut connection)?;
+    assert_eq!(length, 250);
+    Ok(())
+}
+
 fn create_bus(server: &RedisServer) -> Result<Arc<dyn EventBusSpi>, Box<dyn std::error::Error>> {
     let options: ProviderOptions = [
         ("redis.url".into(), server.url().into()),
