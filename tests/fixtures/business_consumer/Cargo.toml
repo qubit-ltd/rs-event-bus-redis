@@ -1,0 +1,12 @@
+[package]
+name = "redis-event-bus-business-consumer"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+qubit-event-bus = { version = "0.14.0", path = "../../../../rs-event-bus" }
+qubit-event-bus-redis = { path = "../../.." }
+qubit-spi = "0.13"
