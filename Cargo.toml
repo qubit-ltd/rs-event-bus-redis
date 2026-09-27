@@ -26,17 +26,17 @@ conformance = ["qubit-event-bus/conformance"]
 qubit-event-bus = { version = "0.14.0", path = "../rs-event-bus" }
 qubit-spi = "0.13"
 qubit-id = "0.6"
-async-lock = { version = "3", optional = true }
-redis = { version = "0.32.7", default-features = false, features = ["streams", "sentinel"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-thiserror = "2"
+async-lock = { version = "^3", optional = true }
+redis = { version = "^0.32.7", default-features = false, features = ["streams", "sentinel"] }
+serde = { version = "^1.0", features = ["derive"] }
+serde_json = "^1.0"
+thiserror = "^2.0"
 
 [dev-dependencies]
-futures-lite = "2"
+futures-lite = "^2"
 redis = { version = "0.32.7", default-features = false, features = ["tokio-comp", "streams", "sentinel"] }
-tempfile = "3"
-tokio = { version = "1", features = ["rt", "macros"] }
+tempfile = "^3.27"
+tokio = { version = "^1.53", features = ["rt", "macros"] }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage)', 'cfg(loom)'] }
