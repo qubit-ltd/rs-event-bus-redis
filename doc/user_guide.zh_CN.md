@@ -99,6 +99,10 @@ fn start_service() -> Result<(), Box<dyn std::error::Error>> {
 
 投递语义仍是至少一次。如果 handler 运行时间超过 `redis.claim_min_idle_ms`，其他 consumer 可能接管该 pending 记录。若 `XADD` 回复丢失，发布结果未知，重试可能产生重复事件。`redis.max_unsettled_per_subscription` 限制本地活跃投递数，默认值为 100。
 
+默认不限制 stream 长度。可在上方 `ProviderOptions` map 中添加 `("redis.stream_maxlen_approx".into(), "100000".into())` 启用近似裁剪。此后每次发布都会使用 `XADD MAXLEN ~ 100000`。Redis 可能裁剪尚未消费的记录，或消费组 pending 列表仍引用的记录；裁剪不保证投递，旧消息可能无法恢复。需要保留 pending 历史用于恢复时应保持此选项关闭。格式错误记录的隔离 stream 遵循单独的运维保留策略。
+
+如果记录在任何 consumer 读取前被裁剪，Redis 不会通过 `ReceiveOutcome::Gap` 报告它们。provider 无法识别缺失的记录 ID，因此启用裁剪意味着可能发生 delivery API 无法发现的历史丢失，应用应在外部监控保留状态。
+
 指定 `ConsumerGroup` 后，namespace、topic 和 group 相同的实例会共同分工。不同 group 各自维护读取位置，因此都能收到自己的副本。未指定 group 时，subscriber ID 用作 group 身份。
 
 ## 4. 驱动异步 SPI

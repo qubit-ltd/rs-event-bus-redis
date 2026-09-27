@@ -99,6 +99,10 @@ Malformed wire records are moved atomically to a group-specific quarantine strea
 
 Delivery remains at least once. If a handler runs longer than `redis.claim_min_idle_ms`, another consumer may claim its pending entry. A publish whose `XADD` reply is lost has an unknown outcome and may be duplicated if retried. `redis.max_unsettled_per_subscription` bounds locally active deliveries (default 100).
 
+Streams are unlimited by default. To enable approximate trimming, add `("redis.stream_maxlen_approx".into(), "100000".into())` to the `ProviderOptions` map shown above. Every publish then uses `XADD MAXLEN ~ 100000`. Redis may trim unread records or entries still referenced by a consumer group's pending list; trimming does not guarantee delivery and can make old work unrecoverable. Keep this disabled when pending history must remain available for recovery. Malformed-record quarantine streams follow their separate operator retention policy.
+
+Redis does not report a `ReceiveOutcome::Gap` for records trimmed before any consumer read them. The provider cannot identify those missing IDs, so applications must treat opt-in trimming as possible silent history loss and monitor retention outside the delivery API.
+
 With a `ConsumerGroup` set, instances using the same namespace, topic, and group share work. A different group gets its own stream cursor and receives its own copy. Without an explicit group, the subscriber ID becomes the group identity.
 
 ## 4. Run the asynchronous SPI

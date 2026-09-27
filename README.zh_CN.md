@@ -63,7 +63,7 @@ event-bus SPI 允许应用更换传输实现，而不改业务 handler。Redis S
 - 限制每个订阅的未结算活跃投递数，并原子隔离格式错误的 stream 记录；Redis 订阅必须显式使用 `Durable`。
 - 测试会通过 Docker 启动隔离的 Redis 6.2、Redis 7 和 Sentinel 服务。
 
-Redis 使用至少一次投递，业务 handler 应能处理重复事件。`XADD` 成功只表示 Redis 接受了命令，不能证明记录已经 fsync 或完成处理。当前不支持 Cluster、native/delayed delivery、TLS 配置、stream 自动裁剪或死信策略。stream 和消费组由运维人员负责清理。
+Redis 使用至少一次投递，业务 handler 应能处理重复事件。`XADD` 成功只表示 Redis 接受了命令，不能证明记录已经 fsync 或完成处理。默认不会裁剪 stream。设置 `redis.stream_maxlen_approx` 可显式启用 Redis `XADD MAXLEN ~ N`；近似保留策略可能删除尚未消费或仍处于 pending 的历史记录并产生缺口，仅在业务接受这类损失时使用。当前不支持 Cluster、native/delayed delivery、TLS 配置或死信策略。stream 和消费组由运维人员负责清理。
 
 ## 延伸阅读
 

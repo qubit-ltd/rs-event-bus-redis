@@ -63,7 +63,7 @@ The event-bus SPI lets an application choose a transport without changing busine
 - Bounded per-subscription unsettled delivery tracking and atomic quarantine for malformed stream records; Redis subscriptions must explicitly use `Durable`.
 - Test fixtures that start isolated Redis 6.2, Redis 7, and Sentinel services in Docker.
 
-Redis delivery is at least once. Handlers should tolerate duplicates. A successful `XADD` means Redis accepted the command; it does not prove the record was fsynced or processed. The provider does not implement Cluster, native/delayed delivery, TLS configuration, stream trimming, or a dead-letter policy. Stream and group cleanup is an operator task.
+Redis delivery is at least once. Handlers should tolerate duplicates. A successful `XADD` means Redis accepted the command; it does not prove the record was fsynced or processed. By default streams are not trimmed. Set `redis.stream_maxlen_approx` to opt into Redis `XADD MAXLEN ~ N`; this approximate retention can remove unread or pending history and cause gaps, so use it only when that loss policy is acceptable. The provider does not implement Cluster, native/delayed delivery, TLS configuration, or a dead-letter policy. Stream and group cleanup is an operator task.
 
 ## Learn More
 
