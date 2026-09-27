@@ -7,6 +7,7 @@
 // =============================================================================
 //! Docker-backed disposable Redis server for integration tests.
 
+use std::net::TcpListener;
 use std::process::Command;
 use std::thread;
 use std::time::Duration;
@@ -18,30 +19,32 @@ pub struct RedisServer {
 }
 
 impl RedisServer {
-    /// Starts an isolated Redis 7 service with a Docker-assigned host port.
+    /// Starts an isolated Redis 7 service with an available local host port.
     pub fn start() -> Result<Self, Box<dyn std::error::Error>> {
         Self::start_version("7-alpine")
     }
 
-    /// Starts a specific Redis image tag with a Docker-assigned host port.
+    /// Starts a specific Redis image tag with an available local host port.
     pub fn start_version(image_tag: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let image = format!("redis:{image_tag}");
+        let port = TcpListener::bind(("127.0.0.1", 0))?.local_addr()?.port();
+        let port_mapping = format!("127.0.0.1:{port}:6379");
         let output = Command::new("docker")
-            .args(["run", "--rm", "-d", "-p", "127.0.0.1::6379", &image])
+            .args([
+                "run",
+                "-d",
+                "-p",
+                port_mapping.as_str(),
+                &image,
+                "redis-server",
+                "--appendonly",
+                "yes",
+            ])
             .output()?;
         if !output.status.success() {
             return Err(format!("docker run failed: {}", String::from_utf8_lossy(&output.stderr)).into());
         }
         let container_id = String::from_utf8(output.stdout)?.trim().to_owned();
-        let port_output = Command::new("docker")
-            .args(["port", &container_id, "6379/tcp"])
-            .output()?;
-        if !port_output.status.success() {
-            let _ = Command::new("docker").args(["rm", "-f", &container_id]).status();
-            return Err("could not find the mapped Redis port".into());
-        }
-        let mapped = String::from_utf8(port_output.stdout)?;
-        let port = mapped.trim().rsplit(':').next().ok_or("missing mapped port")?;
         let server = Self {
             container_id,
             url: format!("redis://127.0.0.1:{port}/"),
@@ -56,6 +59,36 @@ impl RedisServer {
             thread::sleep(Duration::from_millis(100));
         }
         Err("Redis container did not become ready".into())
+    }
+
+    /// Restarts the isolated Redis container and waits for its port to accept
+    /// commands again.
+    pub fn restart(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let output = Command::new("docker").args(["restart", &self.container_id]).output()?;
+        if !output.status.success() {
+            return Err(format!(
+                "could not restart the isolated Redis server: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )
+            .into());
+        }
+        for _ in 0..100 {
+            if redis::Client::open(self.url.as_str())
+                .and_then(|client| client.get_connection())
+                .is_ok()
+            {
+                return Ok(());
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        let logs = Command::new("docker")
+            .args(["logs", "--tail", "30", &self.container_id])
+            .output()?;
+        Err(format!(
+            "Redis container did not become ready after restart: {}",
+            String::from_utf8_lossy(&logs.stdout)
+        )
+        .into())
     }
 
     /// Returns the connection URL of the isolated service.

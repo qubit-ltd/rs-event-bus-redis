@@ -523,6 +523,47 @@ fn test_async_client_builds_standalone_and_sentinel_authentication() -> Result<(
     })
 }
 
+#[test]
+fn test_async_recovers_pending_message_after_redis_restart() -> Result<(), Box<dyn std::error::Error>> {
+    let mut server = RedisServer::start()?;
+    let options: ProviderOptions = [
+        ("redis.url".into(), server.url().into()),
+        ("redis.namespace".into(), "async-tests".into()),
+        ("redis.claim_min_idle_ms".into(), "0".into()),
+    ]
+    .into();
+    let config = EventBusConfig::default().with_provider_options(options);
+    let bus =
+        block_on(AsyncRedisEventBusProvider.create_configured(&config)).map_err(|failure| failure.into_error())?;
+    block_on(async {
+        bus.publish(message("restart", "async-restart", b"durable")?).await?;
+        let mut first = bus
+            .subscribe(group_request("restart", "before-restart", "restart-group"))
+            .await?;
+        let ReceiveOutcome::Message(received) = first.receive(Duration::from_secs(2)).await? else {
+            return Err("pre-restart event was not received".into());
+        };
+        assert_eq!(received.id().as_str(), "async-restart");
+        drop(first);
+
+        server.restart()?;
+        let mut recovered = bus
+            .subscribe(group_request("restart", "after-restart", "restart-group"))
+            .await?;
+        let ReceiveOutcome::Message(received) = recovered.receive(Duration::from_secs(3)).await? else {
+            return Err("pending event was not recovered after Redis restart".into());
+        };
+        assert_eq!(received.id().as_str(), "async-restart");
+        recovered
+            .settle(
+                received.settlement().ok_or("recovered event has no settlement token")?,
+                DeliveryDisposition::Accept,
+            )
+            .await?;
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })
+}
+
 fn group_request(topic: &str, subscriber: &str, group: &str) -> SpiSubscriptionRequest {
     SpiSubscriptionRequest::new(
         qubit_id::Id::new(SUBSCRIPTION_IDS.fetch_add(1, Ordering::Relaxed)),

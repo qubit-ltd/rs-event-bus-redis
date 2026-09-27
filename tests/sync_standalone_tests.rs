@@ -439,3 +439,38 @@ fn test_sync_client_builds_standalone_and_sentinel_authentication() -> Result<()
     assert!(sentinel.publish(message("auth", "sentinel-auth", b"x")?).is_err());
     Ok(())
 }
+
+#[test]
+fn test_sync_recovers_pending_message_after_redis_restart() -> Result<(), Box<dyn std::error::Error>> {
+    let mut server = RedisServer::start()?;
+    let bus = create_bus(&server)?;
+    bus.publish(message("restart", "sync-restart", b"durable")?)?;
+    let mut first = bus.subscribe(request(
+        "restart",
+        "before-restart",
+        Some("restart-group"),
+        StartPosition::Earliest,
+    )?)?;
+    let ReceiveOutcome::Message(received) = first.receive(Duration::from_secs(2))? else {
+        return Err("pre-restart event was not received".into());
+    };
+    assert_eq!(received.id().as_str(), "sync-restart");
+    drop(first);
+
+    server.restart()?;
+    let mut recovered = bus.subscribe(request(
+        "restart",
+        "after-restart",
+        Some("restart-group"),
+        StartPosition::Earliest,
+    )?)?;
+    let ReceiveOutcome::Message(received) = recovered.receive(Duration::from_secs(3))? else {
+        return Err("pending event was not recovered after Redis restart".into());
+    };
+    assert_eq!(received.id().as_str(), "sync-restart");
+    recovered.settle(
+        received.settlement().ok_or("recovered event has no settlement token")?,
+        DeliveryDisposition::Accept,
+    )?;
+    Ok(())
+}
