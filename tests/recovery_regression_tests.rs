@@ -733,3 +733,177 @@ fn async_ephemeral_is_rejected_without_group() -> Result<(), Box<dyn std::error:
         Ok::<(), Box<dyn std::error::Error>>(())
     })
 }
+
+#[cfg(feature = "sync")]
+#[test]
+fn sync_empty_receive_observes_zero_and_bounded_timeouts() -> Result<(), Box<dyn std::error::Error>> {
+    let server = RedisServer::start()?;
+    let bus = sync_bus(&server, "timeout-sync", 2)?;
+    let mut receiver = bus.subscribe(request(
+        "events",
+        "timeout-worker",
+        "timeout-group",
+        SubscriptionDurability::Durable,
+    )?)?;
+    assert!(matches!(receiver.receive(Duration::ZERO)?, ReceiveOutcome::TimedOut));
+    assert!(matches!(
+        receiver.receive(Duration::from_millis(20))?,
+        ReceiveOutcome::TimedOut
+    ));
+    Ok(())
+}
+
+#[cfg(feature = "async")]
+#[test]
+fn async_empty_receive_observes_zero_and_bounded_timeouts() -> Result<(), Box<dyn std::error::Error>> {
+    futures_lite::future::block_on(async {
+        let server = RedisServer::start()?;
+        let bus = async_bus(&server, "timeout-async", 2).await?;
+        let mut receiver = bus
+            .subscribe(request(
+                "events",
+                "timeout-worker",
+                "timeout-group",
+                SubscriptionDurability::Durable,
+            )?)
+            .await?;
+        assert!(matches!(
+            receiver.receive(Duration::ZERO).await?,
+            ReceiveOutcome::TimedOut
+        ));
+        assert!(matches!(
+            receiver.receive(Duration::from_millis(20)).await?,
+            ReceiveOutcome::TimedOut
+        ));
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })
+}
+
+#[cfg(feature = "sync")]
+#[test]
+fn sync_xack_failure_keeps_token_retryable_and_slot_occupied() -> Result<(), Box<dyn std::error::Error>> {
+    use qubit_event_bus::spi::DeliveryDisposition;
+    let server = RedisServer::start()?;
+    let bus = sync_bus(&server, "settle-error-sync", 1)?;
+    let key = stream_key("settle-error-sync", "events");
+    bus.publish(event("events", "settle-error-sync", b"payload")?)?;
+    let mut receiver = bus.subscribe(request(
+        "events",
+        "settle-error-worker",
+        "settle-error-group",
+        SubscriptionDurability::Durable,
+    )?)?;
+    let ReceiveOutcome::Message(message) = receiver.receive(Duration::from_secs(2))? else {
+        return Err("message missing".into());
+    };
+    let token = message.settlement().ok_or("settlement token missing")?;
+    let mut connection = Client::open(server.url())?.get_connection()?;
+    let _: String = cmd("SET").arg(key).arg("wrong-type").query(&mut connection)?;
+    assert!(receiver.settle(token, DeliveryDisposition::Accept).is_err());
+    assert!(receiver.settle(token, DeliveryDisposition::Accept).is_err());
+    assert!(matches!(receiver.receive(Duration::ZERO)?, ReceiveOutcome::TimedOut));
+    Ok(())
+}
+
+#[cfg(feature = "async")]
+#[test]
+fn async_xack_failure_keeps_token_retryable_and_slot_occupied() -> Result<(), Box<dyn std::error::Error>> {
+    use qubit_event_bus::spi::DeliveryDisposition;
+    futures_lite::future::block_on(async {
+        let server = RedisServer::start()?;
+        let bus = async_bus(&server, "settle-error-async", 1).await?;
+        let key = stream_key("settle-error-async", "events");
+        bus.publish(event("events", "settle-error-async", b"payload")?).await?;
+        let mut receiver = bus
+            .subscribe(request(
+                "events",
+                "settle-error-worker",
+                "settle-error-group",
+                SubscriptionDurability::Durable,
+            )?)
+            .await?;
+        let ReceiveOutcome::Message(message) = receiver.receive(Duration::from_secs(2)).await? else {
+            return Err("message missing".into());
+        };
+        let token = message.settlement().ok_or("settlement token missing")?;
+        let mut connection = Client::open(server.url())?.get_connection()?;
+        let _: String = cmd("SET").arg(key).arg("wrong-type").query(&mut connection)?;
+        assert!(receiver.settle(token, DeliveryDisposition::Accept).await.is_err());
+        assert!(receiver.settle(token, DeliveryDisposition::Accept).await.is_err());
+        assert!(matches!(
+            receiver.receive(Duration::ZERO).await?,
+            ReceiveOutcome::TimedOut
+        ));
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })
+}
+
+#[cfg(feature = "sync")]
+#[test]
+fn sync_claim_command_failure_is_reported_as_retryable() -> Result<(), Box<dyn std::error::Error>> {
+    let server = RedisServer::start()?;
+    let bus = sync_bus(&server, "claim-error-sync", 2)?;
+    let key = stream_key("claim-error-sync", "events");
+    let group = group_name("claim-error-sync", "events", "claim-worker", Some("claim-group"));
+    let mut receiver = bus.subscribe(request(
+        "events",
+        "claim-worker",
+        "claim-group",
+        SubscriptionDurability::Durable,
+    )?)?;
+    let mut connection = Client::open(server.url())?.get_connection()?;
+    let _: usize = cmd("XGROUP")
+        .arg("DESTROY")
+        .arg(key)
+        .arg(group)
+        .query(&mut connection)?;
+    let error = match receiver.receive(Duration::ZERO) {
+        Ok(_) => return Err("removed group should fail XAUTOCLAIM".into()),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        qubit_event_bus::error::SpiError::Operation {
+            retryable: Some(true),
+            ..
+        }
+    ));
+    Ok(())
+}
+
+#[cfg(feature = "async")]
+#[test]
+fn async_claim_command_failure_is_reported_as_retryable() -> Result<(), Box<dyn std::error::Error>> {
+    futures_lite::future::block_on(async {
+        let server = RedisServer::start()?;
+        let bus = async_bus(&server, "claim-error-async", 2).await?;
+        let key = stream_key("claim-error-async", "events");
+        let group = group_name("claim-error-async", "events", "claim-worker", Some("claim-group"));
+        let mut receiver = bus
+            .subscribe(request(
+                "events",
+                "claim-worker",
+                "claim-group",
+                SubscriptionDurability::Durable,
+            )?)
+            .await?;
+        let mut connection = Client::open(server.url())?.get_connection()?;
+        let _: usize = cmd("XGROUP")
+            .arg("DESTROY")
+            .arg(key)
+            .arg(group)
+            .query(&mut connection)?;
+        let error = match receiver.receive(Duration::ZERO).await {
+            Ok(_) => return Err("removed group should fail XAUTOCLAIM".into()),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            qubit_event_bus::error::SpiError::Operation {
+                retryable: Some(true),
+                ..
+            }
+        ));
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })
+}
