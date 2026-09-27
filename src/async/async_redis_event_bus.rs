@@ -279,3 +279,112 @@ fn valid_stream_id(value: &str) -> bool {
         && milliseconds.bytes().all(|byte| byte.is_ascii_digit())
         && sequence.bytes().all(|byte| byte.is_ascii_digit())
 }
+
+#[cfg(test)]
+mod tests {
+    use std::any::TypeId;
+    use std::sync::Arc;
+    use std::time::SystemTime;
+
+    use futures_lite::future::block_on;
+    use qubit_event_bus::model::ConsumerGroup;
+    use qubit_event_bus::model::ContentType;
+    use qubit_event_bus::model::EventId;
+    use qubit_event_bus::model::Headers;
+    use qubit_event_bus::model::ProviderOptions;
+    use qubit_event_bus::model::StartPosition;
+    use qubit_event_bus::model::SubscriberId;
+    use qubit_event_bus::model::SubscriptionDurability;
+    use qubit_event_bus::spi::AsyncEventBusSpi;
+    use qubit_event_bus::spi::AsyncEventSubscriptionSpi;
+    use qubit_event_bus::spi::EncodedPayload;
+    use qubit_event_bus::spi::OutboundMessage;
+    use qubit_event_bus::spi::PayloadModes;
+    use qubit_event_bus::spi::ShutdownMode;
+    use qubit_event_bus::spi::ShutdownOutcome;
+    use qubit_event_bus::spi::SpiSubscriptionRequest;
+    use qubit_event_bus::spi::TopicAddress;
+    use qubit_event_bus::spi::TransportPayload;
+    use qubit_id::Id;
+
+    use super::AsyncRedisEventBus;
+    use crate::client::Client;
+    use crate::config::RedisEventBusConfig;
+
+    #[test]
+    fn test_capabilities_and_shutdown_are_available_without_redis() {
+        let settings = RedisEventBusConfig::default();
+        let bus = AsyncRedisEventBus {
+            client: std::sync::Arc::new(Client::new(&settings).expect("default Redis client is valid")),
+            settings,
+        };
+
+        assert_eq!(bus.capabilities().payload_modes(), PayloadModes::Encoded);
+        assert_eq!(
+            block_on(bus.shutdown(ShutdownMode::Immediate)).expect("shutdown succeeds"),
+            ShutdownOutcome::Complete
+        );
+    }
+
+    #[test]
+    fn test_stream_id_validation_rejects_malformed_components() {
+        assert!(super::valid_stream_id("123-0"));
+        for value in ["", "123", "-0", "123-", "a-0", "1-b", "1-2-3"] {
+            assert!(!super::valid_stream_id(value), "accepted malformed ID {value:?}");
+        }
+    }
+
+    #[test]
+    fn connection_failures_are_returned_for_publish_and_subscribe() {
+        block_on(async {
+            let settings = RedisEventBusConfig::new("redis://127.0.0.1:1/", "connection-errors");
+            let bus = AsyncRedisEventBus {
+                client: Arc::new(Client::new(&settings).expect("unreachable Redis URL is syntactically valid")),
+                settings,
+            };
+            let topic = TopicAddress::new("events").expect("topic is valid");
+            let message = OutboundMessage::new(
+                topic.clone(),
+                EventId::new("event-1").expect("event ID is valid"),
+                SystemTime::UNIX_EPOCH,
+                Headers::new(),
+                None,
+                None,
+                TransportPayload::Encoded(EncodedPayload::new(
+                    Arc::from(vec![1_u8]),
+                    ContentType::new("application/octet-stream").expect("content type is valid"),
+                    None,
+                )),
+            );
+            let request = SpiSubscriptionRequest::new(
+                Id::new(1),
+                topic,
+                SubscriberId::new("worker").expect("subscriber ID is valid"),
+                Some(ConsumerGroup::new("workers").expect("group name is valid")),
+                SubscriptionDurability::Durable,
+                StartPosition::Earliest,
+                ProviderOptions::new(),
+                TypeId::of::<Vec<u8>>(),
+            );
+
+            assert!(bus.publish(message).await.is_err());
+            assert!(bus.subscribe(request).await.is_err());
+
+            let mut receiver = super::Subscription {
+                client: Arc::clone(&bus.client),
+                receive_connection: None,
+                key: "connection-errors:events".into(),
+                group: "workers".into(),
+                quarantine: "connection-errors:quarantine".into(),
+                consumer: "worker".into(),
+                topic: TopicAddress::new("events").expect("topic is valid"),
+                subscription_id: Id::new(2),
+                closed: false,
+                claim_min_idle_ms: 0,
+                max_unsettled: 1,
+                recovery: Arc::new(std::sync::Mutex::new(crate::recovery::RecoveryState::new())),
+            };
+            assert!(receiver.receive(std::time::Duration::ZERO).await.is_err());
+        });
+    }
+}

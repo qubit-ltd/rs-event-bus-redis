@@ -16,10 +16,12 @@ use qubit_event_bus::model::ContentType;
 use qubit_event_bus::model::EventId;
 use qubit_event_bus::model::Headers;
 use qubit_event_bus::model::ProviderOptions;
+use qubit_event_bus::model::SchemaId;
 use qubit_event_bus::model::StartPosition;
 use qubit_event_bus::model::SubscriberId;
 use qubit_event_bus::model::SubscriptionDurability;
 use qubit_event_bus::spi::EncodedPayload;
+use qubit_event_bus::spi::OrderingKey;
 use qubit_event_bus::spi::OutboundMessage;
 use qubit_event_bus::spi::SpiSubscriptionRequest;
 use qubit_event_bus::spi::TopicAddress;
@@ -71,6 +73,44 @@ fn test_encoded_payload_round_trips_binary_bytes() -> Result<(), Box<dyn std::er
         panic!("wire decoder must preserve encoded payloads");
     };
     assert_eq!(payload.bytes(), original);
+    Ok(())
+}
+
+#[test]
+fn test_wire_fields_preserve_optional_metadata_and_clamp_pre_epoch_timestamp() -> Result<(), Box<dyn std::error::Error>>
+{
+    let message = OutboundMessage::new(
+        TopicAddress::new("events")?,
+        EventId::new("event-before-epoch")?,
+        SystemTime::UNIX_EPOCH - std::time::Duration::from_secs(1),
+        Headers::new(),
+        Some(OrderingKey::new("partition-1").ok_or("valid ordering key was rejected")?),
+        None,
+        TransportPayload::Encoded(EncodedPayload::new(
+            Arc::from(&b"payload"[..]),
+            ContentType::new("application/octet-stream")?,
+            Some(SchemaId::new("schema-v1")?),
+        )),
+    );
+
+    let fields = WireFields::from_outbound(&message)?;
+    assert_eq!(fields.timestamp_ms, 0);
+    assert_eq!(fields.ordering_key.as_deref(), Some("partition-1"));
+    assert_eq!(fields.schema_id.as_deref(), Some("schema-v1"));
+
+    let (topic, event_id, timestamp, _, ordering_key, TransportPayload::Encoded(payload)) =
+        fields.into_parts(TopicAddress::new("events")?)?
+    else {
+        panic!("wire decoder must preserve encoded payloads");
+    };
+    assert_eq!(topic.as_str(), "events");
+    assert_eq!(event_id.as_str(), "event-before-epoch");
+    assert_eq!(timestamp, SystemTime::UNIX_EPOCH);
+    assert_eq!(
+        ordering_key.map(|key| key.as_str().to_owned()).as_deref(),
+        Some("partition-1")
+    );
+    assert_eq!(payload.schema_id().map(|schema| schema.as_str()), Some("schema-v1"));
     Ok(())
 }
 

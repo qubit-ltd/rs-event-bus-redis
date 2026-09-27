@@ -324,3 +324,83 @@ fn build_sentinel<T: IntoConnectionInfo>(
     }
     builder.build()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Client;
+    #[cfg(feature = "sync")]
+    use super::SyncConnectionPool;
+    use crate::config::RedisEventBusConfig;
+
+    fn sentinel_client() -> Client {
+        let options: qubit_event_bus::model::ProviderOptions = [
+            ("redis.sentinel.nodes".into(), "127.0.0.1:26379".into()),
+            ("redis.sentinel.service_name".into(), "test-master".into()),
+            ("redis.sentinel.username_env".into(), "PATH".into()),
+            ("redis.sentinel.password_env".into(), "HOME".into()),
+        ]
+        .into();
+        let settings = RedisEventBusConfig::from_provider_options(&options)
+            .expect("Sentinel settings are valid with existing environment variables");
+        Client::new(&settings).expect("Sentinel client configuration is valid")
+    }
+
+    fn client_without_sentinel() -> Client {
+        Client {
+            standalone: None,
+            #[cfg(feature = "sync")]
+            sync_pool: std::sync::Arc::new(SyncConnectionPool::new(1)),
+            #[cfg(feature = "async")]
+            async_standalone_connection: async_lock::Mutex::new(None),
+            #[cfg(feature = "sync")]
+            sync_sentinel: None,
+            #[cfg(feature = "async")]
+            async_sentinel: None,
+        }
+    }
+
+    #[cfg(feature = "sync")]
+    #[test]
+    fn sync_connection_methods_report_a_missing_sentinel() {
+        let client = client_without_sentinel();
+        assert!(client.get_connection().is_err());
+        assert!(client.get_dedicated_connection().is_err());
+    }
+
+    #[cfg(feature = "sync")]
+    #[test]
+    fn sync_connection_methods_report_poisoned_locks() {
+        let client = client_without_sentinel();
+        let pool = std::sync::Arc::clone(&client.sync_pool);
+        let _ = std::thread::spawn(move || {
+            let _guard = pool.idle.lock().expect("pool lock is initially healthy");
+            panic!("poison connection pool lock for error-path coverage");
+        })
+        .join();
+        assert!(client.get_connection().is_err());
+
+        let client = sentinel_client();
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = client
+                .sync_sentinel
+                .as_ref()
+                .expect("Sentinel is configured")
+                .lock()
+                .expect("Sentinel lock is initially healthy");
+            panic!("poison Sentinel lock for error-path coverage");
+        }));
+        assert!(client.get_connection().is_err());
+        assert!(client.get_dedicated_connection().is_err());
+    }
+
+    #[cfg(feature = "async")]
+    #[test]
+    fn async_connection_methods_report_a_missing_sentinel() {
+        futures_lite::future::block_on(async {
+            let client = client_without_sentinel();
+            assert!(client.get_async_connection().await.is_err());
+            assert!(client.get_async_dedicated_connection().await.is_err());
+            client.invalidate_async_connection().await;
+        });
+    }
+}

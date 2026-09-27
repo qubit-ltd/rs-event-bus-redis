@@ -51,6 +51,22 @@ use support::redis_server::RedisServer;
 
 static SUBSCRIPTION_IDS: AtomicU64 = AtomicU64::new(1);
 
+#[test]
+fn test_sync_close_makes_future_receives_return_closed() -> Result<(), Box<dyn std::error::Error>> {
+    let server = RedisServer::start()?;
+    let bus = create_bus(&server)?;
+    let mut subscription = bus.subscribe(request(
+        "close-events",
+        "close-worker",
+        Some("close-group"),
+        StartPosition::Earliest,
+    )?)?;
+
+    subscription.close()?;
+    assert!(matches!(subscription.receive(Duration::ZERO)?, ReceiveOutcome::Closed));
+    Ok(())
+}
+
 fn create_bus(server: &RedisServer) -> Result<Arc<dyn EventBusSpi>, Box<dyn std::error::Error>> {
     let options: ProviderOptions = [
         ("redis.url".into(), server.url().into()),

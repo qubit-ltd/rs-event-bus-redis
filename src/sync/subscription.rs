@@ -67,6 +67,33 @@ pub(crate) struct Subscription {
     pub(crate) recovery: Arc<Mutex<RecoveryState>>,
 }
 
+/// Locks shared state and maps poisoning to a stable SPI error.
+///
+/// # Parameters
+///
+/// - `state`: Mutex protecting receiver or settlement state.
+/// - `topic`: Topic associated with the SPI operation.
+/// - `operation`: SPI operation that requested the lock.
+/// - `kind`: Sanitized state category included in the error.
+///
+/// # Returns
+///
+/// A guard for the shared state.
+///
+/// # Errors
+///
+/// Returns a secret-safe operation error when another thread poisoned the lock.
+fn lock_state<'a, T>(
+    state: &'a Mutex<T>,
+    topic: &TopicAddress,
+    operation: &'static str,
+    kind: &'static str,
+) -> Result<std::sync::MutexGuard<'a, T>, SpiError> {
+    state
+        .lock()
+        .map_err(|_| spi_error(operation, Some(topic), RedisProviderError::Operation(kind)))
+}
+
 impl EventSubscriptionSpi for Subscription {
     /// Recovers pending work without redelivering locally active entries.
     ///
@@ -92,19 +119,7 @@ impl EventSubscriptionSpi for Subscription {
         if self.closed {
             return Ok(ReceiveOutcome::Closed);
         }
-        if self
-            .recovery
-            .lock()
-            .map_err(|_| {
-                spi_error(
-                    "receive",
-                    Some(&self.topic),
-                    RedisProviderError::Operation("recovery lock"),
-                )
-            })?
-            .active_len()
-            >= self.max_unsettled
-        {
+        if lock_state(&self.recovery, &self.topic, "receive", "recovery lock")?.active_len() >= self.max_unsettled {
             return Ok(ReceiveOutcome::TimedOut);
         }
         let mut connection = match self.receive_connection.take() {
@@ -118,16 +133,7 @@ impl EventSubscriptionSpi for Subscription {
             let deadline = Instant::now().checked_add(timeout).unwrap_or_else(Instant::now);
             let scan_limit = self.max_unsettled.saturating_add(2);
             for _ in 0..scan_limit {
-                let cursor = self
-                    .recovery
-                    .lock()
-                    .map_err(|_| {
-                        spi_error(
-                            "receive",
-                            Some(&self.topic),
-                            RedisProviderError::Operation("recovery lock"),
-                        )
-                    })?
+                let cursor = lock_state(&self.recovery, &self.topic, "receive", "recovery lock")?
                     .claim_cursor()
                     .to_owned();
                 let claim: StreamAutoClaimReply = cmd("XAUTOCLAIM")
@@ -148,15 +154,7 @@ impl EventSubscriptionSpi for Subscription {
                     })?;
                 let at_end = claim.next_stream_id == "0-0";
                 let claimed = claim.claimed.into_iter().next();
-                self.recovery
-                    .lock()
-                    .map_err(|_| {
-                        spi_error(
-                            "receive",
-                            Some(&self.topic),
-                            RedisProviderError::Operation("recovery lock"),
-                        )
-                    })?
+                lock_state(&self.recovery, &self.topic, "receive", "recovery lock")?
                     .set_claim_cursor(claim.next_stream_id);
                 if !claim.deleted_ids.is_empty() {
                     return Ok(ReceiveOutcome::Gap(DeliveryGap::new(
@@ -165,17 +163,8 @@ impl EventSubscriptionSpi for Subscription {
                     )));
                 }
                 if let Some(entry) = claimed {
-                    let available = self
-                        .recovery
-                        .lock()
-                        .map_err(|_| {
-                            spi_error(
-                                "receive",
-                                Some(&self.topic),
-                                RedisProviderError::Operation("recovery lock"),
-                            )
-                        })?
-                        .can_deliver(&entry.id);
+                    let available =
+                        lock_state(&self.recovery, &self.topic, "receive", "recovery lock")?.can_deliver(&entry.id);
                     if available && let Some(outcome) = read_entry(self, &mut connection, entry)? {
                         return Ok(outcome);
                     }
@@ -186,16 +175,7 @@ impl EventSubscriptionSpi for Subscription {
             }
 
             for _ in 0..scan_limit {
-                let cursor = self
-                    .recovery
-                    .lock()
-                    .map_err(|_| {
-                        spi_error(
-                            "receive",
-                            Some(&self.topic),
-                            RedisProviderError::Operation("recovery lock"),
-                        )
-                    })?
+                let cursor = lock_state(&self.recovery, &self.topic, "receive", "recovery lock")?
                     .pending_cursor()
                     .to_owned();
                 let pending: Option<StreamReadReply> = cmd("XREADGROUP")
@@ -219,40 +199,12 @@ impl EventSubscriptionSpi for Subscription {
                     .and_then(|reply| reply.keys.into_iter().next())
                     .and_then(|stream| stream.ids.into_iter().next());
                 let Some(entry) = entry else {
-                    self.recovery
-                        .lock()
-                        .map_err(|_| {
-                            spi_error(
-                                "receive",
-                                Some(&self.topic),
-                                RedisProviderError::Operation("recovery lock"),
-                            )
-                        })?
-                        .reset_pending_scan();
+                    lock_state(&self.recovery, &self.topic, "receive", "recovery lock")?.reset_pending_scan();
                     break;
                 };
                 let id = entry.id.clone();
-                self.recovery
-                    .lock()
-                    .map_err(|_| {
-                        spi_error(
-                            "receive",
-                            Some(&self.topic),
-                            RedisProviderError::Operation("recovery lock"),
-                        )
-                    })?
-                    .set_pending_cursor(id.clone());
-                let available = self
-                    .recovery
-                    .lock()
-                    .map_err(|_| {
-                        spi_error(
-                            "receive",
-                            Some(&self.topic),
-                            RedisProviderError::Operation("recovery lock"),
-                        )
-                    })?
-                    .can_deliver(&id);
+                lock_state(&self.recovery, &self.topic, "receive", "recovery lock")?.set_pending_cursor(id.clone());
+                let available = lock_state(&self.recovery, &self.topic, "receive", "recovery lock")?.can_deliver(&id);
                 if available && let Some(outcome) = read_entry(self, &mut connection, entry)? {
                     return Ok(outcome);
                 }
@@ -357,13 +309,7 @@ impl EventSubscriptionSpi for Subscription {
         let state = token
             .downcast_ref::<SettlementState>()
             .ok_or_else(|| invalid_token("token type is not recognized", &self.topic))?;
-        let mut applied = state.disposition.lock().map_err(|_| {
-            spi_error(
-                "settle",
-                Some(&self.topic),
-                RedisProviderError::Operation("settlement lock"),
-            )
-        })?;
+        let mut applied = lock_state(&state.disposition, &self.topic, "settle", "settlement lock")?;
         if let Some(previous) = *applied {
             return if previous == disposition {
                 Ok(())
@@ -372,17 +318,7 @@ impl EventSubscriptionSpi for Subscription {
             };
         }
         if disposition == DeliveryDisposition::Retry {
-            state
-                .recovery
-                .lock()
-                .map_err(|_| {
-                    spi_error(
-                        "settle",
-                        Some(&self.topic),
-                        RedisProviderError::Operation("recovery lock"),
-                    )
-                })?
-                .mark_retry(&state.message_id);
+            lock_state(&state.recovery, &self.topic, "settle", "recovery lock")?.mark_retry(&state.message_id);
             *applied = Some(disposition);
             return Ok(());
         }
@@ -396,17 +332,7 @@ impl EventSubscriptionSpi for Subscription {
             .arg(&state.message_id)
             .query(&mut connection)
             .map_err(|_| spi_error("settle", Some(&self.topic), RedisProviderError::Operation("XACK")))?;
-        state
-            .recovery
-            .lock()
-            .map_err(|_| {
-                spi_error(
-                    "settle",
-                    Some(&self.topic),
-                    RedisProviderError::Operation("recovery lock"),
-                )
-            })?
-            .mark_terminal(&state.message_id);
+        lock_state(&state.recovery, &self.topic, "settle", "recovery lock")?.mark_terminal(&state.message_id);
         *applied = Some(disposition);
         Ok(())
     }
@@ -499,16 +425,7 @@ fn read_entry(
     let id = entry.id.clone();
     match decode_entry(subscription, entry) {
         Ok(message) => {
-            let marked = subscription
-                .recovery
-                .lock()
-                .map_err(|_| {
-                    spi_error(
-                        "receive",
-                        Some(&subscription.topic),
-                        RedisProviderError::Operation("recovery lock"),
-                    )
-                })?
+            let marked = lock_state(&subscription.recovery, &subscription.topic, "receive", "recovery lock")?
                 .mark_delivered(id, subscription.max_unsettled);
             if !marked {
                 return Err(spi_error(
@@ -574,6 +491,7 @@ fn invalid_token(reason: &'static str, topic: &TopicAddress) -> SpiError {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::sync::Arc;
     use std::sync::Mutex;
 
@@ -582,11 +500,15 @@ mod tests {
     use qubit_event_bus::spi::EventSubscriptionSpi;
     use qubit_event_bus::spi::SettlementToken;
     use qubit_id::Id;
+    use redis::Value;
+    use redis::streams::StreamId;
 
     use super::Subscription;
+    use super::decode_entry;
     use crate::client::Client;
     use crate::config::RedisEventBusConfig;
     use crate::recovery::RecoveryState;
+    use crate::wire::WireFields;
 
     fn subscription() -> Subscription {
         let settings = RedisEventBusConfig::default();
@@ -604,6 +526,92 @@ mod tests {
             max_unsettled: 1,
             recovery: Arc::new(Mutex::new(RecoveryState::new())),
         }
+    }
+
+    fn stream_entry(wire: Option<Value>) -> StreamId {
+        let mut map = HashMap::new();
+        if let Some(wire) = wire {
+            map.insert("wire".into(), wire);
+        }
+        StreamId { id: "1-0".into(), map }
+    }
+
+    #[test]
+    fn decode_entry_reports_each_malformed_wire_category() {
+        let subscription = subscription();
+        let cases = [
+            (stream_entry(None), crate::poison::PoisonReason::MissingWire),
+            (
+                stream_entry(Some(Value::Nil)),
+                crate::poison::PoisonReason::InvalidWireField,
+            ),
+            (
+                stream_entry(Some(Value::BulkString(b"{".to_vec()))),
+                crate::poison::PoisonReason::InvalidJson,
+            ),
+            (
+                stream_entry(Some(Value::BulkString(
+                    serde_json::to_vec(&WireFields {
+                        version: 99,
+                        event_id: "event-1".into(),
+                        timestamp_ms: 0,
+                        headers_json: "{}".into(),
+                        ordering_key: None,
+                        content_type: "application/octet-stream".into(),
+                        schema_id: None,
+                        payload: Vec::new(),
+                    })
+                    .expect("wire fields serialize"),
+                ))),
+                crate::poison::PoisonReason::UnsupportedVersion,
+            ),
+            (
+                stream_entry(Some(Value::BulkString(
+                    serde_json::to_vec(&WireFields {
+                        version: 1,
+                        event_id: "".into(),
+                        timestamp_ms: 0,
+                        headers_json: "{}".into(),
+                        ordering_key: None,
+                        content_type: "application/octet-stream".into(),
+                        schema_id: None,
+                        payload: Vec::new(),
+                    })
+                    .expect("wire fields serialize"),
+                ))),
+                crate::poison::PoisonReason::InvalidEventMetadata,
+            ),
+        ];
+
+        for (entry, expected) in cases {
+            let error = match decode_entry(&subscription, entry) {
+                Ok(_) => panic!("malformed wire should be rejected"),
+                Err(error) => error,
+            };
+            assert_eq!(error, expected);
+        }
+    }
+
+    #[test]
+    fn decode_entry_builds_a_settlement_token_for_valid_wire_data() {
+        let subscription = subscription();
+        let entry = stream_entry(Some(Value::BulkString(
+            serde_json::to_vec(&WireFields {
+                version: 1,
+                event_id: "event-1".into(),
+                timestamp_ms: 42,
+                headers_json: "{}".into(),
+                ordering_key: None,
+                content_type: "application/octet-stream".into(),
+                schema_id: None,
+                payload: vec![1, 2, 3],
+            })
+            .expect("wire fields serialize"),
+        )));
+
+        let message = decode_entry(&subscription, entry).expect("valid wire is decoded");
+        assert_eq!(message.id().as_str(), "event-1");
+        assert!(message.settlement().is_some());
     }
 
     #[test]
@@ -626,6 +634,68 @@ mod tests {
     fn settle_rejects_an_unrecognized_token_state() {
         let mut subscription = subscription();
         let token = SettlementToken::new(subscription.subscription_id, StartPosition::New);
+        assert!(subscription.settle(&token, DeliveryDisposition::Accept).is_err());
+    }
+
+    #[test]
+    fn settle_reports_a_poisoned_disposition_lock() {
+        let mut subscription = subscription();
+        let disposition = Arc::new(Mutex::new(None));
+        let poisoned = Arc::clone(&disposition);
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoned.lock().expect("disposition lock is initially healthy");
+            panic!("poison disposition lock for error-path coverage");
+        })
+        .join();
+        let token = SettlementToken::new(
+            subscription.subscription_id,
+            super::super::internal::SettlementState {
+                stream: subscription.key.clone(),
+                group: subscription.group.clone(),
+                message_id: "1-0".into(),
+                disposition,
+                recovery: Arc::clone(&subscription.recovery),
+            },
+        );
+
+        assert!(subscription.settle(&token, DeliveryDisposition::Accept).is_err());
+    }
+
+    #[test]
+    fn close_makes_future_receives_return_closed() {
+        let mut subscription = subscription();
+        subscription.close().expect("close succeeds");
+        assert!(matches!(
+            subscription.receive(std::time::Duration::ZERO),
+            Ok(qubit_event_bus::spi::ReceiveOutcome::Closed)
+        ));
+    }
+
+    #[test]
+    fn retry_settlement_is_idempotent_and_rejects_a_conflicting_disposition() {
+        let mut subscription = subscription();
+        let recovery = Arc::clone(&subscription.recovery);
+        recovery
+            .lock()
+            .expect("recovery lock is healthy")
+            .mark_delivered("1-0".into(), 1);
+        let token = SettlementToken::new(
+            subscription.subscription_id,
+            super::super::internal::SettlementState {
+                stream: subscription.key.clone(),
+                group: subscription.group.clone(),
+                message_id: "1-0".into(),
+                disposition: Arc::new(Mutex::new(None)),
+                recovery,
+            },
+        );
+
+        subscription
+            .settle(&token, DeliveryDisposition::Retry)
+            .expect("retry succeeds without a Redis acknowledgement");
+        subscription
+            .settle(&token, DeliveryDisposition::Retry)
+            .expect("repeating retry is idempotent");
         assert!(subscription.settle(&token, DeliveryDisposition::Accept).is_err());
     }
 }
