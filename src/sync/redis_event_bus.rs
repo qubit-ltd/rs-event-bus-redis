@@ -8,11 +8,12 @@
 //! Synchronous Redis Streams operations and secret-safe error conversion.
 
 use std::sync::Arc;
-use std::sync::atomic::AtomicUsize;
+use std::sync::Mutex;
 
 use qubit_event_bus::error::SpiError;
 use qubit_event_bus::model::PublishAcknowledgement;
 use qubit_event_bus::model::StartPosition;
+use qubit_event_bus::model::SubscriptionDurability;
 use qubit_event_bus::spi::DelayedDeliveryCapability;
 use qubit_event_bus::spi::DurabilityCapability;
 use qubit_event_bus::spi::EventBusCapabilities;
@@ -37,7 +38,9 @@ use crate::client::Client;
 use crate::config::RedisEventBusConfig;
 use crate::error::RedisProviderError;
 use crate::naming::group_name;
+use crate::naming::poison_key;
 use crate::naming::stream_key;
+use crate::recovery::RecoveryState;
 use crate::wire::WireFields;
 
 /// Validated Redis settings and client shared by publishers and subscribers.
@@ -128,26 +131,47 @@ impl EventBusSpi for RedisEventBus {
     /// Returns an SPI error if Redis cannot connect or create the consumer
     /// group.
     fn subscribe(&self, request: SpiSubscriptionRequest) -> Result<Box<dyn EventSubscriptionSpi>, SpiError> {
-        let key = stream_key(self.settings.namespace(), request.topic().as_str());
+        let topic = request.topic().clone();
+        if request.durability() != SubscriptionDurability::Durable {
+            return Err(SpiError::Operation {
+                provider_id: "redis-streams".into(),
+                operation: "subscribe",
+                resource: Some(topic.as_str().into()),
+                kind: "unsupported_subscription_durability",
+                retryable: Some(false),
+                source: Box::new(RedisProviderError::Configuration(
+                    "Redis Streams requires durable subscriptions",
+                )),
+            });
+        }
+        let key = stream_key(self.settings.namespace(), topic.as_str());
         let group = group_name(
             self.settings.namespace(),
-            request.topic().as_str(),
+            topic.as_str(),
             request.subscriber_id().as_str(),
             request.group().map(|value| value.as_str()),
         );
+        let quarantine = poison_key(self.settings.namespace(), topic.as_str(), &group);
         let start = match request.start_position() {
             StartPosition::Earliest => "0-0",
             StartPosition::At(id) => id,
             StartPosition::New => "$",
             _ => "$",
         };
-        let mut connection = self.client.get_connection().map_err(|_| {
-            spi_error(
-                "subscribe",
-                Some(request.topic()),
-                RedisProviderError::Operation("connect"),
-            )
-        })?;
+        if matches!(request.start_position(), StartPosition::At(id) if !valid_stream_id(id)) {
+            return Err(SpiError::Operation {
+                provider_id: "redis-streams".into(),
+                operation: "subscribe",
+                resource: Some(topic.as_str().into()),
+                kind: "invalid_start_position",
+                retryable: Some(false),
+                source: Box::new(RedisProviderError::Configuration("invalid Redis stream ID")),
+            });
+        }
+        let mut connection = self
+            .client
+            .get_connection()
+            .map_err(|_| spi_error("subscribe", Some(&topic), RedisProviderError::Operation("connect")))?;
         let result: Result<(), RedisError> = cmd("XGROUP")
             .arg("CREATE")
             .arg(&key)
@@ -155,12 +179,28 @@ impl EventBusSpi for RedisEventBus {
             .arg(start)
             .arg("MKSTREAM")
             .query(&mut connection);
+        let result = if result.is_err() {
+            connection.discard();
+            let mut retry_connection = self
+                .client
+                .get_connection()
+                .map_err(|_| spi_error("subscribe", Some(&topic), RedisProviderError::Operation("connect")))?;
+            cmd("XGROUP")
+                .arg("CREATE")
+                .arg(&key)
+                .arg(&group)
+                .arg(start)
+                .arg("MKSTREAM")
+                .query(&mut retry_connection)
+        } else {
+            result
+        };
         if let Err(error) = result
             && error.code() != Some("BUSYGROUP")
         {
             return Err(spi_error(
                 "subscribe",
-                Some(request.topic()),
+                Some(&topic),
                 RedisProviderError::Operation("XGROUP CREATE"),
             ));
         }
@@ -169,14 +209,14 @@ impl EventBusSpi for RedisEventBus {
             client: Arc::clone(&self.client),
             key,
             group,
+            quarantine,
             consumer,
-            topic: request.topic().clone(),
+            topic,
             subscription_id: request.subscription_id(),
             closed: false,
-            claim_cursor: "0-0".to_owned(),
             claim_min_idle_ms: self.settings.claim_min_idle_ms(),
             max_unsettled: self.settings.max_unsettled_per_subscription(),
-            outstanding: Arc::new(AtomicUsize::new(0)),
+            recovery: Arc::new(Mutex::new(RecoveryState::new())),
         }))
     }
 
@@ -189,6 +229,16 @@ impl EventBusSpi for RedisEventBus {
     fn shutdown(&self, _mode: ShutdownMode) -> Result<ShutdownOutcome, SpiError> {
         Ok(ShutdownOutcome::Complete)
     }
+}
+
+fn valid_stream_id(value: &str) -> bool {
+    let Some((milliseconds, sequence)) = value.split_once('-') else {
+        return false;
+    };
+    !milliseconds.is_empty()
+        && !sequence.is_empty()
+        && milliseconds.bytes().all(|byte| byte.is_ascii_digit())
+        && sequence.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 /// Returns the fixed capability set shared by Redis provider modes.

@@ -385,7 +385,7 @@ fn test_async_reports_gap_for_removed_pending_entries() -> Result<(), Box<dyn st
 }
 
 #[test]
-fn test_async_reject_acks_and_malformed_wire_is_reported() -> Result<(), Box<dyn std::error::Error>> {
+fn test_async_reject_acks_and_malformed_wire_is_quarantined() -> Result<(), Box<dyn std::error::Error>> {
     let server = RedisServer::start()?;
     let bus = create_bus(&server)?;
     block_on(async {
@@ -410,7 +410,10 @@ fn test_async_reject_acks_and_malformed_wire_is_reported() -> Result<(), Box<dyn
             .arg("other")
             .arg("value")
             .query::<String>(&mut connection)?;
-        assert!(receiver.receive(Duration::from_secs(1)).await.is_err());
+        assert!(matches!(
+            receiver.receive(Duration::from_secs(1)).await?,
+            ReceiveOutcome::Gap(_)
+        ));
         Ok::<(), Box<dyn std::error::Error>>(())
     })
 }

@@ -7,15 +7,22 @@
 // =============================================================================
 //! Redis clients for standalone and Sentinel deployments.
 
+#[cfg(feature = "sync")]
+use std::sync::Arc;
+#[cfg(feature = "sync")]
 use std::sync::Mutex as StdMutex;
 
 #[cfg(feature = "async")]
 use async_lock::Mutex as AsyncMutex;
 use redis::Client as RedisConnectionClient;
+#[cfg(feature = "sync")]
 use redis::Connection;
+#[cfg(feature = "sync")]
+use redis::ConnectionLike;
 use redis::ErrorKind;
 use redis::IntoConnectionInfo;
 use redis::RedisError;
+#[cfg(feature = "async")]
 use redis::aio::MultiplexedConnection;
 use redis::sentinel::SentinelClient;
 use redis::sentinel::SentinelClientBuilder;
@@ -26,12 +33,17 @@ use crate::config::RedisEventBusConfig;
 /// Redis connection factory with optional Sentinel master discovery.
 ///
 /// Standalone mode opens a reusable client handle; Sentinel mode resolves the
-/// current master for each new connection. The factory is shared across
-/// publishers and receivers, while each SPI operation obtains its own
-/// connection.
+/// current master for each new connection. Async standalone short commands
+/// share a multiplexed connection. Receiver reads use dedicated connections.
 pub(crate) struct Client {
     /// Direct standalone client when Sentinel is disabled.
     standalone: Option<RedisConnectionClient>,
+    /// Bounded pool for short synchronous standalone commands.
+    #[cfg(feature = "sync")]
+    sync_pool: Arc<SyncConnectionPool>,
+    /// Shared async short-command connection for standalone Redis.
+    #[cfg(feature = "async")]
+    async_standalone_connection: AsyncMutex<Option<MultiplexedConnection>>,
     /// Synchronous Sentinel resolver.
     #[cfg(feature = "sync")]
     sync_sentinel: Option<StdMutex<SentinelClient>>,
@@ -67,6 +79,10 @@ impl Client {
             return Ok(Self {
                 standalone: Some(RedisConnectionClient::open(connection_info)?),
                 #[cfg(feature = "sync")]
+                sync_pool: Arc::new(SyncConnectionPool::new(config.max_idle_connections())),
+                #[cfg(feature = "async")]
+                async_standalone_connection: AsyncMutex::new(None),
+                #[cfg(feature = "sync")]
                 sync_sentinel: None,
                 #[cfg(feature = "async")]
                 async_sentinel: None,
@@ -79,6 +95,10 @@ impl Client {
         let async_sentinel = Some(AsyncMutex::new(build_sentinel(config, endpoints)?));
         Ok(Self {
             standalone: None,
+            #[cfg(feature = "sync")]
+            sync_pool: Arc::new(SyncConnectionPool::new(config.max_idle_connections())),
+            #[cfg(feature = "async")]
+            async_standalone_connection: AsyncMutex::new(None),
             #[cfg(feature = "sync")]
             sync_sentinel,
             #[cfg(feature = "async")]
@@ -98,9 +118,20 @@ impl Client {
     /// Returns a connection error if the standalone server is unavailable, the
     /// Sentinel lock is poisoned, or Sentinel cannot resolve a master.
     #[cfg(feature = "sync")]
-    pub(crate) fn get_connection(&self) -> Result<Connection, RedisError> {
+    pub(crate) fn get_connection(&self) -> Result<PooledConnection, RedisError> {
         if let Some(client) = &self.standalone {
-            return client.get_connection();
+            let connection = self
+                .sync_pool
+                .idle
+                .lock()
+                .map_err(|_| RedisError::from((ErrorKind::IoError, "connection pool lock poisoned")))?
+                .pop();
+            return match connection {
+                Some(connection) => Ok(PooledConnection::new(connection, Some(Arc::clone(&self.sync_pool)))),
+                None => client
+                    .get_connection()
+                    .map(|connection| PooledConnection::new(connection, Some(Arc::clone(&self.sync_pool)))),
+            };
         }
         self.sync_sentinel
             .as_ref()
@@ -108,6 +139,23 @@ impl Client {
             .lock()
             .map_err(|_| RedisError::from((ErrorKind::IoError, "Sentinel lock poisoned")))?
             .get_connection()
+            .map(|connection| PooledConnection::new(connection, None))
+    }
+
+    /// Opens a receiver-only blocking connection outside the idle pool.
+    #[cfg(feature = "sync")]
+    pub(crate) fn get_dedicated_connection(&self) -> Result<PooledConnection, RedisError> {
+        let connection = if let Some(client) = &self.standalone {
+            client.get_connection()?
+        } else {
+            self.sync_sentinel
+                .as_ref()
+                .ok_or_else(|| RedisError::from((ErrorKind::IoError, "missing Sentinel client")))?
+                .lock()
+                .map_err(|_| RedisError::from((ErrorKind::IoError, "Sentinel lock poisoned")))?
+                .get_connection()?
+        };
+        Ok(PooledConnection::new(connection, None))
     }
 
     /// Opens a multiplexed connection using the host's selected executor
@@ -125,6 +173,27 @@ impl Client {
     #[cfg(feature = "async")]
     pub(crate) async fn get_async_connection(&self) -> Result<MultiplexedConnection, RedisError> {
         if let Some(client) = &self.standalone {
+            if let Some(connection) = self.async_standalone_connection.lock().await.as_ref() {
+                return Ok(connection.clone());
+            }
+            let connection = client.get_multiplexed_async_connection().await?;
+            let mut cached = self.async_standalone_connection.lock().await;
+            if cached.is_none() {
+                *cached = Some(connection.clone());
+            }
+            return Ok(cached.as_ref().expect("connection was initialized").clone());
+        }
+        let sentinel = self
+            .async_sentinel
+            .as_ref()
+            .ok_or_else(|| RedisError::from((ErrorKind::IoError, "missing Sentinel client")))?;
+        sentinel.lock().await.get_async_connection().await
+    }
+
+    /// Opens a connection dedicated to a receiver's potentially blocking read.
+    #[cfg(feature = "async")]
+    pub(crate) async fn get_async_dedicated_connection(&self) -> Result<MultiplexedConnection, RedisError> {
+        if let Some(client) = &self.standalone {
             return client.get_multiplexed_async_connection().await;
         }
         let sentinel = self
@@ -132,6 +201,80 @@ impl Client {
             .as_ref()
             .ok_or_else(|| RedisError::from((ErrorKind::IoError, "missing Sentinel client")))?;
         sentinel.lock().await.get_async_connection().await
+    }
+
+    /// Clears a cached standalone async connection after a command failure.
+    #[cfg(feature = "async")]
+    pub(crate) async fn invalidate_async_connection(&self) {
+        if self.standalone.is_some() {
+            *self.async_standalone_connection.lock().await = None;
+        }
+    }
+}
+
+#[cfg(feature = "sync")]
+struct SyncConnectionPool {
+    idle: StdMutex<Vec<Connection>>,
+    max_idle: usize,
+}
+
+#[cfg(feature = "sync")]
+impl SyncConnectionPool {
+    fn new(max_idle: usize) -> Self {
+        Self {
+            idle: StdMutex::new(Vec::new()),
+            max_idle,
+        }
+    }
+}
+
+#[cfg(feature = "sync")]
+pub(crate) struct PooledConnection {
+    connection: Option<Connection>,
+    pool: Option<Arc<SyncConnectionPool>>,
+}
+
+#[cfg(feature = "sync")]
+impl PooledConnection {
+    fn new(connection: Connection, pool: Option<Arc<SyncConnectionPool>>) -> Self {
+        Self {
+            connection: Some(connection),
+            pool,
+        }
+    }
+
+    pub(crate) fn discard(&mut self) {
+        self.pool = None;
+    }
+}
+
+#[cfg(feature = "sync")]
+impl std::ops::Deref for PooledConnection {
+    type Target = Connection;
+    fn deref(&self) -> &Self::Target {
+        self.connection.as_ref().expect("pooled connection is present")
+    }
+}
+
+#[cfg(feature = "sync")]
+impl std::ops::DerefMut for PooledConnection {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.connection.as_mut().expect("pooled connection is present")
+    }
+}
+
+#[cfg(feature = "sync")]
+impl Drop for PooledConnection {
+    fn drop(&mut self) {
+        let (Some(pool), Some(connection)) = (&self.pool, self.connection.take()) else {
+            return;
+        };
+        if connection.is_open()
+            && let Ok(mut idle) = pool.idle.lock()
+            && idle.len() < pool.max_idle
+        {
+            idle.push(connection);
+        }
     }
 }
 

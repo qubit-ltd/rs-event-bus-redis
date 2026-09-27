@@ -8,11 +8,12 @@
 //! Runtime-neutral asynchronous Redis Streams operations.
 
 use std::sync::Arc;
-use std::sync::atomic::AtomicUsize;
+use std::sync::Mutex;
 
 use qubit_event_bus::SpiError;
 use qubit_event_bus::model::PublishAcknowledgement;
 use qubit_event_bus::model::StartPosition;
+use qubit_event_bus::model::SubscriptionDurability;
 use qubit_event_bus::spi::AsyncEventBusSpi;
 use qubit_event_bus::spi::AsyncEventSubscriptionSpi;
 use qubit_event_bus::spi::DelayedDeliveryCapability;
@@ -38,7 +39,9 @@ use crate::client::Client;
 use crate::config::RedisEventBusConfig;
 use crate::error::RedisProviderError;
 use crate::naming::group_name;
+use crate::naming::poison_key;
 use crate::naming::stream_key;
+use crate::recovery::RecoveryState;
 use crate::wire::WireFields;
 
 /// Client and validated settings shared by asynchronous SPI operations.
@@ -106,14 +109,24 @@ impl AsyncEventBusSpi for AsyncRedisEventBus {
                 .get_async_connection()
                 .await
                 .map_err(|_| spi_error("publish", Some(&topic), RedisProviderError::Operation("connect")))?;
-            let message_id: String = cmd("XADD")
+            let result: Result<String, RedisError> = cmd("XADD")
                 .arg(key)
                 .arg("*")
                 .arg("wire")
                 .arg(payload)
                 .query_async(&mut connection)
-                .await
-                .map_err(|_| spi_error("publish", Some(&topic), RedisProviderError::Operation("XADD")))?;
+                .await;
+            let message_id = match result {
+                Ok(id) => id,
+                Err(_) => {
+                    self.client.invalidate_async_connection().await;
+                    return Err(spi_error(
+                        "publish",
+                        Some(&topic),
+                        RedisProviderError::Operation("XADD"),
+                    ));
+                }
+            };
             Ok(PublishAcknowledgement::Accepted {
                 provider_message_id: Some(message_id),
                 metadata: Default::default(),
@@ -151,6 +164,18 @@ impl AsyncEventBusSpi for AsyncRedisEventBus {
     ) -> SpiFuture<'a, Result<Box<dyn AsyncEventSubscriptionSpi>, SpiError>> {
         Box::pin(async move {
             let topic = request.topic().clone();
+            if request.durability() != SubscriptionDurability::Durable {
+                return Err(SpiError::Operation {
+                    provider_id: "redis-streams".into(),
+                    operation: "subscribe",
+                    resource: Some(topic.as_str().into()),
+                    kind: "unsupported_subscription_durability",
+                    retryable: Some(false),
+                    source: Box::new(RedisProviderError::Configuration(
+                        "Redis Streams requires durable subscriptions",
+                    )),
+                });
+            }
             let key = stream_key(self.settings.namespace(), topic.as_str());
             let group = group_name(
                 self.settings.namespace(),
@@ -158,11 +183,22 @@ impl AsyncEventBusSpi for AsyncRedisEventBus {
                 request.subscriber_id().as_str(),
                 request.group().map(|value| value.as_str()),
             );
+            let quarantine = poison_key(self.settings.namespace(), topic.as_str(), &group);
             let start = match request.start_position() {
                 StartPosition::Earliest => "0-0",
                 StartPosition::At(id) => id.as_ref(),
                 _ => "$",
             };
+            if matches!(request.start_position(), StartPosition::At(id) if !valid_stream_id(id)) {
+                return Err(SpiError::Operation {
+                    provider_id: "redis-streams".into(),
+                    operation: "subscribe",
+                    resource: Some(topic.as_str().into()),
+                    kind: "invalid_start_position",
+                    retryable: Some(false),
+                    source: Box::new(RedisProviderError::Configuration("invalid Redis stream ID")),
+                });
+            }
             let mut connection = self
                 .client
                 .get_async_connection()
@@ -176,6 +212,24 @@ impl AsyncEventBusSpi for AsyncRedisEventBus {
                 .arg("MKSTREAM")
                 .query_async(&mut connection)
                 .await;
+            let result = if result.is_err() {
+                self.client.invalidate_async_connection().await;
+                let mut retry_connection = self
+                    .client
+                    .get_async_connection()
+                    .await
+                    .map_err(|_| spi_error("subscribe", Some(&topic), RedisProviderError::Operation("connect")))?;
+                cmd("XGROUP")
+                    .arg("CREATE")
+                    .arg(&key)
+                    .arg(&group)
+                    .arg(start)
+                    .arg("MKSTREAM")
+                    .query_async(&mut retry_connection)
+                    .await
+            } else {
+                result
+            };
             if let Err(error) = result
                 && error.code() != Some("BUSYGROUP")
             {
@@ -189,14 +243,14 @@ impl AsyncEventBusSpi for AsyncRedisEventBus {
                 client: Arc::clone(&self.client),
                 key,
                 group,
+                quarantine,
                 consumer: request.subscription_id().to_string(),
                 topic,
                 subscription_id: request.subscription_id(),
                 closed: false,
-                claim_cursor: "0-0".to_owned(),
                 claim_min_idle_ms: self.settings.claim_min_idle_ms(),
                 max_unsettled: self.settings.max_unsettled_per_subscription(),
-                outstanding: Arc::new(AtomicUsize::new(0)),
+                recovery: Arc::new(Mutex::new(RecoveryState::new())),
             }) as Box<dyn AsyncEventSubscriptionSpi>)
         })
     }
@@ -213,4 +267,14 @@ impl AsyncEventBusSpi for AsyncRedisEventBus {
     fn shutdown<'a>(&'a self, _mode: ShutdownMode) -> SpiFuture<'a, Result<ShutdownOutcome, SpiError>> {
         Box::pin(async { Ok(ShutdownOutcome::Complete) })
     }
+}
+
+fn valid_stream_id(value: &str) -> bool {
+    let Some((milliseconds, sequence)) = value.split_once('-') else {
+        return false;
+    };
+    !milliseconds.is_empty()
+        && !sequence.is_empty()
+        && milliseconds.bytes().all(|byte| byte.is_ascii_digit())
+        && sequence.bytes().all(|byte| byte.is_ascii_digit())
 }

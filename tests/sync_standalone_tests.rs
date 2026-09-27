@@ -326,7 +326,7 @@ fn test_sync_reports_gap_for_removed_pending_entries() -> Result<(), Box<dyn std
 }
 
 #[test]
-fn test_sync_reject_acks_and_malformed_wire_is_reported() -> Result<(), Box<dyn std::error::Error>> {
+fn test_sync_reject_acks_and_malformed_wire_is_quarantined() -> Result<(), Box<dyn std::error::Error>> {
     let server = RedisServer::start()?;
     let bus = create_bus(&server)?;
     bus.publish(message("malformed", "reject-event", b"reject")?)?;
@@ -350,7 +350,10 @@ fn test_sync_reject_acks_and_malformed_wire_is_reported() -> Result<(), Box<dyn 
         .arg("other")
         .arg("value")
         .query::<String>(&mut connection)?;
-    assert!(receiver.receive(Duration::from_secs(1)).is_err());
+    assert!(matches!(
+        receiver.receive(Duration::from_secs(1))?,
+        ReceiveOutcome::Gap(_)
+    ));
     Ok(())
 }
 

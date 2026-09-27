@@ -9,9 +9,10 @@
 
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::AtomicUsize;
 
 use qubit_event_bus::spi::DeliveryDisposition;
+
+use crate::recovery::RecoveryState;
 
 /// Redis coordinates and settlement bookkeeping carried by one delivery token.
 pub(in crate::sync) struct SettlementState {
@@ -23,6 +24,6 @@ pub(in crate::sync) struct SettlementState {
     pub(in crate::sync) message_id: String,
     /// Final disposition applied through this token.
     pub(in crate::sync) disposition: Arc<Mutex<Option<DeliveryDisposition>>>,
-    /// Receiver's in-flight count, decremented after successful settlement.
-    pub(in crate::sync) outstanding: Arc<AtomicUsize>,
+    /// Per-subscription active delivery registry released after settlement.
+    pub(in crate::sync) recovery: Arc<Mutex<RecoveryState>>,
 }

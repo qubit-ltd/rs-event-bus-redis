@@ -1,0 +1,168 @@
+// =============================================================================
+//    Copyright (c) 2026 Haixing Hu.
+//
+//    SPDX-License-Identifier: Apache-2.0
+//
+//    Licensed under the Apache License, Version 2.0.
+// =============================================================================
+//! Atomic transfer of malformed pending entries into a quarantine stream.
+
+#[cfg(feature = "sync")]
+use redis::ConnectionLike;
+use redis::RedisError;
+use redis::cmd;
+
+/// Stable reason stored beside malformed wire data without exposing it in
+/// errors.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PoisonReason {
+    /// Stream entry does not contain the `wire` field.
+    MissingWire,
+    /// Stream entry's `wire` value is not a byte string.
+    InvalidWireField,
+    /// The wire field is not valid JSON.
+    InvalidJson,
+    /// The wire payload has an unsupported protocol version.
+    UnsupportedVersion,
+    /// A decoded field cannot construct the required event metadata.
+    InvalidEventMetadata,
+}
+
+impl PoisonReason {
+    /// Returns the stable, secret-free reason stored in the quarantine stream.
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::MissingWire => "missing_wire",
+            Self::InvalidWireField => "invalid_wire_field",
+            Self::InvalidJson => "invalid_json",
+            Self::UnsupportedVersion => "unsupported_version",
+            Self::InvalidEventMetadata => "invalid_event_metadata",
+        }
+    }
+}
+
+/// Result of checking and transferring a malformed group delivery.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PoisonOutcome {
+    /// Entry is recorded in quarantine and acknowledged from its original
+    /// group.
+    Quarantined,
+    /// Another consumer owns the pending entry now.
+    OwnershipChanged,
+    /// Entry is no longer pending or has already been removed from the stream.
+    SourceGone,
+}
+
+/// Lua transfer checks ownership, copies the raw wire field, then acknowledges.
+const QUARANTINE_SCRIPT: &str = r#"
+local pending = redis.call('XPENDING', KEYS[1], ARGV[1], ARGV[3], ARGV[3], 1)
+if #pending == 0 then return 0 end
+if pending[1][2] ~= ARGV[2] then return -1 end
+local rows = redis.call('XRANGE', KEYS[1], ARGV[3], ARGV[3])
+if #rows == 0 then return 0 end
+local fields = rows[1][2]
+local wire = ''
+local missing = '0'
+for index = 1, #fields, 2 do
+    if fields[index] == 'wire' then
+        wire = fields[index + 1]
+        break
+    end
+    if index == #fields - 1 then missing = '1' end
+end
+redis.call('XADD', KEYS[2], '*',
+    'source_stream', KEYS[1],
+    'source_id', ARGV[3],
+    'group', ARGV[1],
+    'reason', ARGV[4],
+    'wire', wire,
+    'wire_missing', missing)
+local acknowledged = redis.call('XACK', KEYS[1], ARGV[1], ARGV[3])
+if acknowledged ~= 1 then return -2 end
+return 1
+"#;
+
+/// Transfers a malformed pending entry to its quarantine stream atomically.
+///
+/// # Parameters
+///
+/// - `connection`: Redis connection used for the single Lua command.
+/// - `source`: Stream key from which the malformed entry was read.
+/// - `quarantine`: Per-group quarantine stream key.
+/// - `group`: Consumer group whose pending entry is being settled.
+/// - `consumer`: Consumer that currently owns the pending entry.
+/// - `id`: Redis stream ID of the malformed entry.
+/// - `reason`: Stable decode failure category.
+///
+/// # Returns
+///
+/// A fixed transfer result; quarantined bytes are never returned to Rust.
+///
+/// # Errors
+///
+/// Returns a Redis error if the script cannot execute or returns an unknown
+/// status. The original pending entry remains available for retry when the
+/// script fails before its atomic `XADD` and `XACK` sequence completes.
+#[cfg(feature = "sync")]
+pub(crate) fn quarantine<C: ConnectionLike>(
+    connection: &mut C,
+    source: &str,
+    quarantine: &str,
+    group: &str,
+    consumer: &str,
+    id: &str,
+    reason: PoisonReason,
+) -> Result<PoisonOutcome, RedisError> {
+    let status: i64 = cmd("EVAL")
+        .arg(QUARANTINE_SCRIPT)
+        .arg(2)
+        .arg(source)
+        .arg(quarantine)
+        .arg(group)
+        .arg(consumer)
+        .arg(id)
+        .arg(reason.as_str())
+        .query(connection)?;
+    match status {
+        1 => Ok(PoisonOutcome::Quarantined),
+        0 => Ok(PoisonOutcome::SourceGone),
+        -1 => Ok(PoisonOutcome::OwnershipChanged),
+        _ => Err(RedisError::from((
+            redis::ErrorKind::ResponseError,
+            "invalid quarantine result",
+        ))),
+    }
+}
+
+/// Executes the same quarantine script on Redis's multiplexed async connection.
+#[cfg(feature = "async")]
+pub(crate) async fn quarantine_async(
+    connection: &mut redis::aio::MultiplexedConnection,
+    source: &str,
+    quarantine: &str,
+    group: &str,
+    consumer: &str,
+    id: &str,
+    reason: PoisonReason,
+) -> Result<PoisonOutcome, RedisError> {
+    let status: i64 = cmd("EVAL")
+        .arg(QUARANTINE_SCRIPT)
+        .arg(2)
+        .arg(source)
+        .arg(quarantine)
+        .arg(group)
+        .arg(consumer)
+        .arg(id)
+        .arg(reason.as_str())
+        .query_async(connection)
+        .await?;
+    match status {
+        1 => Ok(PoisonOutcome::Quarantined),
+        0 => Ok(PoisonOutcome::SourceGone),
+        -1 => Ok(PoisonOutcome::OwnershipChanged),
+        _ => Err(RedisError::from((
+            redis::ErrorKind::ResponseError,
+            "invalid quarantine result",
+        ))),
+    }
+}

@@ -24,6 +24,10 @@ mod discovery;
 pub mod error;
 /// Redis key naming helpers.
 pub mod naming;
+/// Malformed Redis stream entry quarantine protocol.
+mod poison;
+/// Per-subscription pending-entry recovery state.
+mod recovery;
 /// Redis backend configuration.
 mod redis_event_bus_config;
 /// Redis provider failures.

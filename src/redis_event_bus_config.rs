@@ -50,6 +50,8 @@ pub struct RedisEventBusConfig {
     claim_min_idle_ms: usize,
     /// Maximum delivered but unsettled messages retained by one SPI receiver.
     max_unsettled_per_subscription: usize,
+    /// Maximum number of idle synchronous standalone connections retained.
+    max_idle_connections: usize,
 }
 
 impl std::fmt::Debug for RedisEventBusConfig {
@@ -69,6 +71,7 @@ impl std::fmt::Debug for RedisEventBusConfig {
             .field("sentinel_credentials", &self.sentinel_credentials)
             .field("claim_min_idle_ms", &self.claim_min_idle_ms)
             .field("max_unsettled_per_subscription", &self.max_unsettled_per_subscription)
+            .field("max_idle_connections", &self.max_idle_connections)
             .finish()
     }
 }
@@ -85,6 +88,7 @@ impl Default for RedisEventBusConfig {
             sentinel_credentials: RedisCredentials::default(),
             claim_min_idle_ms: 30_000,
             max_unsettled_per_subscription: 100,
+            max_idle_connections: 8,
         }
     }
 }
@@ -114,6 +118,7 @@ impl RedisEventBusConfig {
             sentinel_credentials: RedisCredentials::default(),
             claim_min_idle_ms: 30_000,
             max_unsettled_per_subscription: 100,
+            max_idle_connections: 8,
         }
     }
 
@@ -221,6 +226,13 @@ impl RedisEventBusConfig {
         self.max_unsettled_per_subscription
     }
 
+    /// Returns the maximum number of idle synchronous connections retained.
+    #[must_use]
+    #[inline]
+    pub const fn max_idle_connections(&self) -> usize {
+        self.max_idle_connections
+    }
+
     /// Parses and validates Redis settings from facade provider options.
     ///
     /// Credential options contain environment-variable names, not secret
@@ -281,6 +293,17 @@ impl RedisEventBusConfig {
             })
             .transpose()?
             .unwrap_or(100);
+        let max_idle_connections = options
+            .get("redis.max_idle_connections")
+            .map(|value| {
+                value
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|value| (1..=64).contains(value))
+                    .ok_or(RedisProviderError::Configuration("invalid redis.max_idle_connections"))
+            })
+            .transpose()?
+            .unwrap_or(8);
         if sentinel_nodes.as_ref().is_some_and(Vec::is_empty) {
             return Err(RedisProviderError::Configuration(
                 "redis.sentinel.nodes must contain endpoints",
@@ -298,6 +321,7 @@ impl RedisEventBusConfig {
         config.sentinel_credentials = sentinel_credentials;
         config.claim_min_idle_ms = claim_min_idle_ms;
         config.max_unsettled_per_subscription = max_unsettled_per_subscription;
+        config.max_idle_connections = max_idle_connections;
         Ok(config)
     }
 

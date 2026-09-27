@@ -72,3 +72,49 @@ pub fn group_name(namespace: &str, topic: &str, subscriber: &str, group: Option<
         group.len()
     )
 }
+
+/// Builds a group-specific Redis stream key for malformed-entry quarantine.
+///
+/// Length-prefixed UTF-8 byte counts keep namespace, topic, and group
+/// boundaries unambiguous even when a component contains `:`.
+///
+/// # Parameters
+///
+/// - `namespace`: Application scope shared by related providers.
+/// - `topic`: Topic whose malformed records are quarantined.
+/// - `group`: Consumer group whose delivery reached a terminal decode error.
+///
+/// # Returns
+///
+/// A stable Redis key isolated to one namespace, topic, and consumer group.
+///
+/// # Examples
+///
+/// ```
+/// use qubit_event_bus_redis::naming::poison_key;
+///
+/// assert_eq!(poison_key("orders", "created", "billing"),
+///     "qubit:poison:6:orders:7:created:7:billing");
+/// ```
+pub fn poison_key(namespace: &str, topic: &str, group: &str) -> String {
+    format!(
+        "qubit:poison:{}:{namespace}:{}:{topic}:{}:{group}",
+        namespace.len(),
+        topic.len(),
+        group.len()
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::poison_key;
+
+    #[test]
+    fn test_poison_key_delimits_utf8_components_without_collisions() {
+        assert_ne!(poison_key("a:b", "c", "d"), poison_key("a", "b:c", "d"));
+        assert_eq!(
+            poison_key("订单", "创建", "消费组"),
+            "qubit:poison:6:订单:6:创建:9:消费组"
+        );
+    }
+}
