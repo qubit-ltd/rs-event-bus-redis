@@ -7,20 +7,30 @@
 // =============================================================================
 //! Tests stable names and versioned wire-format round trips.
 
+use std::any::TypeId;
 use std::sync::Arc;
 use std::time::SystemTime;
 
+use qubit_event_bus::EventBusConfig;
 use qubit_event_bus::model::ContentType;
 use qubit_event_bus::model::EventId;
 use qubit_event_bus::model::Headers;
 use qubit_event_bus::model::ProviderOptions;
+use qubit_event_bus::model::StartPosition;
+use qubit_event_bus::model::SubscriberId;
+use qubit_event_bus::model::SubscriptionDurability;
 use qubit_event_bus::spi::EncodedPayload;
 use qubit_event_bus::spi::OutboundMessage;
+use qubit_event_bus::spi::SpiSubscriptionRequest;
 use qubit_event_bus::spi::TopicAddress;
 use qubit_event_bus::spi::TransportPayload;
+#[cfg(feature = "async")]
+use qubit_event_bus_redis::r#async::AsyncRedisEventBusProvider;
 use qubit_event_bus_redis::config::RedisEventBusConfig;
 use qubit_event_bus_redis::naming::group_name;
 use qubit_event_bus_redis::naming::stream_key;
+#[cfg(feature = "sync")]
+use qubit_event_bus_redis::sync::RedisEventBusProvider;
 use qubit_event_bus_redis::wire::WireFields;
 
 #[test]
@@ -131,6 +141,99 @@ fn test_provider_options_defaults_and_sentinel_credentials_are_redacted() {
     let config = RedisEventBusConfig::from_provider_options(&options).unwrap();
     assert_eq!(config.sentinel_nodes().unwrap().len(), 2);
     assert_eq!(config.sentinel_service(), Some("primary"));
+}
+
+#[test]
+fn test_config_default_values_are_explicit() {
+    let config = RedisEventBusConfig::default();
+    assert_eq!(config.connection_url(), "redis://127.0.0.1/");
+    assert_eq!(config.namespace(), "qubit");
+    assert_eq!(config.max_idle_connections(), 8);
+}
+
+#[cfg(feature = "sync")]
+#[test]
+fn test_sync_provider_returns_invalid_configuration_without_connecting() {
+    use qubit_spi::ServiceProvider;
+
+    let options: ProviderOptions = [("redis.max_idle_connections".into(), "0".into())].into();
+    let config = EventBusConfig::default().with_provider_options(options);
+    assert!(RedisEventBusProvider.create_configured(&config).is_err());
+
+    let options: ProviderOptions = [
+        ("redis.sentinel.nodes".into(), "invalid:port/not-a-db".into()),
+        ("redis.sentinel.service_name".into(), "primary".into()),
+    ]
+    .into();
+    let config = EventBusConfig::default().with_provider_options(options);
+    assert!(RedisEventBusProvider.create_configured(&config).is_err());
+}
+
+#[cfg(feature = "async")]
+#[test]
+fn test_async_provider_returns_invalid_configuration_without_connecting() {
+    use futures_lite::future::block_on;
+    use qubit_spi::AsyncServiceProvider;
+
+    let options: ProviderOptions = [("redis.max_idle_connections".into(), "0".into())].into();
+    let config = EventBusConfig::default().with_provider_options(options);
+    assert!(block_on(AsyncRedisEventBusProvider.create_configured(&config)).is_err());
+
+    let options: ProviderOptions = [
+        ("redis.sentinel.nodes".into(), "invalid:port/not-a-db".into()),
+        ("redis.sentinel.service_name".into(), "primary".into()),
+    ]
+    .into();
+    let config = EventBusConfig::default().with_provider_options(options);
+    assert!(block_on(AsyncRedisEventBusProvider.create_configured(&config)).is_err());
+}
+
+#[cfg(feature = "sync")]
+#[test]
+fn test_sync_subscribe_rejects_invalid_stream_position_before_connecting() -> Result<(), Box<dyn std::error::Error>> {
+    use qubit_spi::ServiceProvider;
+
+    let bus = RedisEventBusProvider
+        .create_configured(&EventBusConfig::default())
+        .map_err(|failure| failure.into_error())?;
+    let request = SpiSubscriptionRequest::new(
+        qubit_id::Id::new(91_001),
+        TopicAddress::new("invalid-position")?,
+        SubscriberId::new("invalid-position-worker")?,
+        None,
+        SubscriptionDurability::Durable,
+        StartPosition::At("not-a-stream-id".into()),
+        ProviderOptions::new(),
+        TypeId::of::<Vec<u8>>(),
+    );
+    assert!(bus.subscribe(request).is_err());
+    Ok(())
+}
+
+#[cfg(feature = "async")]
+#[test]
+fn test_async_subscribe_rejects_invalid_stream_position_before_connecting() -> Result<(), Box<dyn std::error::Error>> {
+    use futures_lite::future::block_on;
+    use qubit_spi::AsyncServiceProvider;
+
+    block_on(async {
+        let bus = AsyncRedisEventBusProvider
+            .create_configured(&EventBusConfig::default())
+            .await
+            .map_err(|failure| failure.into_error())?;
+        let request = SpiSubscriptionRequest::new(
+            qubit_id::Id::new(91_002),
+            TopicAddress::new("invalid-position")?,
+            SubscriberId::new("invalid-position-async-worker")?,
+            None,
+            SubscriptionDurability::Durable,
+            StartPosition::At("not-a-stream-id".into()),
+            ProviderOptions::new(),
+            TypeId::of::<Vec<u8>>(),
+        );
+        assert!(bus.subscribe(request).await.is_err());
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })
 }
 
 #[test]

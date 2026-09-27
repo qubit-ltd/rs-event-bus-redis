@@ -414,6 +414,33 @@ fn test_async_reject_acks_and_malformed_wire_is_quarantined() -> Result<(), Box<
             receiver.receive(Duration::from_secs(1)).await?,
             ReceiveOutcome::Gap(_)
         ));
+        let stream = stream_key("async-tests", "async-malformed");
+        for wire in [
+            "not-json",
+            r#"{"version":999,"event_id":"event","timestamp_ms":0,"headers_json":"{}","ordering_key":null,"content_type":"application/octet-stream","schema_id":null,"payload":[]}"#,
+            r#"{"version":1,"event_id":"","timestamp_ms":0,"headers_json":"{}","ordering_key":null,"content_type":"application/octet-stream","schema_id":null,"payload":[]}"#,
+        ] {
+            cmd("XADD")
+                .arg(&stream)
+                .arg("*")
+                .arg("wire")
+                .arg(wire)
+                .query::<String>(&mut connection)?;
+            assert!(matches!(
+                receiver.receive(Duration::from_secs(1)).await?,
+                ReceiveOutcome::Gap(_)
+            ));
+        }
+        cmd("XADD")
+            .arg(&stream)
+            .arg("*")
+            .arg("wire")
+            .arg(vec![0xff_u8])
+            .query::<String>(&mut connection)?;
+        assert!(matches!(
+            receiver.receive(Duration::from_secs(1)).await?,
+            ReceiveOutcome::Gap(_)
+        ));
         Ok::<(), Box<dyn std::error::Error>>(())
     })
 }
@@ -423,6 +450,16 @@ fn test_async_redis_command_failures_are_returned_without_details() -> Result<()
     let server = RedisServer::start()?;
     let bus = create_bus(&server)?;
     block_on(async {
+        let native_message = OutboundMessage::new(
+            TopicAddress::new("async-native")?,
+            EventId::new("async-native-event")?,
+            SystemTime::UNIX_EPOCH,
+            Headers::new(),
+            None,
+            None,
+            TransportPayload::Native(Arc::new(7_u8)),
+        );
+        assert!(bus.publish(native_message).await.is_err());
         let key = stream_key("async-tests", "async-wrong-type");
         let mut connection = Client::open(server.url())?.get_connection()?;
         cmd("SET").arg(&key).arg("not-a-stream").query::<()>(&mut connection)?;
@@ -436,6 +473,15 @@ fn test_async_redis_command_failures_are_returned_without_details() -> Result<()
                 .await
                 .is_err()
         );
+        let _: usize = cmd("DEL").arg(&key).query(&mut connection)?;
+        let mut first = bus
+            .subscribe(group_request("async-wrong-type", "duplicate-group-worker", "group"))
+            .await?;
+        let mut second = bus
+            .subscribe(group_request("async-wrong-type", "duplicate-group-worker", "group"))
+            .await?;
+        first.close().await?;
+        second.close().await?;
 
         bus.publish(message("async-failed-ack", "failed-ack-event", b"x")?)
             .await?;

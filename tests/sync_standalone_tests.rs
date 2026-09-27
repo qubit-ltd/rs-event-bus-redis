@@ -354,6 +354,33 @@ fn test_sync_reject_acks_and_malformed_wire_is_quarantined() -> Result<(), Box<d
         receiver.receive(Duration::from_secs(1))?,
         ReceiveOutcome::Gap(_)
     ));
+    let stream = stream_key("sync-tests", "malformed");
+    for wire in [
+        "not-json",
+        r#"{"version":999,"event_id":"event","timestamp_ms":0,"headers_json":"{}","ordering_key":null,"content_type":"application/octet-stream","schema_id":null,"payload":[]}"#,
+        r#"{"version":1,"event_id":"","timestamp_ms":0,"headers_json":"{}","ordering_key":null,"content_type":"application/octet-stream","schema_id":null,"payload":[]}"#,
+    ] {
+        cmd("XADD")
+            .arg(&stream)
+            .arg("*")
+            .arg("wire")
+            .arg(wire)
+            .query::<String>(&mut connection)?;
+        assert!(matches!(
+            receiver.receive(Duration::from_secs(1))?,
+            ReceiveOutcome::Gap(_)
+        ));
+    }
+    cmd("XADD")
+        .arg(&stream)
+        .arg("*")
+        .arg("wire")
+        .arg(vec![0xff_u8])
+        .query::<String>(&mut connection)?;
+    assert!(matches!(
+        receiver.receive(Duration::from_secs(1))?,
+        ReceiveOutcome::Gap(_)
+    ));
     Ok(())
 }
 
@@ -361,6 +388,16 @@ fn test_sync_reject_acks_and_malformed_wire_is_quarantined() -> Result<(), Box<d
 fn test_sync_redis_command_failures_are_returned_without_details() -> Result<(), Box<dyn std::error::Error>> {
     let server = RedisServer::start()?;
     let bus = create_bus(&server)?;
+    let native_message = OutboundMessage::new(
+        TopicAddress::new("sync-native")?,
+        EventId::new("sync-native-event")?,
+        SystemTime::UNIX_EPOCH,
+        Headers::new(),
+        None,
+        None,
+        TransportPayload::Native(Arc::new(7_u8)),
+    );
+    assert!(bus.publish(native_message).is_err());
     let key = stream_key("sync-tests", "wrong-type");
     let mut connection = Client::open(server.url())?.get_connection()?;
     cmd("SET").arg(&key).arg("not-a-stream").query::<()>(&mut connection)?;
@@ -374,6 +411,21 @@ fn test_sync_redis_command_failures_are_returned_without_details() -> Result<(),
         )?)
         .is_err()
     );
+    let _: usize = cmd("DEL").arg(&key).query(&mut connection)?;
+    let mut first = bus.subscribe(request(
+        "wrong-type",
+        "duplicate-group-worker",
+        None,
+        StartPosition::Earliest,
+    )?)?;
+    let mut second = bus.subscribe(request(
+        "wrong-type",
+        "duplicate-group-worker",
+        None,
+        StartPosition::Earliest,
+    )?)?;
+    first.close()?;
+    second.close()?;
 
     bus.publish(message("failed-ack", "failed-ack-event", b"x")?)?;
     let mut receiver = bus.subscribe(request(
