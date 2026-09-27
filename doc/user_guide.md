@@ -1,0 +1,187 @@
+# Redis Streams User Guide
+
+**For:** Rust service developers using `qubit-event-bus` 0.14 and `qubit-event-bus-redis` 0.1. This guide shows how an order publisher and billing consumer share events through Redis while keeping application code on the event-bus facade.
+
+[简体中文](user_guide.zh_CN.md) · [README](../README.md) · [API docs](https://docs.rs/qubit-event-bus-redis)
+
+## 1. Add the provider and select it
+
+Add both the facade and provider as direct dependencies. `discovery` is on by default in the provider crate; it submits `redis-streams` to the synchronous and asynchronous provider inventories. Your application calls `EventBusRegistry::discover()` or `AsyncEventBusRegistry::discover()` and selects the provider by ID.
+
+```toml
+[dependencies]
+qubit-event-bus = { version = "0.14", features = ["discovery"] }
+qubit-event-bus-redis = "0.1"
+qubit-spi = "0.13"
+```
+
+Use `default-features = false` and choose `features = ["sync"]` or `features = ["async"]` if the application only uses one SPI. `async` supports the Redis client's Smol adapter and Tokio host detection. The crate does not start a Tokio runtime or spawn a subscription worker; the facade's async runner is polled by the application's executor.
+
+Redis 6.2 or newer is required. The integration tests use Docker to start isolated Redis 6.2, Redis 7, and Sentinel processes.
+
+## 2. Register a codec for portable payloads
+
+Redis stores encoded bytes, so every payload type used by the facade needs an `EventCodec<T>`. This example uses UTF-8 `String` messages. Production applications can replace it with JSON, Protobuf, or another schema-aware codec.
+
+```rust
+use std::sync::Arc;
+
+use qubit_event_bus::codec::EventCodec;
+use qubit_event_bus::error::CodecError;
+use qubit_event_bus::model::ContentType;
+
+struct Utf8Codec(ContentType);
+
+impl EventCodec<String> for Utf8Codec {
+    fn content_type(&self) -> &ContentType { &self.0 }
+    fn schema_id(&self) -> Option<&qubit_event_bus::model::SchemaId> { None }
+    fn encode(&self, value: &String) -> Result<Arc<[u8]>, CodecError> {
+        Ok(Arc::from(value.as_bytes()))
+    }
+    fn decode(&self, bytes: &[u8]) -> Result<String, CodecError> {
+        String::from_utf8(bytes.to_vec()).map_err(|source| CodecError::Decode { source: Box::new(source) })
+    }
+}
+```
+
+Create a `CodecRegistry`, register `Utf8Codec`, and place it in `EventBusFacadeConfig`. If the codec is missing, the facade rejects a typed publish or subscription before calling Redis.
+
+## 3. Publish and consume synchronously
+
+The service config contains only a Redis URL and a namespace. Select `redis-streams` explicitly so registry fallback cannot silently choose another backend.
+
+```rust,no_run
+use std::sync::Arc;
+
+use qubit_event_bus::codec::CodecRegistry;
+use qubit_event_bus::facade::EventBusFacadeConfig;
+use qubit_event_bus::model::{ContentType, ConsumerGroup, PublishRequest, StartPosition, SubscribeRequest, SubscriptionDurability, Topic};
+use qubit_event_bus::registry::{EventBusConfig, EventBusRegistry};
+use qubit_event_bus::model::ProviderOptions;
+use qubit_spi::ProviderSelection;
+
+fn start_service() -> Result<(), Box<dyn std::error::Error>> {
+    let mut codecs = CodecRegistry::new();
+    codecs.register::<String>(Arc::new(Utf8Codec(ContentType::new("text/plain")?)));
+    let facade = EventBusFacadeConfig::new().with_codec_registry(Arc::new(codecs));
+    let options: ProviderOptions = [
+        ("redis.url".into(), "redis://127.0.0.1/".into()),
+        ("redis.namespace".into(), "orders".into()),
+    ].into();
+    let config = EventBusConfig::default()
+        .with_selection(ProviderSelection::named("redis-streams")?)
+        .with_provider_options(options)
+        .with_facade_config(facade);
+    let registry = EventBusRegistry::discover()?;
+    let bus = registry.create(&config)?;
+    let topic = Topic::<String>::new("orders.created")?;
+    bus.publish(PublishRequest::new(topic.clone(), "order-42".to_owned())?)?;
+
+    let request = SubscribeRequest::builder()
+        .subscriber_id(qubit_event_bus::SubscriberId::new("billing-worker")?)
+        .topic(topic)
+        .consumer_group(ConsumerGroup::new("billing")?)
+        .durability(SubscriptionDurability::Durable)
+        .start_position(StartPosition::Earliest)
+        .build()?;
+    let subscription = bus.subscribe(request, |delivery| {
+        println!("process order event: {}", delivery.payload());
+    })?;
+    // A long-running service retains `subscription` and cancels it during shutdown.
+    drop(subscription);
+    Ok(())
+}
+```
+
+The example writes before it creates the `Earliest` group, so that group can read the retained event. In production, register the consumer before relying on `New`, which starts after the group is created. A durable group remains in Redis when the service disconnects. This provider currently keeps groups even when a request says `Ephemeral`.
+
+With a `ConsumerGroup` set, instances using the same namespace, topic, and group share work. A different group gets its own stream cursor and receives its own copy. Without an explicit group, the subscriber ID becomes the group identity.
+
+## 4. Run the asynchronous SPI
+
+Async bus creation, publish, subscribe, and receive return runtime-neutral futures. The example uses `futures_lite::future::block_on` for a small application. A long-running service usually polls these futures on its existing executor and runs the subscription concurrently with other service work.
+
+```rust,no_run
+use futures_lite::future::block_on;
+use qubit_event_bus::registry::{AsyncEventBusRegistry, EventBusConfig};
+use qubit_event_bus::model::{ProviderOptions, PublishRequest, Topic};
+use qubit_spi::ProviderSelection;
+
+fn publish_async() -> Result<(), Box<dyn std::error::Error>> {
+    block_on(async {
+        let options: ProviderOptions = [
+            ("redis.url".into(), "redis://127.0.0.1/".into()),
+            ("redis.namespace".into(), "orders".into()),
+        ].into();
+        let config = EventBusConfig::default()
+            .with_selection(ProviderSelection::named("redis-streams")?)
+            .with_provider_options(options);
+        let registry = AsyncEventBusRegistry::discover()?;
+        let bus = registry.create(&config).await?;
+        let topic = Topic::<String>::new("orders.created")?;
+        bus.publish(PublishRequest::new(topic, "order-43".to_owned())?).await?;
+        Ok(())
+    })
+}
+```
+
+The async facade also requires the same codec registry as the sync example. `AsyncSubscription::run` is caller driven; its future belongs on the application's executor. Dropping a pending `receive` future does not acknowledge the record. Redis keeps it in the consumer group's pending entries list, and a later receive by that consumer or `XAUTOCLAIM` by another consumer can recover it.
+
+## 5. Configure Redis and Sentinel
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `redis.url` | `redis://127.0.0.1/` | Standalone Redis connection URL; inline username and password are rejected. |
+| `redis.namespace` | `qubit` | Prefix scope used to derive stream and group keys. |
+| `redis.claim_min_idle_ms` | `30000` | Minimum pending idle time before another consumer can claim an entry. |
+| `redis.max_unsettled_per_subscription` | `100` | Maximum delivered but unsettled messages held by one subscription; receive waits while the limit is reached. |
+| `redis.username_env` | unset | Environment variable name containing the Redis ACL username. |
+| `redis.password_env` | unset | Environment variable name containing the Redis ACL password. |
+| `redis.sentinel.nodes` | unset | Comma-separated Sentinel `host:port` endpoints. |
+| `redis.sentinel.service_name` | unset | Sentinel master service name; required with `nodes`. |
+| `redis.sentinel.username_env` | unset | Environment variable name containing the Sentinel ACL username. |
+| `redis.sentinel.password_env` | unset | Environment variable name containing the Sentinel ACL password. |
+
+When Sentinel is configured, both `redis.sentinel.nodes` and `redis.sentinel.service_name` are required. The URL remains syntactically valid but is not used to locate the master. Each command obtains a connection through Sentinel so a later operation can resolve the promoted master after failover.
+
+Credentials belong in the service environment. Provider options contain environment variable names, and `RedisEventBusConfig` redacts its URL and credentials from `Debug`. Do not put raw secrets in provider options, URLs, command-line arguments, or logs. This release does not enable TLS options in `redis-rs`; keep Redis traffic on a trusted network until TLS support is added.
+
+## 6. Understand delivery, retry, and cleanup
+
+The provider stores one JSON wire record under the `wire` stream field. It contains a protocol version, event ID, timestamp, headers, optional ordering key, content type, optional schema ID, and payload bytes. Unknown versions fail with a provider error. `XADD` success returns an `Accepted` acknowledgement; if the connection drops before the reply arrives, the caller cannot know whether Redis stored the record. Retrying a publish can create a duplicate.
+
+| Action | Redis behavior | Application consequence |
+| --- | --- | --- |
+| `Accept` | `XACK` | Removes the message from the group's pending list. |
+| `Reject` | `XACK` | Terminates delivery; no dead-letter stream is created. |
+| `Retry` | Leaves the message pending | It can be read again by this consumer or claimed after the idle threshold. |
+| Close or drop | No implicit `XACK` | Unsettled messages remain recoverable. |
+| Cancel async receive | No implicit `XACK` | A consumed record remains in Redis PEL for a later receive/claim. |
+
+Redis Streams provide at-least-once delivery, so make handlers idempotent. A slow handler can exceed `redis.claim_min_idle_ms`; another consumer may claim the same pending event while the first handler is still running. Choose an idle threshold that fits handler latency and retain business-level deduplication where duplicates are costly.
+
+Each subscription stops receiving new entries while its unsettled count reaches `redis.max_unsettled_per_subscription`. Settling or retrying an entry frees capacity. This bounds in-process delivery pressure; it does not limit Redis stream growth.
+
+`StartPosition::New` creates a group at the current stream tail. `Earliest` starts a new group at `0-0`. `At("milliseconds-sequence")` supplies a Redis Stream ID. Once a group exists, Redis retains its cursor, so changing the requested start position does not rewind that existing group.
+
+The provider does not trim streams or delete groups. Monitor Redis memory and stream growth. Before deleting a stream or group, stop consumers and decide how to handle every pending event; deleting pending records can produce `ReceiveOutcome::Gap`. Configure Redis persistence and replication to match the application's recovery objectives: `Accepted` does not mean fsynced, and Sentinel replication can lose writes that were not replicated before promotion.
+
+## 7. Diagnose common failures
+
+- **Registry has no `redis-streams` entry:** keep `qubit-event-bus-redis` as a direct dependency, enable its `discovery` feature, and call the matching sync or async registry's `discover()`.
+- **Typed publish or subscribe reports a codec requirement:** register an `EventCodec<T>` in `EventBusFacadeConfig` for that topic payload type.
+- **Provider rejects configuration:** check `redis.url`, `redis.namespace`, paired Sentinel settings, and whether referenced credential environment variables exist. Inline URL credentials are rejected to avoid leaking them in diagnostics.
+- **Consumer does not receive old events:** use a new group with `StartPosition::Earliest`; an existing group keeps its stored Redis cursor.
+- **A consumer takes over too soon or too late:** adjust `redis.claim_min_idle_ms` to the handler's normal and worst-case duration. Re-delivery remains possible.
+- **A gap appears after stream maintenance:** inspect operator `XDEL`/`XTRIM` activity and pending entries before further cleanup. A gap means Redis no longer has one or more pending records.
+- **Sentinel cannot connect:** verify each endpoint, master service name, ACL environment references, quorum, and that the Redis master addresses returned by Sentinel are reachable from the application host.
+
+There are no built-in PEL or reconnect metrics in this release. Use Redis `XPENDING`, `XINFO STREAM`, and `XINFO GROUPS` during operations, and record provider errors and publish receipt IDs in application telemetry.
+
+## 8. Stop cleanly
+
+Cancel synchronous subscriptions before graceful bus shutdown. For async buses, close or stop the `AsyncSubscription`, then await `AsyncEventBus::shutdown`. Immediate close leaves unsettled stream entries in Redis; it never implies acceptance.
+
+## Support boundary
+
+Supported: Redis standalone and Sentinel, Redis 6.2+, encoded payloads, consumer groups, accepted/retry/reject settlement, and replay from Redis stream positions. Not supported: Cluster, native payloads, ordering guarantees, delayed delivery, automatic trimming/deletion, dead-letter routing, and TLS configuration. The provider does not claim exactly-once processing.

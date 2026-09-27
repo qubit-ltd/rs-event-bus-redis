@@ -1,5 +1,5 @@
 {
-  "site_title": "Rust project",
+  "site_title": "Qubit Redis Event Bus",
   "default_language": "en",
   "deploy": true,
   "languages": {
