@@ -60,6 +60,7 @@ The event-bus SPI lets an application choose a transport without changing busine
 - Redis standalone and Sentinel master discovery; async calls can be driven by Smol or Tokio hosts without requiring the application to start Tokio.
 - Stream records with a versioned encoded payload, headers, event ID, content type, and optional schema and ordering metadata.
 - Consumer groups, `Accept`/`Reject` acknowledgement, `Retry` through the pending entries list, and recovery with `XAUTOCLAIM`.
+- Bounded per-subscription unsettled delivery tracking and atomic quarantine for malformed stream records; Redis subscriptions must explicitly use `Durable`.
 - Test fixtures that start isolated Redis 6.2, Redis 7, and Sentinel services in Docker.
 
 Redis delivery is at least once. Handlers should tolerate duplicates. A successful `XADD` means Redis accepted the command; it does not prove the record was fsynced or processed. The provider does not implement Cluster, native/delayed delivery, TLS configuration, stream trimming, or a dead-letter policy. Stream and group cleanup is an operator task.

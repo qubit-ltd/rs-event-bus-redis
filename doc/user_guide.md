@@ -93,7 +93,11 @@ fn start_service() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-The example writes before it creates the `Earliest` group, so that group can read the retained event. In production, register the consumer before relying on `New`, which starts after the group is created. A durable group remains in Redis when the service disconnects. This provider currently keeps groups even when a request says `Ephemeral`.
+The example writes before it creates the `Earliest` group, so that group can read the retained event. In production, register the consumer before relying on `New`, which starts after the group is created. Redis Streams accepts only `Durable` subscriptions; `Ephemeral` is rejected before Redis I/O. Groups remain when a service disconnects, and closing a subscription leaves unsettled records pending. Redis applies the start position only when it first creates a group.
+
+Malformed wire records are moved atomically to a group-specific quarantine stream (`qubit:poison:*`) and acknowledged from the source group. The quarantine record stores `source_stream`, `source_id`, `group`, a stable `reason`, the original `wire` bytes, and `wire_missing`. A successful quarantine is returned as a `Gap` without exposing payload bytes. Inspect entries with `XRANGE <quarantine-key> - +`; monitor quarantine length, source stream length, and pending entries with `XLEN` and `XPENDING`. The provider never trims these streams automatically, so operators should archive or remove quarantine records under their retention policy.
+
+Delivery remains at least once. If a handler runs longer than `redis.claim_min_idle_ms`, another consumer may claim its pending entry. A publish whose `XADD` reply is lost has an unknown outcome and may be duplicated if retried. `redis.max_unsettled_per_subscription` bounds locally active deliveries (default 100).
 
 With a `ConsumerGroup` set, instances using the same namespace, topic, and group share work. A different group gets its own stream cursor and receives its own copy. Without an explicit group, the subscriber ID becomes the group identity.
 
@@ -135,6 +139,7 @@ The async facade also requires the same codec registry as the sync example. `Asy
 | `redis.namespace` | `qubit` | Prefix scope used to derive stream and group keys. |
 | `redis.claim_min_idle_ms` | `30000` | Minimum pending idle time before another consumer can claim an entry. |
 | `redis.max_unsettled_per_subscription` | `100` | Maximum delivered but unsettled messages held by one subscription; receive waits while the limit is reached. |
+| `redis.max_idle_connections` | `8` | Maximum idle synchronous standalone command connections retained for reuse; accepts 1 through 64. Dedicated blocking receiver connections are counted separately. |
 | `redis.username_env` | unset | Environment variable name containing the Redis ACL username. |
 | `redis.password_env` | unset | Environment variable name containing the Redis ACL password. |
 | `redis.sentinel.nodes` | unset | Comma-separated Sentinel `host:port` endpoints. |
@@ -142,7 +147,7 @@ The async facade also requires the same codec registry as the sync example. `Asy
 | `redis.sentinel.username_env` | unset | Environment variable name containing the Sentinel ACL username. |
 | `redis.sentinel.password_env` | unset | Environment variable name containing the Sentinel ACL password. |
 
-When Sentinel is configured, both `redis.sentinel.nodes` and `redis.sentinel.service_name` are required. The URL remains syntactically valid but is not used to locate the master. Each command obtains a connection through Sentinel so a later operation can resolve the promoted master after failover.
+When Sentinel is configured, both `redis.sentinel.nodes` and `redis.sentinel.service_name` are required. The URL remains syntactically valid but is not used to locate the master. Sentinel connections are resolved through the Sentinel client instead of entering the standalone idle pool, so commands after failover can resolve the promoted master. Standalone synchronous short commands reuse up to `redis.max_idle_connections` idle connections; async standalone publish and settlement share a multiplexed command connection. Receiver reads use their own connection so blocking reads do not occupy the short-command path.
 
 Credentials belong in the service environment. Provider options contain environment variable names, and `RedisEventBusConfig` redacts its URL and credentials from `Debug`. Do not put raw secrets in provider options, URLs, command-line arguments, or logs. This release does not enable TLS options in `redis-rs`; keep Redis traffic on a trusted network until TLS support is added.
 

@@ -93,7 +93,11 @@ fn start_service() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-示例先写入事件，再创建 `Earliest` 消费组，因此新组能读取已保留的记录。生产服务若使用 `New`，应先注册 consumer，再依赖后续发布的事件。服务断连时，Durable group 会保留在 Redis 中。目前即使订阅请求是 `Ephemeral`，provider 也会保留消费组。
+示例先写入事件，再创建 `Earliest` 消费组，因此新组能读取已保留的记录。生产服务若使用 `New`，应先注册 consumer，再依赖后续发布的事件。Redis Streams 只接受 `Durable` 订阅；`Ephemeral` 会在执行 Redis I/O 前被拒绝。服务断连或关闭订阅时，group 会保留，未结算记录仍在 pending entries list 中。Redis 只在首次创建 group 时应用起始位置。
+
+格式错误的 wire 记录会被原子转移到按 group 隔离的 stream（`qubit:poison:*`），并从源 group 确认。隔离记录包含 `source_stream`、`source_id`、`group`、稳定的 `reason`、原始 `wire` 字节和 `wire_missing`。隔离成功后返回 `Gap`，不会把 payload 放进错误信息。可用 `XRANGE <quarantine-key> - +` 检查记录，并用 `XLEN`、`XPENDING` 监控隔离流、源 stream 和 pending 数量。provider 不会自动裁剪这些 stream；运维应按保留策略归档或清理隔离数据。
+
+投递语义仍是至少一次。如果 handler 运行时间超过 `redis.claim_min_idle_ms`，其他 consumer 可能接管该 pending 记录。若 `XADD` 回复丢失，发布结果未知，重试可能产生重复事件。`redis.max_unsettled_per_subscription` 限制本地活跃投递数，默认值为 100。
 
 指定 `ConsumerGroup` 后，namespace、topic 和 group 相同的实例会共同分工。不同 group 各自维护读取位置，因此都能收到自己的副本。未指定 group 时，subscriber ID 用作 group 身份。
 
@@ -135,6 +139,7 @@ fn publish_async() -> Result<(), Box<dyn std::error::Error>> {
 | `redis.namespace` | `qubit` | 用于生成 stream 和消费组 key 的命名空间。 |
 | `redis.claim_min_idle_ms` | `30000` | 其他 consumer 可以认领 pending entry 前所需的空闲毫秒数。 |
 | `redis.max_unsettled_per_subscription` | `100` | 每个订阅已投递但未结算的消息上限；达到上限后 receive 会等待。 |
+| `redis.max_idle_connections` | `8` | 同步 standalone 命令连接的最大空闲复用数，范围为 1 到 64。阻塞接收器的专用连接另计。 |
 | `redis.username_env` | 未设置 | 保存 Redis ACL username 的环境变量名称。 |
 | `redis.password_env` | 未设置 | 保存 Redis ACL password 的环境变量名称。 |
 | `redis.sentinel.nodes` | 未设置 | Sentinel 的逗号分隔 `host:port` 地址。 |
@@ -142,7 +147,7 @@ fn publish_async() -> Result<(), Box<dyn std::error::Error>> {
 | `redis.sentinel.username_env` | 未设置 | 保存 Sentinel ACL username 的环境变量名称。 |
 | `redis.sentinel.password_env` | 未设置 | 保存 Sentinel ACL password 的环境变量名称。 |
 
-启用 Sentinel 时，`redis.sentinel.nodes` 和 `redis.sentinel.service_name` 必须同时设置。此时 Redis URL 仍须是合法 URL，但不会用于查找 master。每条命令都会通过 Sentinel 获取连接，因此后续命令可以在故障转移后重新定位晋升的 master。
+启用 Sentinel 时，`redis.sentinel.nodes` 和 `redis.sentinel.service_name` 必须同时设置。此时 Redis URL 仍须是合法 URL，但不会用于查找 master。Sentinel 连接不进入 standalone 空闲池，故障转移后的命令仍会经 Sentinel 解析新 master。同步 standalone 短命令最多复用 `redis.max_idle_connections` 条空闲连接；异步 standalone 发布与结算共享 multiplexed 命令连接。接收器使用独立连接，阻塞读取不会占用短命令通道。
 
 凭据应放在服务运行环境中。provider options 保存环境变量名称；`RedisEventBusConfig` 的 `Debug` 会隐藏 URL 和凭据。不要把明文密钥放入 provider options、URL、命令行参数或日志。此版本没有启用 `redis-rs` 的 TLS 参数；增加 TLS 支持前，应将 Redis 流量限制在可信网络内。
 

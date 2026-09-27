@@ -60,6 +60,7 @@ event-bus SPI 允许应用更换传输实现，而不改业务 handler。Redis S
 - 支持 Redis 单实例与 Sentinel 主节点发现；异步调用可由 Smol 或 Tokio host 驱动，应用无需启动 Tokio。
 - 使用带版本的 stream 记录保存编码 payload、headers、事件 ID、content type，以及可选 schema 和排序元数据。
 - 支持消费组、`Accept`/`Reject` 确认、通过待处理列表执行 `Retry`，并用 `XAUTOCLAIM` 恢复消息。
+- 限制每个订阅的未结算活跃投递数，并原子隔离格式错误的 stream 记录；Redis 订阅必须显式使用 `Durable`。
 - 测试会通过 Docker 启动隔离的 Redis 6.2、Redis 7 和 Sentinel 服务。
 
 Redis 使用至少一次投递，业务 handler 应能处理重复事件。`XADD` 成功只表示 Redis 接受了命令，不能证明记录已经 fsync 或完成处理。当前不支持 Cluster、native/delayed delivery、TLS 配置、stream 自动裁剪或死信策略。stream 和消费组由运维人员负责清理。
