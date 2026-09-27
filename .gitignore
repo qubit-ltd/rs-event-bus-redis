@@ -91,3 +91,6 @@ external/
 /coverage.json
 /coverage.txt
 /lcov.info
+
+# Cargo build outputs in nested fixtures
+target/
