@@ -12,22 +12,29 @@ documentation = "https://docs.rs/qubit-event-bus-redis"
 readme = "README.md"
 include = ["/Cargo.toml", "/LICENSE", "/README*", "/doc/**/*.md", "/src/**", "/tests/**"]
 
+[workspace]
+resolver = "3"
+
 [features]
 default = ["sync", "async", "discovery"]
-sync = ["dep:redis", "redis/streams"]
-async = ["dep:redis", "redis/smol-comp", "redis/streams"]
+sync = ["redis/streams"]
+async = ["dep:async-lock", "redis/smol-comp", "redis/streams"]
 discovery = ["sync", "async", "qubit-event-bus/discovery", "qubit-spi/inventory"]
+conformance = ["qubit-event-bus/conformance"]
 
 [dependencies]
 qubit-event-bus = { version = "0.14.0", path = "../rs-event-bus" }
 qubit-spi = "0.13"
-redis = { version = "0.32.7", default-features = false, features = ["streams", "sentinel"], optional = true }
+qubit-id = "0.6"
+async-lock = { version = "3", optional = true }
+redis = { version = "0.32.7", default-features = false, features = ["streams", "sentinel"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 
 [dev-dependencies]
 futures-lite = "2"
+redis = { version = "0.32.7", default-features = false, features = ["tokio-comp", "streams", "sentinel"] }
 tempfile = "3"
 tokio = { version = "1", features = ["rt", "macros"] }
 

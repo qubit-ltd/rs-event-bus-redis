@@ -5,6 +5,9 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-//! Public Redis provider configuration.
+//! Runtime-neutral asynchronous Redis Streams provider.
 
-pub use crate::redis_event_bus_config::RedisEventBusConfig;
+mod async_redis_event_bus_provider;
+mod subscription;
+
+pub use async_redis_event_bus_provider::AsyncRedisEventBusProvider;

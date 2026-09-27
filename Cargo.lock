@@ -743,8 +743,10 @@ dependencies = [
 name = "qubit-event-bus-redis"
 version = "0.1.0"
 dependencies = [
+ "async-lock",
  "futures-lite",
  "qubit-event-bus",
+ "qubit-id",
  "qubit-spi",
  "redis",
  "serde",

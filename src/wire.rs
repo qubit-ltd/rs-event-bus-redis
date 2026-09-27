@@ -5,6 +5,6 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-//! Public Redis provider configuration.
+//! Public Redis stream wire fields.
 
-pub use crate::redis_event_bus_config::RedisEventBusConfig;
+pub use crate::wire_fields::WireFields;
