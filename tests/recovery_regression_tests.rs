@@ -332,6 +332,70 @@ fn sync_reuses_standalone_short_command_connection() -> Result<(), Box<dyn std::
     Ok(())
 }
 
+#[cfg(feature = "sync")]
+#[test]
+fn sync_reuses_subscription_read_connection_across_timeouts() -> Result<(), Box<dyn std::error::Error>> {
+    let server = RedisServer::start()?;
+    let bus = sync_bus(&server, "read-connection-sync", 2)?;
+    let mut receiver = bus.subscribe(request(
+        "events",
+        "read-worker",
+        "read-group",
+        SubscriptionDurability::Durable,
+    )?)?;
+    let mut observer = Client::open(server.url())?.get_connection()?;
+    let before = total_connections(&mut observer)?;
+    assert!(matches!(
+        receiver.receive(Duration::from_millis(5))?,
+        ReceiveOutcome::TimedOut
+    ));
+    assert!(matches!(
+        receiver.receive(Duration::from_millis(5))?,
+        ReceiveOutcome::TimedOut
+    ));
+    let after = total_connections(&mut observer)?;
+    assert_eq!(
+        after - before,
+        1,
+        "two completed receives should share one dedicated connection"
+    );
+    Ok(())
+}
+
+#[cfg(feature = "async")]
+#[test]
+fn async_reuses_subscription_read_connection_across_timeouts() -> Result<(), Box<dyn std::error::Error>> {
+    futures_lite::future::block_on(async {
+        let server = RedisServer::start()?;
+        let bus = async_bus(&server, "read-connection-async", 2).await?;
+        let mut receiver = bus
+            .subscribe(request(
+                "events",
+                "read-worker",
+                "read-group",
+                SubscriptionDurability::Durable,
+            )?)
+            .await?;
+        let mut observer = Client::open(server.url())?.get_connection()?;
+        let before = total_connections(&mut observer)?;
+        assert!(matches!(
+            receiver.receive(Duration::from_millis(5)).await?,
+            ReceiveOutcome::TimedOut
+        ));
+        assert!(matches!(
+            receiver.receive(Duration::from_millis(5)).await?,
+            ReceiveOutcome::TimedOut
+        ));
+        let after = total_connections(&mut observer)?;
+        assert_eq!(
+            after - before,
+            1,
+            "two completed receives should share one dedicated connection"
+        );
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })
+}
+
 fn total_connections(connection: &mut redis::Connection) -> Result<u64, Box<dyn std::error::Error>> {
     let info: String = cmd("INFO").arg("stats").query(connection)?;
     let value = info
@@ -895,6 +959,92 @@ fn async_claim_command_failure_is_reported_as_retryable() -> Result<(), Box<dyn 
             .query(&mut connection)?;
         let error = match receiver.receive(Duration::ZERO).await {
             Ok(_) => return Err("removed group should fail XAUTOCLAIM".into()),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            qubit_event_bus::error::SpiError::Operation {
+                retryable: Some(true),
+                ..
+            }
+        ));
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })
+}
+
+#[cfg(feature = "sync")]
+#[test]
+fn sync_drops_reader_connection_after_redis_receive_error() -> Result<(), Box<dyn std::error::Error>> {
+    let server = RedisServer::start()?;
+    let bus = sync_bus(&server, "read-error-sync", 2)?;
+    let mut receiver = bus.subscribe(request(
+        "events",
+        "read-error-worker",
+        "read-error-group",
+        SubscriptionDurability::Durable,
+    )?)?;
+    let key = stream_key("read-error-sync", "events");
+    let mut connection = Client::open(server.url())?.get_connection()?;
+    let _: String = cmd("SET").arg(&key).arg("wrong-type").query(&mut connection)?;
+    let error = match receiver.receive(Duration::ZERO) {
+        Ok(_) => return Err("wrong-type stream should fail receive".into()),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        qubit_event_bus::error::SpiError::Operation {
+            retryable: Some(true),
+            ..
+        }
+    ));
+    let mut shutdown_connection = Client::open(server.url())?.get_connection()?;
+    let _: redis::RedisResult<()> = cmd("SHUTDOWN").arg("NOSAVE").query(&mut shutdown_connection);
+    let error = match receiver.receive(Duration::ZERO) {
+        Ok(_) => return Err("stopped Redis server should fail receive".into()),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        qubit_event_bus::error::SpiError::Operation {
+            retryable: Some(true),
+            ..
+        }
+    ));
+    Ok(())
+}
+
+#[cfg(feature = "async")]
+#[test]
+fn async_drops_reader_connection_after_redis_receive_error() -> Result<(), Box<dyn std::error::Error>> {
+    futures_lite::future::block_on(async {
+        let server = RedisServer::start()?;
+        let bus = async_bus(&server, "read-error-async", 2).await?;
+        let mut receiver = bus
+            .subscribe(request(
+                "events",
+                "read-error-worker",
+                "read-error-group",
+                SubscriptionDurability::Durable,
+            )?)
+            .await?;
+        let key = stream_key("read-error-async", "events");
+        let mut connection = Client::open(server.url())?.get_connection()?;
+        let _: String = cmd("SET").arg(&key).arg("wrong-type").query(&mut connection)?;
+        let error = match receiver.receive(Duration::ZERO).await {
+            Ok(_) => return Err("wrong-type stream should fail receive".into()),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            qubit_event_bus::error::SpiError::Operation {
+                retryable: Some(true),
+                ..
+            }
+        ));
+        let mut shutdown_connection = Client::open(server.url())?.get_connection()?;
+        let _: redis::RedisResult<()> = cmd("SHUTDOWN").arg("NOSAVE").query(&mut shutdown_connection);
+        let error = match receiver.receive(Duration::ZERO).await {
+            Ok(_) => return Err("stopped Redis server should fail receive".into()),
             Err(error) => error,
         };
         assert!(matches!(

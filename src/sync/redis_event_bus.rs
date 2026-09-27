@@ -207,6 +207,7 @@ impl EventBusSpi for RedisEventBus {
         let consumer = request.subscription_id().to_string();
         Ok(Box::new(Subscription {
             client: Arc::clone(&self.client),
+            receive_connection: None,
             key,
             group,
             quarantine,

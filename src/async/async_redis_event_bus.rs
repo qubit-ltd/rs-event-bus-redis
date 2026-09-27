@@ -241,6 +241,7 @@ impl AsyncEventBusSpi for AsyncRedisEventBus {
             }
             Ok(Box::new(Subscription {
                 client: Arc::clone(&self.client),
+                receive_connection: None,
                 key,
                 group,
                 quarantine,

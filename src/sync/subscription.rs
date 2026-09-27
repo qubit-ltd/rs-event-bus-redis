@@ -31,6 +31,7 @@ use redis::streams::StreamReadReply;
 use super::internal::SettlementState;
 use super::redis_event_bus::spi_error;
 use crate::client::Client;
+use crate::client::PooledConnection;
 use crate::error::RedisProviderError;
 use crate::poison::PoisonOutcome;
 use crate::poison::PoisonReason;
@@ -40,8 +41,10 @@ use crate::wire::WireFields;
 
 /// One blocking consumer owned by a facade subscription.
 pub(crate) struct Subscription {
-    /// Shared factory used to create a blocking connection per operation.
+    /// Shared blocking connection factory.
     pub(crate) client: Arc<Client>,
+    /// Dedicated connection reused between completed receives.
+    pub(crate) receive_connection: Option<PooledConnection>,
     /// Redis stream key.
     pub(crate) key: String,
     /// Consumer group name.
@@ -104,60 +107,141 @@ impl EventSubscriptionSpi for Subscription {
         {
             return Ok(ReceiveOutcome::TimedOut);
         }
-        let mut connection = self
-            .client
-            .get_dedicated_connection()
-            .map_err(|_| spi_error("receive", Some(&self.topic), RedisProviderError::Operation("connect")))?;
-        let deadline = Instant::now().checked_add(timeout).unwrap_or_else(Instant::now);
-        let scan_limit = self.max_unsettled.saturating_add(2);
-        for _ in 0..scan_limit {
-            let cursor = self
-                .recovery
-                .lock()
-                .map_err(|_| {
-                    spi_error(
-                        "receive",
-                        Some(&self.topic),
-                        RedisProviderError::Operation("recovery lock"),
-                    )
-                })?
-                .claim_cursor()
-                .to_owned();
-            let claim: StreamAutoClaimReply = cmd("XAUTOCLAIM")
-                .arg(&self.key)
-                .arg(&self.group)
-                .arg(&self.consumer)
-                .arg(self.claim_min_idle_ms)
-                .arg(cursor)
-                .arg("COUNT")
-                .arg(1)
-                .query(&mut connection)
-                .map_err(|_| {
-                    spi_error(
-                        "receive",
-                        Some(&self.topic),
-                        RedisProviderError::Operation("XAUTOCLAIM"),
-                    )
-                })?;
-            let at_end = claim.next_stream_id == "0-0";
-            let claimed = claim.claimed.into_iter().next();
-            self.recovery
-                .lock()
-                .map_err(|_| {
-                    spi_error(
-                        "receive",
-                        Some(&self.topic),
-                        RedisProviderError::Operation("recovery lock"),
-                    )
-                })?
-                .set_claim_cursor(claim.next_stream_id);
-            if !claim.deleted_ids.is_empty() {
-                return Ok(ReceiveOutcome::Gap(DeliveryGap::new(
-                    "pending Redis stream entries were removed",
-                    Some(claim.deleted_ids.len() as u64),
-                )));
+        let mut connection = match self.receive_connection.take() {
+            Some(connection) => connection,
+            None => self
+                .client
+                .get_dedicated_connection()
+                .map_err(|_| spi_error("receive", Some(&self.topic), RedisProviderError::Operation("connect")))?,
+        };
+        let result = (|| {
+            let deadline = Instant::now().checked_add(timeout).unwrap_or_else(Instant::now);
+            let scan_limit = self.max_unsettled.saturating_add(2);
+            for _ in 0..scan_limit {
+                let cursor = self
+                    .recovery
+                    .lock()
+                    .map_err(|_| {
+                        spi_error(
+                            "receive",
+                            Some(&self.topic),
+                            RedisProviderError::Operation("recovery lock"),
+                        )
+                    })?
+                    .claim_cursor()
+                    .to_owned();
+                let claim: StreamAutoClaimReply = cmd("XAUTOCLAIM")
+                    .arg(&self.key)
+                    .arg(&self.group)
+                    .arg(&self.consumer)
+                    .arg(self.claim_min_idle_ms)
+                    .arg(cursor)
+                    .arg("COUNT")
+                    .arg(1)
+                    .query(&mut connection)
+                    .map_err(|_| {
+                        spi_error(
+                            "receive",
+                            Some(&self.topic),
+                            RedisProviderError::Operation("XAUTOCLAIM"),
+                        )
+                    })?;
+                let at_end = claim.next_stream_id == "0-0";
+                let claimed = claim.claimed.into_iter().next();
+                self.recovery
+                    .lock()
+                    .map_err(|_| {
+                        spi_error(
+                            "receive",
+                            Some(&self.topic),
+                            RedisProviderError::Operation("recovery lock"),
+                        )
+                    })?
+                    .set_claim_cursor(claim.next_stream_id);
+                if !claim.deleted_ids.is_empty() {
+                    return Ok(ReceiveOutcome::Gap(DeliveryGap::new(
+                        "pending Redis stream entries were removed",
+                        Some(claim.deleted_ids.len() as u64),
+                    )));
+                }
+                if let Some(entry) = claimed {
+                    let available = self
+                        .recovery
+                        .lock()
+                        .map_err(|_| {
+                            spi_error(
+                                "receive",
+                                Some(&self.topic),
+                                RedisProviderError::Operation("recovery lock"),
+                            )
+                        })?
+                        .can_deliver(&entry.id);
+                    if available && let Some(outcome) = read_entry(self, &mut connection, entry)? {
+                        return Ok(outcome);
+                    }
+                }
+                if at_end {
+                    break;
+                }
             }
-            if let Some(entry) = claimed {
+
+            for _ in 0..scan_limit {
+                let cursor = self
+                    .recovery
+                    .lock()
+                    .map_err(|_| {
+                        spi_error(
+                            "receive",
+                            Some(&self.topic),
+                            RedisProviderError::Operation("recovery lock"),
+                        )
+                    })?
+                    .pending_cursor()
+                    .to_owned();
+                let pending: Option<StreamReadReply> = cmd("XREADGROUP")
+                    .arg("GROUP")
+                    .arg(&self.group)
+                    .arg(&self.consumer)
+                    .arg("COUNT")
+                    .arg(1)
+                    .arg("STREAMS")
+                    .arg(&self.key)
+                    .arg(&cursor)
+                    .query(&mut connection)
+                    .map_err(|_| {
+                        spi_error(
+                            "receive",
+                            Some(&self.topic),
+                            RedisProviderError::Operation("XREADGROUP"),
+                        )
+                    })?;
+                let entry = pending
+                    .and_then(|reply| reply.keys.into_iter().next())
+                    .and_then(|stream| stream.ids.into_iter().next());
+                let Some(entry) = entry else {
+                    self.recovery
+                        .lock()
+                        .map_err(|_| {
+                            spi_error(
+                                "receive",
+                                Some(&self.topic),
+                                RedisProviderError::Operation("recovery lock"),
+                            )
+                        })?
+                        .reset_pending_scan();
+                    break;
+                };
+                let id = entry.id.clone();
+                self.recovery
+                    .lock()
+                    .map_err(|_| {
+                        spi_error(
+                            "receive",
+                            Some(&self.topic),
+                            RedisProviderError::Operation("recovery lock"),
+                        )
+                    })?
+                    .set_pending_cursor(id.clone());
                 let available = self
                     .recovery
                     .lock()
@@ -168,154 +252,82 @@ impl EventSubscriptionSpi for Subscription {
                             RedisProviderError::Operation("recovery lock"),
                         )
                     })?
-                    .can_deliver(&entry.id);
+                    .can_deliver(&id);
                 if available && let Some(outcome) = read_entry(self, &mut connection, entry)? {
                     return Ok(outcome);
                 }
             }
-            if at_end {
-                break;
-            }
-        }
 
-        for _ in 0..scan_limit {
-            let cursor = self
-                .recovery
-                .lock()
-                .map_err(|_| {
-                    spi_error(
-                        "receive",
-                        Some(&self.topic),
-                        RedisProviderError::Operation("recovery lock"),
-                    )
-                })?
-                .pending_cursor()
-                .to_owned();
-            let pending: Option<StreamReadReply> = cmd("XREADGROUP")
-                .arg("GROUP")
-                .arg(&self.group)
-                .arg(&self.consumer)
-                .arg("COUNT")
-                .arg(1)
-                .arg("STREAMS")
-                .arg(&self.key)
-                .arg(&cursor)
-                .query(&mut connection)
-                .map_err(|_| {
-                    spi_error(
-                        "receive",
-                        Some(&self.topic),
-                        RedisProviderError::Operation("XREADGROUP"),
-                    )
-                })?;
-            let entry = pending
-                .and_then(|reply| reply.keys.into_iter().next())
-                .and_then(|stream| stream.ids.into_iter().next());
-            let Some(entry) = entry else {
-                self.recovery
-                    .lock()
+            if timeout.is_zero() {
+                let reply: Option<StreamReadReply> = cmd("XREADGROUP")
+                    .arg("GROUP")
+                    .arg(&self.group)
+                    .arg(&self.consumer)
+                    .arg("COUNT")
+                    .arg(1)
+                    .arg("STREAMS")
+                    .arg(&self.key)
+                    .arg(">")
+                    .query(&mut connection)
                     .map_err(|_| {
                         spi_error(
                             "receive",
                             Some(&self.topic),
-                            RedisProviderError::Operation("recovery lock"),
+                            RedisProviderError::Operation("XREADGROUP"),
                         )
-                    })?
-                    .reset_pending_scan();
-                break;
-            };
-            let id = entry.id.clone();
-            self.recovery
-                .lock()
-                .map_err(|_| {
-                    spi_error(
-                        "receive",
-                        Some(&self.topic),
-                        RedisProviderError::Operation("recovery lock"),
-                    )
-                })?
-                .set_pending_cursor(id.clone());
-            let available = self
-                .recovery
-                .lock()
-                .map_err(|_| {
-                    spi_error(
-                        "receive",
-                        Some(&self.topic),
-                        RedisProviderError::Operation("recovery lock"),
-                    )
-                })?
-                .can_deliver(&id);
-            if available && let Some(outcome) = read_entry(self, &mut connection, entry)? {
-                return Ok(outcome);
-            }
-        }
-
-        if timeout.is_zero() {
-            let reply: Option<StreamReadReply> = cmd("XREADGROUP")
-                .arg("GROUP")
-                .arg(&self.group)
-                .arg(&self.consumer)
-                .arg("COUNT")
-                .arg(1)
-                .arg("STREAMS")
-                .arg(&self.key)
-                .arg(">")
-                .query(&mut connection)
-                .map_err(|_| {
-                    spi_error(
-                        "receive",
-                        Some(&self.topic),
-                        RedisProviderError::Operation("XREADGROUP"),
-                    )
-                })?;
-            if let Some(entry) = reply
-                .and_then(|reply| reply.keys.into_iter().next())
-                .and_then(|stream| stream.ids.into_iter().next())
-                && let Some(outcome) = read_entry(self, &mut connection, entry)?
-            {
-                return Ok(outcome);
-            }
-            return Ok(ReceiveOutcome::TimedOut);
-        }
-        loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return Ok(ReceiveOutcome::TimedOut);
-            }
-            let block_ms = remaining.as_millis().clamp(1, 1_000) as usize;
-            let reply: Option<StreamReadReply> = cmd("XREADGROUP")
-                .arg("GROUP")
-                .arg(&self.group)
-                .arg(&self.consumer)
-                .arg("COUNT")
-                .arg(1)
-                .arg("BLOCK")
-                .arg(block_ms)
-                .arg("STREAMS")
-                .arg(&self.key)
-                .arg(">")
-                .query(&mut connection)
-                .map_err(|_| {
-                    spi_error(
-                        "receive",
-                        Some(&self.topic),
-                        RedisProviderError::Operation("XREADGROUP"),
-                    )
-                })?;
-            let entry = reply
-                .and_then(|reply| reply.keys.into_iter().next())
-                .and_then(|stream| stream.ids.into_iter().next());
-            if let Some(entry) = entry {
-                if let Some(outcome) = read_entry(self, &mut connection, entry)? {
+                    })?;
+                if let Some(entry) = reply
+                    .and_then(|reply| reply.keys.into_iter().next())
+                    .and_then(|stream| stream.ids.into_iter().next())
+                    && let Some(outcome) = read_entry(self, &mut connection, entry)?
+                {
                     return Ok(outcome);
                 }
-                continue;
-            }
-            if Instant::now() >= deadline {
                 return Ok(ReceiveOutcome::TimedOut);
             }
+            loop {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Ok(ReceiveOutcome::TimedOut);
+                }
+                let block_ms = remaining.as_millis().clamp(1, 1_000) as usize;
+                let reply: Option<StreamReadReply> = cmd("XREADGROUP")
+                    .arg("GROUP")
+                    .arg(&self.group)
+                    .arg(&self.consumer)
+                    .arg("COUNT")
+                    .arg(1)
+                    .arg("BLOCK")
+                    .arg(block_ms)
+                    .arg("STREAMS")
+                    .arg(&self.key)
+                    .arg(">")
+                    .query(&mut connection)
+                    .map_err(|_| {
+                        spi_error(
+                            "receive",
+                            Some(&self.topic),
+                            RedisProviderError::Operation("XREADGROUP"),
+                        )
+                    })?;
+                let entry = reply
+                    .and_then(|reply| reply.keys.into_iter().next())
+                    .and_then(|stream| stream.ids.into_iter().next());
+                if let Some(entry) = entry {
+                    if let Some(outcome) = read_entry(self, &mut connection, entry)? {
+                        return Ok(outcome);
+                    }
+                    continue;
+                }
+                if Instant::now() >= deadline {
+                    return Ok(ReceiveOutcome::TimedOut);
+                }
+            }
+        })();
+        if result.is_ok() {
+            self.receive_connection = Some(connection);
         }
+        result
     }
 
     /// Acknowledges terminal dispositions and leaves retries in the PEL.
@@ -406,6 +418,7 @@ impl EventSubscriptionSpi for Subscription {
     /// Success after subsequent receive calls begin returning `Closed`.
     fn close(&mut self) -> Result<(), SpiError> {
         self.closed = true;
+        self.receive_connection.take();
         Ok(())
     }
 }
@@ -556,5 +569,63 @@ fn invalid_token(reason: &'static str, topic: &TopicAddress) -> SpiError {
         reason,
         retryable: Some(false),
         source: Box::new(std::io::Error::other("invalid settlement token")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::Mutex;
+
+    use qubit_event_bus::model::StartPosition;
+    use qubit_event_bus::spi::DeliveryDisposition;
+    use qubit_event_bus::spi::EventSubscriptionSpi;
+    use qubit_event_bus::spi::SettlementToken;
+    use qubit_id::Id;
+
+    use super::Subscription;
+    use crate::client::Client;
+    use crate::config::RedisEventBusConfig;
+    use crate::recovery::RecoveryState;
+
+    fn subscription() -> Subscription {
+        let settings = RedisEventBusConfig::default();
+        Subscription {
+            client: Arc::new(Client::new(&settings).expect("default Redis client configuration is valid")),
+            receive_connection: None,
+            key: "unit-test-stream".into(),
+            group: "unit-test-group".into(),
+            quarantine: "unit-test-quarantine".into(),
+            consumer: "unit-test-consumer".into(),
+            topic: qubit_event_bus::spi::TopicAddress::new("unit-test-topic").expect("topic is valid"),
+            subscription_id: Id::new(1),
+            closed: false,
+            claim_min_idle_ms: 0,
+            max_unsettled: 1,
+            recovery: Arc::new(Mutex::new(RecoveryState::new())),
+        }
+    }
+
+    #[test]
+    fn receive_reports_a_poisoned_recovery_lock() {
+        let mut subscription = subscription();
+        let recovery = Arc::clone(&subscription.recovery);
+        let _ = std::thread::spawn(move || {
+            let _guard = recovery.lock().expect("recovery lock is initially healthy");
+            panic!("poison recovery lock for error-path coverage");
+        })
+        .join();
+        let error = match subscription.receive(std::time::Duration::ZERO) {
+            Ok(_) => panic!("poisoned recovery lock should return an error"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, qubit_event_bus::error::SpiError::Operation { .. }));
+    }
+
+    #[test]
+    fn settle_rejects_an_unrecognized_token_state() {
+        let mut subscription = subscription();
+        let token = SettlementToken::new(subscription.subscription_id, StartPosition::New);
+        assert!(subscription.settle(&token, DeliveryDisposition::Accept).is_err());
     }
 }
