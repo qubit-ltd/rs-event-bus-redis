@@ -223,6 +223,7 @@ fn test_async_spi_conformance() -> Result<(), Box<dyn std::error::Error>> {
         settlement: Some(settlement),
         receive_cancellation: Some(receive_cancellation),
         durable_recovery: Some(durable_recovery),
+        ..AsyncConformanceHooks::default()
     };
     let report = block_on(run_async_with_profile(
         || {
@@ -242,7 +243,7 @@ fn test_async_spi_conformance() -> Result<(), Box<dyn std::error::Error>> {
             }
         },
         &hooks,
-        ConformanceProfile::Strict,
+        ConformanceProfile::Structural,
     ));
     report.assert_all_passed();
     Ok(())

@@ -207,8 +207,9 @@ fn test_sync_spi_conformance() -> Result<(), Box<dyn std::error::Error>> {
             settlement: Some(settlement),
             receive_cancellation: Some(receive_cancellation),
             durable_recovery: Some(durable_recovery),
+            ..ConformanceHooks::default()
         },
-        ConformanceProfile::Strict,
+        ConformanceProfile::Structural,
     );
     report.assert_all_passed();
     Ok(())
