@@ -5,22 +5,26 @@
 ## Verified coverage
 
 The package coverage gate uses the metrics collected by `coverage.sh` and
-`ci-check.sh`. The baseline and post-fix measurements are:
+`ci-check.sh`. The 0.4.0 release-candidate measurement is:
 
-| Metric | Baseline | After targeted tests and the recovery fix | Required |
-| --- | ---: | ---: | ---: |
-| Functions | 266/292 (91.10%) | 289/293 (98.63%) | at least 95% |
-| Lines | 2,614/2,790 (93.69%) | 2,706/2,797 (96.75%) | above 90% |
-| Regions | 4,043/4,340 (93.16%) | 4,199/4,348 (96.57%) | above 85% |
+| Metric | 0.4.0 candidate | Required |
+| --- | ---: | ---: |
+| Functions | 306/312 (98.08%) | at least 95% |
+| Lines | 2,910/3,038 (95.79%) | above 90% |
+| Regions | 4,591/4,812 (95.41%) | above 85% |
 
-All three coverage thresholds pass. Both subscription implementations now have
-100% function coverage: sync 45/45 and async 54/54. Region counts can vary slightly
-between runs because deadline and recovery interval tests exercise timed paths.
+All three coverage thresholds pass. Function/line/region totals are recorded from
+the fresh `ci-check.sh` coverage run. Region counts can vary slightly between runs
+because deadline and recovery interval tests exercise timed paths.
 
-Verification on 2026-09-28 used `./align-ci.sh`, `./coverage.sh`, and the full
-`./ci-check.sh` with the repository's pinned toolchains and default test
-concurrency. All commands succeeded, including feature combinations, doctests,
-package verification and dependency security checks.
+Verification on 2026-09-29 used `./align-ci.sh` followed by the full
+`./ci-check.sh`, with the repository's pinned toolchains and default test
+concurrency. The run covered the default/all-feature test suite, the feature
+matrix, strict Clippy/Rustdoc, package verification, coverage, and dependency
+security checks. All thresholds passed. This run used the isolated local Cargo
+patch for the unpublished `qubit-event-bus` 0.15.0 snapshot; it does not establish
+registry availability. The manual connection-reuse benchmark was not rerun, so
+`doc/connection-reuse-benchmark.md` remains historical evidence.
 
 ## Identifying uncovered functions
 

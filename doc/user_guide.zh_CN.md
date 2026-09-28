@@ -1,6 +1,6 @@
 # Redis Streams 用户指南
 
-**读者：** 使用 `qubit-event-bus` 0.15 和 `qubit-event-bus-redis` 0.3 的 Rust 服务开发者。本指南以订单发布服务和账单消费服务为例，说明如何通过 Redis 共享事件，同时让应用代码继续使用 event-bus facade。
+**读者：** 使用 `qubit-event-bus` 0.15 和 `qubit-event-bus-redis` 0.4 的 Rust 服务开发者。本指南以订单发布服务和账单消费服务为例，说明如何通过 Redis 共享事件，同时让应用代码继续使用 event-bus facade。
 
 [English](user_guide.md) · [README](../README.zh_CN.md) · [API 文档](https://docs.rs/qubit-event-bus-redis)
 
@@ -11,7 +11,7 @@
 ```toml
 [dependencies]
 qubit-event-bus = { version = "0.15", features = ["discovery"] }
-qubit-event-bus-redis = "0.3"
+qubit-event-bus-redis = "0.4"
 qubit-spi = "0.13"
 ```
 
@@ -109,7 +109,7 @@ fn start_service() -> Result<(), Box<dyn std::error::Error>> {
 
 当前 wire 格式支持版本 1。合法数字版本但不等于 1 时，provider 返回 kind 为 `unsupported_wire_version` 的非重试 `SpiError::Operation`，源记录保留在 pending 中，不会隔离或确认。应停止旧 consumer，部署支持该版本的 provider，再重启同一 group 的 consumer。使用 `XPENDING` 检查旧记录是否已恢复并结算。不要为了消除错误而直接清除 pending 记录。无效 JSON、缺失或非数字版本，以及格式错误的版本 1 记录仍会进入隔离流。
 
-每次 `receive` 在 claim 和本 consumer pending 扫描之间最多执行 16 条恢复命令；后续调用会从保留的游标继续。`Duration::ZERO` 执行有界非阻塞恢复（最多一次 claim、一次本 consumer pending 查询和一次新消息查询）。`Duration::MAX` 表示无限等待，内部以 1 秒的有限 Redis 阻塞读取循环实现。有限超时限制额外恢复往返次数和 Redis `BLOCK` 时长，但不能强制取消已经开始执行的单条网络命令。
+恢复工作按时间间隔分批限额：claim 和本 consumer pending 扫描各最多执行 8 条命令；tombstone 修复每轮最多执行一次 `XPENDING`、四次 `XRANGE` 和四次隔离 `EVAL`。扫描游标会跨间隔和 receive 调用保留。`Duration::ZERO` 执行有界非阻塞恢复（最多一次 claim、一次本 consumer pending 查询和一次新消息查询），跳过 tombstone 扫描，并允许隔离一条格式错误的记录。`Duration::MAX` 表示无限等待，内部以 1 秒的有限 Redis 阻塞读取循环实现。有限超时限制额外恢复往返次数和 Redis `BLOCK` 时长，但不能强制取消已经开始执行的单条网络命令。
 
 ## 4. 驱动异步 SPI
 

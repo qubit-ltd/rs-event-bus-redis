@@ -1,6 +1,6 @@
 # Redis Streams User Guide
 
-**For:** Rust service developers using `qubit-event-bus` 0.15 and `qubit-event-bus-redis` 0.3. This guide shows how an order publisher and billing consumer share events through Redis while keeping application code on the event-bus facade.
+**For:** Rust service developers using `qubit-event-bus` 0.15 and `qubit-event-bus-redis` 0.4. This guide shows how an order publisher and billing consumer share events through Redis while keeping application code on the event-bus facade.
 
 [简体中文](user_guide.zh_CN.md) · [README](../README.md) · [API docs](https://docs.rs/qubit-event-bus-redis)
 
@@ -11,7 +11,7 @@ Add both the facade and provider as direct dependencies. `discovery` is on by de
 ```toml
 [dependencies]
 qubit-event-bus = { version = "0.15", features = ["discovery"] }
-qubit-event-bus-redis = "0.3"
+qubit-event-bus-redis = "0.4"
 qubit-spi = "0.13"
 ```
 
@@ -111,7 +111,7 @@ Each Redis subscription receives a random `qubit:consumer:<uuid>` consumer name.
 
 The wire format currently supports version 1. A valid numeric version other than 1 returns a non-retryable `SpiError::Operation` with kind `unsupported_wire_version`; the source entry stays pending and is not quarantined or acknowledged. Stop old consumers, deploy a provider that understands the new version, then restart consumers in the same group. Verify recovery with `XPENDING` until the old entry is settled. Do not clear the pending entry to silence the error. Invalid JSON, missing or non-numeric versions, and malformed version 1 records continue to use quarantine.
 
-Each `receive` call performs at most 16 recovery commands across both claim and own-pending scans. Recovery cursors continue on later calls. `Duration::ZERO` performs bounded non-blocking recovery (at most one claim, one own-pending read, and one new-message read). `Duration::MAX` waits indefinitely by issuing finite one-second Redis blocking reads. A finite timeout limits extra recovery round trips and the Redis `BLOCK` duration; it cannot forcibly cancel a single network command already in progress.
+Recovery work is bounded per interval: claim and own-pending scans have separate eight-command limits, while tombstone repair is capped at one `XPENDING`, four `XRANGE`, and four total quarantine `EVAL` commands. Scan cursors continue across intervals and calls. `Duration::ZERO` performs bounded non-blocking recovery (at most one claim, one own-pending read, and one new-message read), skips tombstone scans, and may quarantine one malformed entry. `Duration::MAX` waits indefinitely by issuing finite one-second Redis blocking reads. A finite timeout limits extra recovery round trips and the Redis `BLOCK` duration; it cannot forcibly cancel a single network command already in progress.
 
 ## 4. Run the asynchronous SPI
 
