@@ -11,8 +11,11 @@ use std::collections::HashSet;
 use std::time::Duration;
 use std::time::Instant;
 
+use crate::error::RedisProviderError;
+
 /// Maximum recovery commands one receive call may issue before yielding.
 pub(crate) const MAX_RECOVERY_COMMANDS_PER_RECEIVE: usize = 16;
+const MAX_RECOVERY_COMMANDS_PER_STAGE: usize = MAX_RECOVERY_COMMANDS_PER_RECEIVE / 2;
 
 /// Which Redis recovery scan is consuming a receive-call command budget.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -30,21 +33,42 @@ pub(crate) struct RecoveryScanBudget {
     command_count: usize,
     zero_claim_used: bool,
     zero_pending_used: bool,
+    recovery_interval: Duration,
+    next_recovery: Instant,
+    claim_commands: usize,
+    pending_commands: usize,
 }
 
 impl RecoveryScanBudget {
     /// Starts a receive budget; `Duration::MAX` represents an unbounded wait.
-    pub(crate) fn new(timeout: Duration, started: Instant) -> Self {
-        let deadline = (timeout != Duration::MAX)
-            .then(|| started.checked_add(timeout))
-            .flatten();
-        Self {
+    pub(crate) fn new(
+        timeout: Duration,
+        started: Instant,
+        recovery_interval: Duration,
+    ) -> Result<Self, RedisProviderError> {
+        let deadline = if timeout == Duration::MAX {
+            None
+        } else {
+            Some(
+                started
+                    .checked_add(timeout)
+                    .ok_or(RedisProviderError::Configuration("receive timeout is out of range"))?,
+            )
+        };
+        let next_recovery = started
+            .checked_add(recovery_interval)
+            .ok_or(RedisProviderError::Configuration("recovery interval is out of range"))?;
+        Ok(Self {
             deadline,
             zero_timeout: timeout.is_zero(),
             command_count: 0,
             zero_claim_used: false,
             zero_pending_used: false,
-        }
+            recovery_interval,
+            next_recovery,
+            claim_commands: 0,
+            pending_commands: 0,
+        })
     }
 
     /// Consumes one recovery command if the stage, deadline, and shared limit
@@ -53,21 +77,38 @@ impl RecoveryScanBudget {
         if self.command_count >= MAX_RECOVERY_COMMANDS_PER_RECEIVE {
             return false;
         }
+        let (stage_count, zero_used) = match stage {
+            RecoveryScanStage::Claim => (&mut self.claim_commands, &mut self.zero_claim_used),
+            RecoveryScanStage::Pending => (&mut self.pending_commands, &mut self.zero_pending_used),
+        };
+        if *stage_count >= MAX_RECOVERY_COMMANDS_PER_STAGE {
+            return false;
+        }
         if self.deadline.is_some_and(|deadline| now >= deadline) {
             if !self.zero_timeout {
                 return false;
             }
-            let used = match stage {
-                RecoveryScanStage::Claim => &mut self.zero_claim_used,
-                RecoveryScanStage::Pending => &mut self.zero_pending_used,
-            };
-            if *used {
+            if *zero_used {
                 return false;
             }
-            *used = true;
+            *zero_used = true;
         }
         self.command_count += 1;
+        *stage_count += 1;
         true
+    }
+
+    /// Returns whether another bounded recovery round is due.
+    pub(crate) fn recovery_due(&self, now: Instant) -> bool {
+        !self.zero_timeout && now >= self.next_recovery
+    }
+
+    /// Starts the next recovery round and resets its scan-command quotas.
+    pub(crate) fn start_recovery_round(&mut self, now: Instant) {
+        self.command_count = 0;
+        self.claim_commands = 0;
+        self.pending_commands = 0;
+        self.next_recovery = now.checked_add(self.recovery_interval).unwrap_or(now);
     }
 
     /// Returns whether a Redis new-message read can still start within the
@@ -79,10 +120,11 @@ impl RecoveryScanBudget {
     /// Returns the bounded block interval for the next Redis read.
     pub(crate) fn block_interval(&self, now: Instant) -> Option<Duration> {
         let remaining = self.deadline.map(|deadline| deadline.saturating_duration_since(now));
+        let recovery_delay = self.next_recovery.saturating_duration_since(now);
         match remaining {
             Some(remaining) if remaining.is_zero() => None,
-            Some(remaining) => Some(remaining.min(Duration::from_secs(1))),
-            None => Some(Duration::from_secs(1)),
+            Some(remaining) => Some(remaining.min(recovery_delay).min(Duration::from_secs(1))),
+            None => Some(recovery_delay.min(Duration::from_secs(1))),
         }
     }
 }
@@ -95,6 +137,8 @@ pub(crate) struct RecoveryState {
     pending_cursor: String,
     /// Resume cursor used by `XAUTOCLAIM` to inspect reclaimable PEL entries.
     claim_cursor: String,
+    /// One claimed entry held while a deleted-entry gap is reported.
+    deferred_claim: Option<redis::streams::StreamId>,
 }
 
 impl RecoveryState {
@@ -105,6 +149,7 @@ impl RecoveryState {
             active: HashSet::new(),
             pending_cursor: "0-0".to_owned(),
             claim_cursor: "0-0".to_owned(),
+            deferred_claim: None,
         }
     }
 
@@ -138,6 +183,16 @@ impl RecoveryState {
         self.active.len()
     }
 
+    /// Holds one claimed entry until a higher-priority gap outcome is returned.
+    pub(crate) fn defer_claim(&mut self, entry: redis::streams::StreamId) {
+        self.deferred_claim = Some(entry);
+    }
+
+    /// Takes the single entry held behind a gap outcome.
+    pub(crate) fn take_deferred_claim(&mut self) -> Option<redis::streams::StreamId> {
+        self.deferred_claim.take()
+    }
+
     /// Borrows the cursor for this consumer's pending-entry scan.
     pub(crate) fn pending_cursor(&self) -> &str {
         &self.pending_cursor
@@ -169,7 +224,7 @@ mod tests {
     use std::time::Duration;
     use std::time::Instant;
 
-    use super::MAX_RECOVERY_COMMANDS_PER_RECEIVE;
+    use super::MAX_RECOVERY_COMMANDS_PER_STAGE;
     use super::RecoveryScanBudget;
     use super::RecoveryScanStage;
     use super::RecoveryState;
@@ -207,9 +262,13 @@ mod tests {
     #[test]
     fn test_recovery_scan_budget_caps_commands_per_receive() {
         let started = Instant::now();
-        let mut budget = RecoveryScanBudget::new(Duration::MAX, started);
-        for _ in 0..MAX_RECOVERY_COMMANDS_PER_RECEIVE {
+        let mut budget = RecoveryScanBudget::new(Duration::MAX, started, Duration::from_secs(1)).unwrap();
+        for _ in 0..MAX_RECOVERY_COMMANDS_PER_STAGE {
             assert!(budget.take_recovery_command(RecoveryScanStage::Claim, started));
+        }
+        assert!(!budget.take_recovery_command(RecoveryScanStage::Claim, started));
+        for _ in 0..MAX_RECOVERY_COMMANDS_PER_STAGE {
+            assert!(budget.take_recovery_command(RecoveryScanStage::Pending, started));
         }
         assert!(!budget.take_recovery_command(RecoveryScanStage::Pending, started));
     }
@@ -217,7 +276,7 @@ mod tests {
     #[test]
     fn test_zero_timeout_allows_one_command_per_recovery_stage() {
         let started = Instant::now();
-        let mut budget = RecoveryScanBudget::new(Duration::ZERO, started);
+        let mut budget = RecoveryScanBudget::new(Duration::ZERO, started, Duration::from_secs(1)).unwrap();
         assert!(budget.take_recovery_command(RecoveryScanStage::Claim, started));
         assert!(!budget.take_recovery_command(RecoveryScanStage::Claim, started));
         assert!(budget.take_recovery_command(RecoveryScanStage::Pending, started));
@@ -229,7 +288,7 @@ mod tests {
     fn test_finite_deadline_stops_recovery_and_new_reads() {
         let started = Instant::now();
         let deadline = started + Duration::from_millis(10);
-        let mut budget = RecoveryScanBudget::new(Duration::from_millis(10), started);
+        let mut budget = RecoveryScanBudget::new(Duration::from_millis(10), started, Duration::from_secs(1)).unwrap();
         assert!(budget.take_recovery_command(RecoveryScanStage::Claim, started));
         assert!(!budget.take_recovery_command(RecoveryScanStage::Pending, deadline));
         assert!(!budget.can_read_new(deadline));
@@ -239,8 +298,39 @@ mod tests {
     #[test]
     fn test_max_timeout_uses_bounded_blocking_intervals_without_deadline() {
         let started = Instant::now();
-        let budget = RecoveryScanBudget::new(Duration::MAX, started);
+        let budget = RecoveryScanBudget::new(Duration::MAX, started, Duration::from_secs(1)).unwrap();
         assert!(budget.can_read_new(started));
         assert_eq!(budget.block_interval(started), Some(Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn test_recovery_budget_resets_per_interval_and_rejects_overflow() {
+        let started = Instant::now();
+        let mut budget = RecoveryScanBudget::new(Duration::MAX, started, Duration::from_millis(50)).unwrap();
+        for _ in 0..super::MAX_RECOVERY_COMMANDS_PER_STAGE {
+            assert!(budget.take_recovery_command(RecoveryScanStage::Claim, started));
+        }
+        assert!(!budget.take_recovery_command(RecoveryScanStage::Claim, started));
+        let later = started + Duration::from_millis(50);
+        assert!(budget.recovery_due(later));
+        budget.start_recovery_round(later);
+        assert!(budget.take_recovery_command(RecoveryScanStage::Claim, later));
+
+        assert!(RecoveryScanBudget::new(Duration::from_secs(u64::MAX), started, Duration::from_secs(1)).is_err());
+    }
+
+    #[test]
+    fn test_gap_preserves_one_claimed_entry_for_the_next_receive() {
+        let mut state = RecoveryState::new();
+        let entry = redis::streams::StreamId {
+            id: "4-0".into(),
+            map: Default::default(),
+        };
+        state.defer_claim(entry);
+        assert_eq!(
+            state.take_deferred_claim().map(|entry| entry.id.as_str().to_owned()),
+            Some("4-0".to_owned())
+        );
+        assert!(state.take_deferred_claim().is_none());
     }
 }

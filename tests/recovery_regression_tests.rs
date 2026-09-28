@@ -96,16 +96,24 @@ fn sync_bus(
     namespace: &str,
     max_unsettled: usize,
 ) -> Result<Arc<dyn qubit_event_bus::spi::EventBusSpi>, Box<dyn std::error::Error>> {
+    sync_bus_with_claim(server, namespace, max_unsettled, 0)
+}
+
+#[cfg(feature = "sync")]
+fn sync_bus_with_claim(
+    server: &RedisServer,
+    namespace: &str,
+    max_unsettled: usize,
+    claim_min_idle_ms: usize,
+) -> Result<Arc<dyn qubit_event_bus::spi::EventBusSpi>, Box<dyn std::error::Error>> {
     use qubit_event_bus::EventBusConfig;
     use qubit_event_bus_redis::sync::RedisEventBusProvider;
     use qubit_spi::ServiceProvider;
 
+    let mut options = provider_options(server, namespace, max_unsettled);
+    options.insert("redis.claim_min_idle_ms".into(), claim_min_idle_ms.to_string());
     RedisEventBusProvider
-        .create_configured(&EventBusConfig::default().with_provider_options(provider_options(
-            server,
-            namespace,
-            max_unsettled,
-        )))
+        .create_configured(&EventBusConfig::default().with_provider_options(options))
         .map_err(|failure| failure.into_error())
         .map_err(Into::into)
 }
@@ -116,15 +124,23 @@ async fn async_bus(
     namespace: &str,
     max_unsettled: usize,
 ) -> Result<Arc<dyn qubit_event_bus::spi::AsyncEventBusSpi>, Box<dyn std::error::Error>> {
+    async_bus_with_claim(server, namespace, max_unsettled, 0).await
+}
+
+#[cfg(feature = "async")]
+async fn async_bus_with_claim(
+    server: &RedisServer,
+    namespace: &str,
+    max_unsettled: usize,
+    claim_min_idle_ms: usize,
+) -> Result<Arc<dyn qubit_event_bus::spi::AsyncEventBusSpi>, Box<dyn std::error::Error>> {
     use qubit_event_bus_redis::r#async::AsyncRedisEventBusProvider;
     use qubit_spi::AsyncServiceProvider;
 
+    let mut options = provider_options(server, namespace, max_unsettled);
+    options.insert("redis.claim_min_idle_ms".into(), claim_min_idle_ms.to_string());
     AsyncRedisEventBusProvider
-        .create_configured(&EventBusConfig::default().with_provider_options(provider_options(
-            server,
-            namespace,
-            max_unsettled,
-        )))
+        .create_configured(&EventBusConfig::default().with_provider_options(options))
         .await
         .map_err(|failure| failure.into_error())
         .map_err(Into::into)
@@ -1020,6 +1036,192 @@ fn sync_duration_max_waits_for_a_message() -> Result<(), Box<dyn std::error::Err
     assert_eq!(message.id().as_str(), "max-timeout-event");
     thread.join().map_err(|_| "publisher thread panicked")??;
     Ok(())
+}
+
+#[cfg(feature = "sync")]
+#[test]
+fn sync_long_receive_reclaims_after_idle_threshold_without_new_messages() -> Result<(), Box<dyn std::error::Error>> {
+    let server = RedisServer::start()?;
+    let bus = sync_bus_with_claim(&server, "late-claim-sync", 2, 100)?;
+    bus.publish(event("events", "late-claim-sync", b"payload")?)?;
+    let mut first = bus.subscribe(request(
+        "events",
+        "first-worker",
+        "late-claim-group",
+        SubscriptionDurability::Durable,
+    )?)?;
+    let ReceiveOutcome::Message(first_message) = first.receive(Duration::from_secs(1))? else {
+        return Err("first consumer did not receive the message".into());
+    };
+    assert_eq!(first_message.id().as_str(), "late-claim-sync");
+    drop(first);
+
+    let mut second = bus.subscribe(request(
+        "events",
+        "second-worker",
+        "late-claim-group",
+        SubscriptionDurability::Durable,
+    )?)?;
+    let ReceiveOutcome::Message(recovered) = second.receive(Duration::from_secs(3))? else {
+        return Err("one long receive did not recover the idle pending message".into());
+    };
+    assert_eq!(recovered.id().as_str(), "late-claim-sync");
+    Ok(())
+}
+
+#[cfg(feature = "async")]
+#[test]
+fn async_long_receive_reclaims_after_idle_threshold_without_new_messages() -> Result<(), Box<dyn std::error::Error>> {
+    futures_lite::future::block_on(async {
+        let server = RedisServer::start()?;
+        let bus = async_bus_with_claim(&server, "late-claim-async", 2, 100).await?;
+        bus.publish(event("events", "late-claim-async", b"payload")?).await?;
+        let mut first = bus
+            .subscribe(request(
+                "events",
+                "first-worker",
+                "late-claim-group",
+                SubscriptionDurability::Durable,
+            )?)
+            .await?;
+        let ReceiveOutcome::Message(first_message) = first.receive(Duration::from_secs(1)).await? else {
+            return Err("first consumer did not receive the message".into());
+        };
+        assert_eq!(first_message.id().as_str(), "late-claim-async");
+        drop(first);
+
+        let mut second = bus
+            .subscribe(request(
+                "events",
+                "second-worker",
+                "late-claim-group",
+                SubscriptionDurability::Durable,
+            )?)
+            .await?;
+        let ReceiveOutcome::Message(recovered) = second.receive(Duration::from_secs(3)).await? else {
+            return Err("one long receive did not recover the idle pending message".into());
+        };
+        assert_eq!(recovered.id().as_str(), "late-claim-async");
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })
+}
+
+#[cfg(feature = "sync")]
+#[test]
+fn sync_deleted_pending_entry_is_cleared_on_redis_6_2_and_7() -> Result<(), Box<dyn std::error::Error>> {
+    use qubit_event_bus::spi::DeliveryDisposition;
+
+    for image in ["6.2-alpine", "7-alpine"] {
+        let server = RedisServer::start_version(image)?;
+        let namespace = format!("deleted-sync-{image}");
+        let bus = sync_bus(&server, &namespace, 2)?;
+        let key = stream_key(&namespace, "events");
+        let group = group_name(&namespace, "events", "deleted-worker", Some("deleted-group"));
+        let mut connection = Client::open(server.url())?.get_connection()?;
+        bus.publish(event("events", "deleted-sync", b"payload")?)?;
+        let entries: redis::streams::StreamRangeReply = cmd("XRANGE")
+            .arg(&key)
+            .arg("-")
+            .arg("+")
+            .arg("COUNT")
+            .arg(1)
+            .query(&mut connection)?;
+        let redis_id = entries
+            .ids
+            .into_iter()
+            .next()
+            .ok_or("published stream entry missing")?
+            .id;
+        let mut receiver = bus.subscribe(request(
+            "events",
+            "deleted-worker",
+            "deleted-group",
+            SubscriptionDurability::Durable,
+        )?)?;
+        let ReceiveOutcome::Message(message) = receiver.receive(Duration::from_secs(2))? else {
+            return Err("pending test message was not received".into());
+        };
+        let token = message.settlement().ok_or("message has no settlement token")?;
+        receiver.settle(token, DeliveryDisposition::Retry)?;
+
+        let deleted: usize = cmd("XDEL").arg(&key).arg(redis_id).query(&mut connection)?;
+        assert_eq!(deleted, 1);
+        assert!(matches!(receiver.receive(Duration::ZERO)?, ReceiveOutcome::Gap(_)));
+        assert!(matches!(receiver.receive(Duration::ZERO)?, ReceiveOutcome::TimedOut));
+        let pending: Vec<redis::Value> = cmd("XPENDING")
+            .arg(&key)
+            .arg(&group)
+            .arg("-")
+            .arg("+")
+            .arg(10)
+            .query(&mut connection)?;
+        assert!(pending.is_empty(), "{image} retained a tombstone in the PEL");
+    }
+    Ok(())
+}
+
+#[cfg(feature = "async")]
+#[test]
+fn async_deleted_pending_entry_is_cleared_on_redis_6_2_and_7() -> Result<(), Box<dyn std::error::Error>> {
+    futures_lite::future::block_on(async {
+        use qubit_event_bus::spi::DeliveryDisposition;
+
+        for image in ["6.2-alpine", "7-alpine"] {
+            let server = RedisServer::start_version(image)?;
+            let namespace = format!("deleted-async-{image}");
+            let bus = async_bus(&server, &namespace, 2).await?;
+            let key = stream_key(&namespace, "events");
+            let group = group_name(&namespace, "events", "deleted-worker", Some("deleted-group"));
+            let mut connection = Client::open(server.url())?.get_connection()?;
+            bus.publish(event("events", "deleted-async", b"payload")?).await?;
+            let entries: redis::streams::StreamRangeReply = cmd("XRANGE")
+                .arg(&key)
+                .arg("-")
+                .arg("+")
+                .arg("COUNT")
+                .arg(1)
+                .query(&mut connection)?;
+            let redis_id = entries
+                .ids
+                .into_iter()
+                .next()
+                .ok_or("published stream entry missing")?
+                .id;
+            let mut receiver = bus
+                .subscribe(request(
+                    "events",
+                    "deleted-worker",
+                    "deleted-group",
+                    SubscriptionDurability::Durable,
+                )?)
+                .await?;
+            let ReceiveOutcome::Message(message) = receiver.receive(Duration::from_secs(2)).await? else {
+                return Err("pending test message was not received".into());
+            };
+            let token = message.settlement().ok_or("message has no settlement token")?;
+            receiver.settle(token, DeliveryDisposition::Retry).await?;
+
+            let deleted: usize = cmd("XDEL").arg(&key).arg(redis_id).query(&mut connection)?;
+            assert_eq!(deleted, 1);
+            assert!(matches!(
+                receiver.receive(Duration::ZERO).await?,
+                ReceiveOutcome::Gap(_)
+            ));
+            assert!(matches!(
+                receiver.receive(Duration::ZERO).await?,
+                ReceiveOutcome::TimedOut
+            ));
+            let pending: Vec<redis::Value> = cmd("XPENDING")
+                .arg(&key)
+                .arg(&group)
+                .arg("-")
+                .arg("+")
+                .arg(10)
+                .query(&mut connection)?;
+            assert!(pending.is_empty(), "{image} retained a tombstone in the PEL");
+        }
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })
 }
 
 #[cfg(feature = "async")]

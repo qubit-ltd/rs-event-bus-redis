@@ -39,7 +39,9 @@ use qubit_event_bus::spi::TransportPayload;
 #[cfg(feature = "conformance")]
 use qubit_event_bus::spi::conformance::ConformanceHooks;
 #[cfg(feature = "conformance")]
-use qubit_event_bus::spi::conformance::run_sync;
+use qubit_event_bus::spi::conformance::ConformanceProfile;
+#[cfg(feature = "conformance")]
+use qubit_event_bus::spi::conformance::run_sync_with_profile;
 use qubit_event_bus_redis::naming::stream_key;
 use qubit_event_bus_redis::sync::RedisEventBusProvider;
 use qubit_event_bus_redis::wire::WireFields;
@@ -193,11 +195,144 @@ fn test_sync_publish_receive_and_accept() -> Result<(), Box<dyn std::error::Erro
 fn test_sync_spi_conformance() -> Result<(), Box<dyn std::error::Error>> {
     let server = RedisServer::start()?;
     let server = Arc::new(server);
-    let report = run_sync(
+    let settlement_server = Arc::clone(&server);
+    let settlement = Arc::new(move || check_sync_settlement(&settlement_server));
+    let cancellation_server = Arc::clone(&server);
+    let receive_cancellation = Arc::new(move || check_sync_receive_cancellation(&cancellation_server));
+    let recovery_server = Arc::clone(&server);
+    let durable_recovery = Arc::new(move || check_sync_durable_recovery(&recovery_server));
+    let report = run_sync_with_profile(
         || create_bus(&server).expect("Redis provider should be created"),
-        &ConformanceHooks::default(),
+        &ConformanceHooks {
+            settlement: Some(settlement),
+            receive_cancellation: Some(receive_cancellation),
+            durable_recovery: Some(durable_recovery),
+        },
+        ConformanceProfile::Strict,
     );
     report.assert_all_passed();
+    Ok(())
+}
+
+#[cfg(feature = "conformance")]
+fn check_sync_settlement(server: &RedisServer) -> Result<(), String> {
+    let bus = create_bus(server).map_err(|error| error.to_string())?;
+    bus.publish(message("conformance-settlement", "settlement", b"payload").map_err(|error| error.to_string())?)
+        .map_err(|error| error.to_string())?;
+    let mut receiver = bus
+        .subscribe(
+            request(
+                "conformance-settlement",
+                "conformance-settlement",
+                Some("settlement"),
+                StartPosition::Earliest,
+            )
+            .map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+    let ReceiveOutcome::Message(mut received) = receiver
+        .receive(Duration::from_secs(2))
+        .map_err(|error| error.to_string())?
+    else {
+        return Err("settlement fixture did not receive the published event".into());
+    };
+    let token = received.take_settlement().ok_or("settlement token is missing")?;
+    receiver
+        .settle(&token, DeliveryDisposition::Accept)
+        .map_err(|error| error.to_string())?;
+    receiver
+        .settle(&token, DeliveryDisposition::Accept)
+        .map_err(|error| error.to_string())?;
+    if receiver.settle(&token, DeliveryDisposition::Retry).is_ok() {
+        return Err("conflicting settlement unexpectedly succeeded".into());
+    }
+    receiver.close().map_err(|error| error.to_string())
+}
+
+#[cfg(feature = "conformance")]
+fn check_sync_receive_cancellation(server: &RedisServer) -> Result<(), String> {
+    let bus = create_bus(server).map_err(|error| error.to_string())?;
+    let mut receiver = bus
+        .subscribe(
+            request(
+                "conformance-cancellation",
+                "conformance-cancellation",
+                Some("cancellation"),
+                StartPosition::Earliest,
+            )
+            .map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+    if !matches!(receiver.receive(Duration::from_millis(1)), Ok(ReceiveOutcome::TimedOut)) {
+        return Err("bounded receive did not time out on an empty durable stream".into());
+    }
+    receiver.close().map_err(|error| error.to_string())?;
+    bus.shutdown(qubit_event_bus::spi::ShutdownMode::Immediate)
+        .map_err(|error| error.to_string())?;
+    if matches!(receiver.receive(Duration::ZERO), Ok(ReceiveOutcome::Closed)) {
+        Ok(())
+    } else {
+        Err("closed receiver did not remain closed".into())
+    }
+}
+
+#[cfg(feature = "conformance")]
+fn check_sync_durable_recovery(server: &RedisServer) -> Result<(), String> {
+    let bus = create_bus(server).map_err(|error| error.to_string())?;
+    bus.publish(message("conformance-recovery", "recovery", b"pending").map_err(|error| error.to_string())?)
+        .map_err(|error| error.to_string())?;
+    let initial_request = request(
+        "conformance-recovery",
+        "recovery-before-close",
+        Some("recovery"),
+        StartPosition::Earliest,
+    )
+    .map_err(|error| error.to_string())?;
+    let mut receiver = bus.subscribe(initial_request).map_err(|error| error.to_string())?;
+    let ReceiveOutcome::Message(received) = receiver
+        .receive(Duration::from_secs(2))
+        .map_err(|error| error.to_string())?
+    else {
+        return Err("recovery fixture did not receive the published event".into());
+    };
+    if received.id().as_str() != "recovery" {
+        return Err("recovery fixture received an unexpected event".into());
+    }
+    receiver.close().map_err(|error| error.to_string())?;
+    bus.shutdown(qubit_event_bus::spi::ShutdownMode::Immediate)
+        .map_err(|error| error.to_string())?;
+
+    let recovered_bus = create_bus(server).map_err(|error| error.to_string())?;
+    let mut recovered = recovered_bus
+        .subscribe(
+            request(
+                "conformance-recovery",
+                "recovery-after-close",
+                Some("recovery"),
+                StartPosition::Earliest,
+            )
+            .map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+    let ReceiveOutcome::Message(mut received) = recovered
+        .receive(Duration::from_secs(2))
+        .map_err(|error| error.to_string())?
+    else {
+        return Err("unsettled durable event was not recovered".into());
+    };
+    if received.id().as_str() != "recovery" {
+        return Err("recovery fixture returned an unexpected event".into());
+    }
+    let token = received
+        .take_settlement()
+        .ok_or("recovered settlement token is missing")?;
+    recovered
+        .settle(&token, DeliveryDisposition::Accept)
+        .map_err(|error| error.to_string())?;
+    recovered.close().map_err(|error| error.to_string())?;
+    recovered_bus
+        .shutdown(qubit_event_bus::spi::ShutdownMode::Immediate)
+        .map_err(|error| error.to_string())?;
     Ok(())
 }
 
@@ -219,6 +354,45 @@ fn test_sync_retry_remains_in_pending_entries() -> Result<(), Box<dyn std::error
     };
     assert_eq!(payload.bytes(), b"payload");
     Ok(())
+}
+
+#[test]
+fn test_sync_existing_consumer_group_is_not_retried() -> Result<(), Box<dyn std::error::Error>> {
+    let server = RedisServer::start()?;
+    let bus = create_bus(&server)?;
+    let first = bus.subscribe(request(
+        "busy-group",
+        "worker-a",
+        Some("shared"),
+        StartPosition::Earliest,
+    )?)?;
+    let before_second = xgroup_command_calls(&server)?;
+    let second = bus.subscribe(request(
+        "busy-group",
+        "worker-b",
+        Some("shared"),
+        StartPosition::Earliest,
+    )?)?;
+    let after_second = xgroup_command_calls(&server)?;
+    assert_eq!(
+        after_second - before_second,
+        1,
+        "BUSYGROUP must not trigger a repeated XGROUP CREATE"
+    );
+    drop((first, second));
+    Ok(())
+}
+
+fn xgroup_command_calls(server: &RedisServer) -> Result<u64, Box<dyn std::error::Error>> {
+    let client = Client::open(server.url())?;
+    let mut connection = client.get_connection()?;
+    let info: String = cmd("INFO").arg("commandstats").query(&mut connection)?;
+    let line = info
+        .lines()
+        .find(|line| line.starts_with("cmdstat_xgroup"))
+        .ok_or_else(|| format!("missing XGROUP command statistics: {info}"))?;
+    let calls = line.split("calls=").nth(1).ok_or("missing XGROUP calls count")?;
+    Ok(calls.split(',').next().ok_or("empty XGROUP calls count")?.parse()?)
 }
 
 #[test]

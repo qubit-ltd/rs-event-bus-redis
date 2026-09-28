@@ -50,6 +50,8 @@ pub struct RedisEventBusConfig {
     /// Minimum pending idle time, in milliseconds, before another consumer may
     /// claim a delivery with `XAUTOCLAIM`.
     claim_min_idle_ms: usize,
+    /// Interval, in milliseconds, between recovery scans during a long wait.
+    recovery_interval_ms: usize,
     /// Maximum delivered but unsettled messages retained by one SPI receiver.
     max_unsettled_per_subscription: usize,
     /// Maximum number of idle synchronous standalone connections retained.
@@ -74,6 +76,7 @@ impl std::fmt::Debug for RedisEventBusConfig {
             .field("credentials", &self.credentials)
             .field("sentinel_credentials", &self.sentinel_credentials)
             .field("claim_min_idle_ms", &self.claim_min_idle_ms)
+            .field("recovery_interval_ms", &self.recovery_interval_ms)
             .field("max_unsettled_per_subscription", &self.max_unsettled_per_subscription)
             .field("max_idle_connections", &self.max_idle_connections)
             .field("stream_maxlen_approx", &self.stream_maxlen_approx)
@@ -92,6 +95,7 @@ impl Default for RedisEventBusConfig {
             credentials: RedisCredentials::default(),
             sentinel_credentials: RedisCredentials::default(),
             claim_min_idle_ms: 30_000,
+            recovery_interval_ms: 1_000,
             max_unsettled_per_subscription: 100,
             max_idle_connections: 8,
             stream_maxlen_approx: None,
@@ -123,6 +127,7 @@ impl RedisEventBusConfig {
             credentials: RedisCredentials::default(),
             sentinel_credentials: RedisCredentials::default(),
             claim_min_idle_ms: 30_000,
+            recovery_interval_ms: 1_000,
             max_unsettled_per_subscription: 100,
             max_idle_connections: 8,
             stream_maxlen_approx: None,
@@ -191,6 +196,17 @@ impl RedisEventBusConfig {
     #[inline]
     pub(crate) const fn claim_min_idle_ms(&self) -> usize {
         self.claim_min_idle_ms
+    }
+
+    /// Returns the interval between recovery scans during a receive call.
+    ///
+    /// # Returns
+    ///
+    /// The validated interval in milliseconds, between 50 and 60,000.
+    #[must_use]
+    #[inline]
+    pub const fn recovery_interval_ms(&self) -> usize {
+        self.recovery_interval_ms
     }
 
     /// Borrows the resolved Redis ACL username and password for client setup.
@@ -296,6 +312,17 @@ impl RedisEventBusConfig {
             })
             .transpose()?
             .unwrap_or(30_000);
+        let recovery_interval_ms = options
+            .get("redis.recovery_interval_ms")
+            .map(|value| {
+                value
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|value| (50..=60_000).contains(value))
+                    .ok_or(RedisProviderError::Configuration("invalid redis.recovery_interval_ms"))
+            })
+            .transpose()?
+            .unwrap_or(1_000);
         let max_unsettled_per_subscription = options
             .get("redis.max_unsettled_per_subscription")
             .map(|value| {
@@ -346,6 +373,7 @@ impl RedisEventBusConfig {
         config.credentials = credentials;
         config.sentinel_credentials = sentinel_credentials;
         config.claim_min_idle_ms = claim_min_idle_ms;
+        config.recovery_interval_ms = recovery_interval_ms;
         config.max_unsettled_per_subscription = max_unsettled_per_subscription;
         config.max_idle_connections = max_idle_connections;
         config.stream_maxlen_approx = stream_maxlen_approx;
@@ -421,4 +449,110 @@ fn validate_namespace(namespace: &str) -> Result<(), RedisProviderError> {
         return Err(RedisProviderError::Configuration("invalid redis.namespace"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use qubit_event_bus::model::ProviderOptions;
+
+    use super::RedisEventBusConfig;
+
+    #[test]
+    fn config_defaults_and_debug_redact_connection_details() {
+        let config = RedisEventBusConfig::default();
+        assert_eq!(config.connection_url(), "redis://127.0.0.1/");
+        assert_eq!(config.namespace(), "qubit");
+        assert_eq!(config.recovery_interval_ms(), 1_000);
+        assert!(config.sentinel_nodes().is_none());
+        assert!(config.sentinel_service().is_none());
+        assert!(config.stream_maxlen_approx().is_none());
+        assert!(!format!("{config:?}").contains("127.0.0.1"));
+    }
+
+    #[test]
+    fn new_config_exposes_supplied_values_and_defaults() {
+        let config = RedisEventBusConfig::new("redis://localhost/", "orders");
+        assert_eq!(config.connection_url(), "redis://localhost/");
+        assert_eq!(config.namespace(), "orders");
+        assert_eq!(config.recovery_interval_ms(), 1_000);
+        assert_eq!(config.max_idle_connections(), 8);
+    }
+
+    #[test]
+    fn provider_options_accept_recovery_interval_boundaries_and_limits() {
+        for interval in [50, 60_000] {
+            let options: ProviderOptions = [("redis.recovery_interval_ms".into(), interval.to_string())].into();
+            assert_eq!(
+                RedisEventBusConfig::from_provider_options(&options)
+                    .unwrap()
+                    .recovery_interval_ms(),
+                interval
+            );
+        }
+        for interval in [49, 60_001] {
+            let options: ProviderOptions = [("redis.recovery_interval_ms".into(), interval.to_string())].into();
+            assert!(RedisEventBusConfig::from_provider_options(&options).is_err());
+        }
+    }
+
+    #[test]
+    #[cfg(any(feature = "sync", feature = "async"))]
+    fn provider_options_validate_pool_and_stream_limits() {
+        let options: ProviderOptions = [
+            ("redis.max_idle_connections".into(), "64".into()),
+            ("redis.max_unsettled_per_subscription".into(), "10000".into()),
+            ("redis.stream_maxlen_approx".into(), "42".into()),
+        ]
+        .into();
+        let config = RedisEventBusConfig::from_provider_options(&options).unwrap();
+        assert_eq!(config.max_idle_connections(), 64);
+        assert_eq!(config.max_unsettled_per_subscription(), 10_000);
+        assert_eq!(config.stream_maxlen_approx().unwrap().get(), 42);
+        for (key, value) in [
+            ("redis.max_idle_connections", "65"),
+            ("redis.max_unsettled_per_subscription", "10001"),
+            ("redis.stream_maxlen_approx", "0"),
+        ] {
+            let options: ProviderOptions = [(key.into(), value.into())].into();
+            assert!(
+                RedisEventBusConfig::from_provider_options(&options).is_err(),
+                "{key}={value}"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(any(feature = "sync", feature = "async"))]
+    fn provider_options_accept_claim_idle_threshold() {
+        let options: ProviderOptions = [("redis.claim_min_idle_ms".into(), "125".into())].into();
+        let config = RedisEventBusConfig::from_provider_options(&options).unwrap();
+        assert_eq!(config.claim_min_idle_ms(), 125);
+    }
+
+    #[test]
+    fn event_bus_config_parsing_reads_provider_options() {
+        let options: ProviderOptions = [("redis.namespace".into(), "billing".into())].into();
+        let event_bus_config = qubit_event_bus::EventBusConfig::default().with_provider_options(options);
+        assert_eq!(
+            RedisEventBusConfig::from_event_bus_config(&event_bus_config)
+                .unwrap()
+                .namespace(),
+            "billing"
+        );
+    }
+
+    #[test]
+    fn provider_options_reject_inline_credentials_invalid_namespaces_and_partial_sentinel() {
+        for options in [
+            [("redis.url".into(), "redis://user:secret@localhost/".into())].into(),
+            [("redis.namespace".into(), "bad\nnamespace".into())].into(),
+            [("redis.sentinel.nodes".into(), "127.0.0.1:26379".into())].into(),
+        ] {
+            assert!(RedisEventBusConfig::from_provider_options(&options).is_err());
+        }
+        let error =
+            RedisEventBusConfig::from_provider_options(&[("redis.url".into(), "not a redis url".into())].into())
+                .unwrap_err();
+        assert!(!error.to_string().contains("secret"));
+    }
 }

@@ -330,8 +330,65 @@ mod tests {
     use super::Client;
     #[cfg(feature = "sync")]
     use super::SyncConnectionPool;
+    #[cfg(any(feature = "sync", feature = "async"))]
     use crate::config::RedisEventBusConfig;
 
+    #[cfg(feature = "sync")]
+    #[test]
+    fn pooled_connections_are_reused_bounded_and_discardable() {
+        use std::io::Read;
+        use std::io::Write;
+        use std::net::TcpListener;
+
+        use redis::ConnectionLike;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral TCP port");
+        let address = listener.local_addr().expect("listener has an address");
+        let accept_thread = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("Redis client connects");
+            let mut bytes = [0; 4096];
+            while let Ok(count) = stream.read(&mut bytes) {
+                if count == 0 {
+                    break;
+                }
+                let commands = bytes[..count].iter().filter(|byte| **byte == b'*').count();
+                let response = if bytes[..count].windows(4).any(|window| window == b"PING") {
+                    b"+PONG\r\n".as_slice()
+                } else {
+                    b"+OK\r\n".as_slice()
+                };
+                for _ in 0..commands {
+                    stream.write_all(response).expect("reply to Redis setup command");
+                }
+            }
+        });
+        let settings = RedisEventBusConfig::new(&format!("redis://{address}/"), "pool-test");
+        let client = Client::new(&settings).expect("standalone client configuration is valid");
+
+        let first = client.get_connection().expect("first connection opens");
+        assert!(first.is_open());
+        drop(first);
+        assert_eq!(client.sync_pool.idle.lock().unwrap().len(), 1);
+
+        let mut reused = client.get_connection().expect("idle connection is reused");
+        assert!(reused.is_open());
+        let pong: String = redis::cmd("PING")
+            .query(&mut reused)
+            .expect("connection forwards commands to Redis");
+        assert_eq!(pong, "PONG");
+        drop(reused);
+        assert_eq!(client.sync_pool.idle.lock().unwrap().len(), 1);
+
+        let mut discarded = client.get_connection().expect("released connection is reused");
+        discarded.discard();
+        drop(discarded);
+        assert!(client.sync_pool.idle.lock().unwrap().is_empty());
+
+        drop(client);
+        accept_thread.join().expect("accept thread completes");
+    }
+
+    #[cfg(feature = "sync")]
     fn sentinel_client() -> Client {
         let options: qubit_event_bus::model::ProviderOptions = [
             ("redis.sentinel.nodes".into(), "127.0.0.1:26379".into()),
@@ -401,6 +458,15 @@ mod tests {
             assert!(client.get_async_connection().await.is_err());
             assert!(client.get_async_dedicated_connection().await.is_err());
             client.invalidate_async_connection().await;
+
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve a local port");
+            let address = listener.local_addr().expect("listener has an address");
+            drop(listener);
+            let settings = RedisEventBusConfig::new(&format!("redis://{address}/"), "unavailable");
+            let standalone = Client::new(&settings).expect("standalone client configuration is valid");
+            assert!(standalone.get_async_connection().await.is_err());
+            assert!(standalone.get_async_dedicated_connection().await.is_err());
+            standalone.invalidate_async_connection().await;
         });
     }
 }

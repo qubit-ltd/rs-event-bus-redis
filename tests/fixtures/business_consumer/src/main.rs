@@ -21,7 +21,10 @@ use qubit_event_bus::model::StartPosition;
 use qubit_event_bus::model::SubscribeRequest;
 use qubit_event_bus::model::SubscriptionDurability;
 use qubit_event_bus::model::Topic;
+use qubit_event_bus::spi::ShutdownMode;
+use qubit_event_bus::spi::ShutdownOutcome;
 use qubit_event_bus::SubscriberId;
+use qubit_event_bus_redis as _;
 use qubit_spi::ProviderSelection;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -60,7 +63,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         receiver.recv_timeout(std::time::Duration::from_secs(3))?,
         "business facade works"
     );
-    drop(subscription);
+    subscription.cancel()?;
+    let shutdown = bus.shutdown(ShutdownMode::Graceful {
+        timeout: std::time::Duration::from_secs(3),
+    })?;
+    assert!(matches!(shutdown.outcome, ShutdownOutcome::Complete));
     Ok(())
 }
 

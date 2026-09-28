@@ -34,6 +34,15 @@ use qubit_event_bus_redis::naming::stream_key;
 #[cfg(feature = "sync")]
 use qubit_event_bus_redis::sync::RedisEventBusProvider;
 use qubit_event_bus_redis::wire::WireFields;
+use qubit_spi::ProviderMetadata;
+
+#[test]
+fn test_provider_descriptors_keep_the_stable_redis_streams_id() {
+    #[cfg(feature = "sync")]
+    assert_eq!(RedisEventBusProvider.descriptor().id().as_str(), "redis-streams");
+    #[cfg(feature = "async")]
+    assert_eq!(AsyncRedisEventBusProvider.descriptor().id().as_str(), "redis-streams");
+}
 
 #[test]
 fn test_stream_key_delimits_components_without_collisions() {
@@ -77,12 +86,11 @@ fn test_encoded_payload_round_trips_binary_bytes() -> Result<(), Box<dyn std::er
 }
 
 #[test]
-fn test_wire_fields_preserve_optional_metadata_and_clamp_pre_epoch_timestamp() -> Result<(), Box<dyn std::error::Error>>
-{
+fn test_wire_fields_preserve_optional_metadata_and_timestamp() -> Result<(), Box<dyn std::error::Error>> {
     let message = OutboundMessage::new(
         TopicAddress::new("events")?,
         EventId::new("event-before-epoch")?,
-        SystemTime::UNIX_EPOCH - std::time::Duration::from_secs(1),
+        SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1),
         Headers::new(),
         Some(OrderingKey::new("partition-1").ok_or("valid ordering key was rejected")?),
         None,
@@ -94,7 +102,7 @@ fn test_wire_fields_preserve_optional_metadata_and_clamp_pre_epoch_timestamp() -
     );
 
     let fields = WireFields::from_outbound(&message)?;
-    assert_eq!(fields.timestamp_ms, 0);
+    assert_eq!(fields.timestamp_ms, 1_000);
     assert_eq!(fields.ordering_key.as_deref(), Some("partition-1"));
     assert_eq!(fields.schema_id.as_deref(), Some("schema-v1"));
 
@@ -105,12 +113,31 @@ fn test_wire_fields_preserve_optional_metadata_and_clamp_pre_epoch_timestamp() -
     };
     assert_eq!(topic.as_str(), "events");
     assert_eq!(event_id.as_str(), "event-before-epoch");
-    assert_eq!(timestamp, SystemTime::UNIX_EPOCH);
+    assert_eq!(timestamp, SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1));
     assert_eq!(
         ordering_key.map(|key| key.as_str().to_owned()).as_deref(),
         Some("partition-1")
     );
     assert_eq!(payload.schema_id().map(|schema| schema.as_str()), Some("schema-v1"));
+    Ok(())
+}
+
+#[test]
+fn test_wire_encoder_rejects_pre_epoch_timestamps() -> Result<(), Box<dyn std::error::Error>> {
+    let message = OutboundMessage::new(
+        TopicAddress::new("events")?,
+        EventId::new("event-before-epoch")?,
+        SystemTime::UNIX_EPOCH - std::time::Duration::from_secs(1),
+        Headers::new(),
+        None,
+        None,
+        TransportPayload::Encoded(EncodedPayload::new(
+            Arc::from(&b"payload"[..]),
+            ContentType::new("application/octet-stream")?,
+            None,
+        )),
+    );
+    assert!(WireFields::from_outbound(&message).is_err());
     Ok(())
 }
 
@@ -150,6 +177,8 @@ fn test_provider_options_validate_boundaries_and_sentinel_pairing() {
         [("redis.max_unsettled_per_subscription".into(), "NaN".into())].into(),
         [("redis.max_idle_connections".into(), "0".into())].into(),
         [("redis.max_idle_connections".into(), "65".into())].into(),
+        [("redis.recovery_interval_ms".into(), "49".into())].into(),
+        [("redis.recovery_interval_ms".into(), "60001".into())].into(),
         [("redis.stream_maxlen_approx".into(), "0".into())].into(),
         [("redis.stream_maxlen_approx".into(), "nope".into())].into(),
         [("redis.claim_min_idle_ms".into(), "forever".into())].into(),
@@ -168,6 +197,7 @@ fn test_provider_options_defaults_and_sentinel_credentials_are_redacted() {
     assert_eq!(defaults.connection_url(), "redis://127.0.0.1/");
     assert_eq!(defaults.namespace(), "qubit");
     assert_eq!(defaults.max_idle_connections(), 8);
+    assert_eq!(defaults.recovery_interval_ms(), 1_000);
     assert_eq!(defaults.stream_maxlen_approx(), None);
     let options: ProviderOptions = [
         ("redis.sentinel.nodes".into(), "127.0.0.1:26379, 127.0.0.1:26380".into()),
@@ -191,6 +221,17 @@ fn stream_maxlen_approx_is_an_optional_positive_limit() {
     let options: ProviderOptions = [("redis.stream_maxlen_approx".into(), "4096".into())].into();
     let config = RedisEventBusConfig::from_provider_options(&options).unwrap();
     assert_eq!(config.stream_maxlen_approx().map(|value| value.get()), Some(4096));
+}
+
+#[test]
+fn test_recovery_interval_defaults_and_validates_its_range() {
+    let options: ProviderOptions = [("redis.recovery_interval_ms".into(), "50".into())].into();
+    let config = RedisEventBusConfig::from_provider_options(&options).expect("50ms is a valid interval");
+    assert_eq!(config.recovery_interval_ms(), 50);
+    for value in ["49", "60001", "0", "overflow"] {
+        let options: ProviderOptions = [("redis.recovery_interval_ms".into(), value.into())].into();
+        assert!(RedisEventBusConfig::from_provider_options(&options).is_err());
+    }
 }
 
 #[test]
@@ -331,6 +372,20 @@ fn test_wire_decoder_rejects_malformed_fields() -> Result<(), Box<dyn std::error
     let mut invalid_schema = valid;
     invalid_schema.schema_id = Some("bad\nschema".into());
     assert!(invalid_schema.into_parts(topic()).is_err());
+    let mut overflowing_timestamp = WireFields {
+        version: 1,
+        event_id: "timestamp-overflow".into(),
+        timestamp_ms: u64::MAX as u128 + 1,
+        headers_json: "{}".into(),
+        ordering_key: None,
+        content_type: "application/octet-stream".into(),
+        schema_id: None,
+        payload: Vec::new(),
+    };
+    assert!(overflowing_timestamp.clone().into_parts(topic()).is_err());
+    overflowing_timestamp.timestamp_ms = 0;
+    overflowing_timestamp.ordering_key = Some(String::new());
+    assert!(overflowing_timestamp.into_parts(topic()).is_err());
     Ok(())
 }
 

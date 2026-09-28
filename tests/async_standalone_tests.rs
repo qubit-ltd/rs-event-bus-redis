@@ -38,9 +38,13 @@ use qubit_event_bus::spi::SpiSubscriptionRequest;
 use qubit_event_bus::spi::TopicAddress;
 use qubit_event_bus::spi::TransportPayload;
 #[cfg(feature = "conformance")]
-use qubit_event_bus::spi::conformance::ConformanceHooks;
+use qubit_event_bus::spi::conformance::AsyncConformanceCheck;
 #[cfg(feature = "conformance")]
-use qubit_event_bus::spi::conformance::run_async;
+use qubit_event_bus::spi::conformance::AsyncConformanceHooks;
+#[cfg(feature = "conformance")]
+use qubit_event_bus::spi::conformance::ConformanceProfile;
+#[cfg(feature = "conformance")]
+use qubit_event_bus::spi::conformance::run_async_with_profile;
 use qubit_event_bus_redis::r#async::AsyncRedisEventBusProvider;
 use qubit_event_bus_redis::naming::stream_key;
 use qubit_id::Id;
@@ -200,8 +204,27 @@ fn test_async_spi_runs_on_smol_executor() -> Result<(), Box<dyn std::error::Erro
 #[cfg(feature = "conformance")]
 fn test_async_spi_conformance() -> Result<(), Box<dyn std::error::Error>> {
     let server = Arc::new(RedisServer::start()?);
-    let hooks = ConformanceHooks::default();
-    let report = block_on(run_async(
+    let settlement_server = Arc::clone(&server);
+    let settlement: AsyncConformanceCheck = Arc::new(move || {
+        let server = Arc::clone(&settlement_server);
+        Box::pin(async move { check_async_settlement(&server).await })
+    });
+    let cancellation_server = Arc::clone(&server);
+    let receive_cancellation: AsyncConformanceCheck = Arc::new(move || {
+        let server = Arc::clone(&cancellation_server);
+        Box::pin(async move { check_async_receive_cancellation(&server).await })
+    });
+    let recovery_server = Arc::clone(&server);
+    let durable_recovery: AsyncConformanceCheck = Arc::new(move || {
+        let server = Arc::clone(&recovery_server);
+        Box::pin(async move { check_async_durable_recovery(&server).await })
+    });
+    let hooks = AsyncConformanceHooks {
+        settlement: Some(settlement),
+        receive_cancellation: Some(receive_cancellation),
+        durable_recovery: Some(durable_recovery),
+    };
+    let report = block_on(run_async_with_profile(
         || {
             let server = Arc::clone(&server);
             async move {
@@ -219,8 +242,131 @@ fn test_async_spi_conformance() -> Result<(), Box<dyn std::error::Error>> {
             }
         },
         &hooks,
+        ConformanceProfile::Strict,
     ));
     report.assert_all_passed();
+    Ok(())
+}
+
+#[cfg(feature = "conformance")]
+async fn check_async_settlement(server: &RedisServer) -> Result<(), String> {
+    let bus = create_bus(server).map_err(|error| error.to_string())?;
+    bus.publish(message("conformance-settlement", "settlement", b"payload").map_err(|error| error.to_string())?)
+        .await
+        .map_err(|error| error.to_string())?;
+    let mut receiver = bus
+        .subscribe(request("conformance-settlement", "settlement-worker").map_err(|error| error.to_string())?)
+        .await
+        .map_err(|error| error.to_string())?;
+    let ReceiveOutcome::Message(mut received) = receiver
+        .receive(Duration::from_secs(2))
+        .await
+        .map_err(|error| error.to_string())?
+    else {
+        return Err("settlement fixture did not receive the published event".into());
+    };
+    let token = received.take_settlement().ok_or("settlement token is missing")?;
+    receiver
+        .settle(&token, DeliveryDisposition::Accept)
+        .await
+        .map_err(|error| error.to_string())?;
+    receiver
+        .settle(&token, DeliveryDisposition::Accept)
+        .await
+        .map_err(|error| error.to_string())?;
+    if receiver.settle(&token, DeliveryDisposition::Reject).await.is_ok() {
+        return Err("conflicting settlement unexpectedly succeeded".into());
+    }
+    receiver.close().await.map_err(|error| error.to_string())
+}
+
+#[cfg(feature = "conformance")]
+async fn check_async_receive_cancellation(server: &RedisServer) -> Result<(), String> {
+    let bus = create_bus(server).map_err(|error| error.to_string())?;
+    let mut receiver = bus
+        .subscribe(request("conformance-cancellation", "cancellation-worker").map_err(|error| error.to_string())?)
+        .await
+        .map_err(|error| error.to_string())?;
+    if futures_lite::future::poll_once(receiver.receive(Duration::MAX))
+        .await
+        .is_some()
+    {
+        return Err("empty receive unexpectedly completed before cancellation".into());
+    }
+    bus.publish(message("conformance-cancellation", "after-cancel", b"payload").map_err(|error| error.to_string())?)
+        .await
+        .map_err(|error| error.to_string())?;
+    let ReceiveOutcome::Message(received) = receiver
+        .receive(Duration::from_secs(2))
+        .await
+        .map_err(|error| error.to_string())?
+    else {
+        return Err("subscription did not continue after receive cancellation".into());
+    };
+    receiver
+        .settle(
+            received
+                .settlement()
+                .ok_or("cancelled receive lost its settlement token")?,
+            DeliveryDisposition::Accept,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    receiver.close().await.map_err(|error| error.to_string())
+}
+
+#[cfg(feature = "conformance")]
+async fn check_async_durable_recovery(server: &RedisServer) -> Result<(), String> {
+    let bus = create_bus(server).map_err(|error| error.to_string())?;
+    bus.publish(message("conformance-recovery", "recovery", b"pending").map_err(|error| error.to_string())?)
+        .await
+        .map_err(|error| error.to_string())?;
+    let mut receiver = bus
+        .subscribe(request("conformance-recovery", "recovery-before-close").map_err(|error| error.to_string())?)
+        .await
+        .map_err(|error| error.to_string())?;
+    let ReceiveOutcome::Message(received) = receiver
+        .receive(Duration::from_secs(2))
+        .await
+        .map_err(|error| error.to_string())?
+    else {
+        return Err("recovery fixture did not receive the published event".into());
+    };
+    if received.id().as_str() != "recovery" {
+        return Err("recovery fixture received an unexpected event".into());
+    }
+    receiver.close().await.map_err(|error| error.to_string())?;
+    bus.shutdown(qubit_event_bus::spi::ShutdownMode::Immediate)
+        .await
+        .map_err(|error| error.to_string())?;
+
+    let recovered_bus = create_bus(server).map_err(|error| error.to_string())?;
+    let mut recovered = recovered_bus
+        .subscribe(request("conformance-recovery", "recovery-after-close").map_err(|error| error.to_string())?)
+        .await
+        .map_err(|error| error.to_string())?;
+    let ReceiveOutcome::Message(received) = recovered
+        .receive(Duration::from_secs(2))
+        .await
+        .map_err(|error| error.to_string())?
+    else {
+        return Err("unsettled durable event was not recovered".into());
+    };
+    if received.id().as_str() != "recovery" {
+        return Err("recovery fixture returned an unexpected event".into());
+    }
+    recovered
+        .settle(
+            received.settlement().ok_or("recovered settlement token is missing")?,
+            DeliveryDisposition::Accept,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    recovered.close().await.map_err(|error| error.to_string())?;
+    recovered_bus
+        .shutdown(qubit_event_bus::spi::ShutdownMode::Immediate)
+        .await
+        .map_err(|error| error.to_string())?;
     Ok(())
 }
 
@@ -260,6 +406,37 @@ fn test_async_receive_cancellation_leaves_pending_message_recoverable() -> Resul
         receiver.close().await?;
         Ok(())
     })
+}
+
+#[test]
+fn test_async_existing_consumer_group_is_not_retried() -> Result<(), Box<dyn std::error::Error>> {
+    let server = RedisServer::start()?;
+    let bus = create_bus(&server)?;
+    block_on(async {
+        let first = bus.subscribe(request("busy-group", "worker-a")?).await?;
+        let before_second = xgroup_command_calls(&server)?;
+        let second = bus.subscribe(request("busy-group", "worker-b")?).await?;
+        let after_second = xgroup_command_calls(&server)?;
+        assert_eq!(
+            after_second - before_second,
+            1,
+            "BUSYGROUP must not trigger a repeated XGROUP CREATE"
+        );
+        drop((first, second));
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })
+}
+
+fn xgroup_command_calls(server: &RedisServer) -> Result<u64, Box<dyn std::error::Error>> {
+    let client = Client::open(server.url())?;
+    let mut connection = client.get_connection()?;
+    let info: String = cmd("INFO").arg("commandstats").query(&mut connection)?;
+    let line = info
+        .lines()
+        .find(|line| line.starts_with("cmdstat_xgroup"))
+        .ok_or_else(|| format!("missing XGROUP command statistics: {info}"))?;
+    let calls = line.split("calls=").nth(1).ok_or("missing XGROUP calls count")?;
+    Ok(calls.split(',').next().ok_or("empty XGROUP calls count")?.parse()?)
 }
 
 #[test]

@@ -33,6 +33,10 @@ use qubit_event_bus::spi::ReceiveOutcome;
 use qubit_event_bus::spi::SpiSubscriptionRequest;
 use qubit_event_bus::spi::TopicAddress;
 use qubit_event_bus::spi::TransportPayload;
+#[cfg(feature = "conformance")]
+use qubit_event_bus::spi::conformance::ConformanceHooks;
+#[cfg(feature = "conformance")]
+use qubit_event_bus::spi::conformance::run_sync;
 use qubit_event_bus_redis::naming::stream_key;
 use qubit_event_bus_redis::sync::RedisEventBusProvider;
 use qubit_id::Id;
@@ -51,6 +55,8 @@ fn test_sync_sentinel_reconnects_after_master_failover() -> Result<(), Box<dyn s
         ("redis.claim_min_idle_ms".into(), "0".into()),
     ]
     .into();
+    #[cfg(feature = "conformance")]
+    let conformance_options = options.clone();
     let bus = RedisEventBusProvider
         .create_configured(&EventBusConfig::default().with_provider_options(options))
         .map_err(|failure| failure.into_error())?;
@@ -87,6 +93,16 @@ fn test_sync_sentinel_reconnects_after_master_failover() -> Result<(), Box<dyn s
         return Err("post-promotion message was not readable".into());
     };
     assert_eq!(after.id().as_str(), "after-failover");
+    #[cfg(feature = "conformance")]
+    run_sync(
+        || {
+            RedisEventBusProvider
+                .create_configured(&EventBusConfig::default().with_provider_options(conformance_options.clone()))
+                .expect("Sentinel provider settings remain valid after promotion")
+        },
+        &ConformanceHooks::default(),
+    )
+    .assert_all_passed();
     Ok(())
 }
 

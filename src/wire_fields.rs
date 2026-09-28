@@ -8,6 +8,7 @@
 //! Versioned byte-safe Redis stream message fields.
 
 use std::sync::Arc;
+use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
@@ -111,6 +112,7 @@ impl WireFields {
     ///
     /// Returns `UnsupportedWireVersion` for a valid numeric version other than
     /// 1 and an operation error for malformed JSON or version 1 fields.
+    #[cfg(any(feature = "sync", feature = "async"))]
     pub(crate) fn decode_wire(encoded: &str) -> Result<Self, RedisProviderError> {
         let value: serde_json::Value =
             serde_json::from_str(encoded).map_err(|_| RedisProviderError::Operation("decode wire JSON"))?;
@@ -149,7 +151,7 @@ impl WireFields {
         let timestamp_ms = message
             .timestamp()
             .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
+            .map_err(|_| RedisProviderError::Configuration("timestamp precedes the Unix epoch"))?
             .as_millis();
         Ok(Self {
             version: 1,
@@ -170,9 +172,8 @@ impl WireFields {
     /// The topic is supplied by the consumer group because it is not duplicated
     /// in each record. Invalid identifiers, headers, content types, and schema
     /// identifiers fail decoding; timestamps are interpreted as milliseconds
-    /// after the Unix epoch. Optional ordering keys that do not pass the SPI
-    /// constructor are discarded as absent. The millisecond value is converted
-    /// to a `u64` duration, matching this implementation's timestamp storage.
+    /// after the Unix epoch and must fit the platform's `SystemTime` range.
+    /// Invalid optional ordering keys fail decoding instead of being discarded.
     ///
     /// # Parameters
     ///
@@ -192,7 +193,14 @@ impl WireFields {
             return Err(RedisProviderError::UnsupportedWireVersion);
         }
         let id = EventId::new(self.event_id.as_str()).map_err(|_| RedisProviderError::Operation("decode event ID"))?;
-        let timestamp = UNIX_EPOCH + std::time::Duration::from_millis(self.timestamp_ms as u64);
+        let timestamp_ms = u64::try_from(self.timestamp_ms)
+            .map_err(|_| RedisProviderError::Configuration("timestamp_ms exceeds the supported range"))?;
+        let timestamp =
+            UNIX_EPOCH
+                .checked_add(Duration::from_millis(timestamp_ms))
+                .ok_or(RedisProviderError::Configuration(
+                    "timestamp_ms exceeds the platform range",
+                ))?;
         let headers =
             serde_json::from_str(&self.headers_json).map_err(|_| RedisProviderError::Operation("decode headers"))?;
         let content_type = ContentType::new(self.content_type.as_str())
@@ -204,7 +212,12 @@ impl WireFields {
             .transpose()
             .map_err(|_| RedisProviderError::Operation("decode schema ID"))?;
         let payload = EncodedPayload::new(Arc::from(self.payload), content_type, schema_id);
-        let ordering_key = self.ordering_key.as_deref().and_then(OrderingKey::new);
+        let ordering_key = match self.ordering_key.as_deref() {
+            Some(value) => {
+                Some(OrderingKey::new(value).ok_or(RedisProviderError::Configuration("invalid ordering key"))?)
+            }
+            None => None,
+        };
         Ok((
             topic,
             id,

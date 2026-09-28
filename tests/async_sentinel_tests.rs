@@ -34,6 +34,10 @@ use qubit_event_bus::spi::ReceiveOutcome;
 use qubit_event_bus::spi::SpiSubscriptionRequest;
 use qubit_event_bus::spi::TopicAddress;
 use qubit_event_bus::spi::TransportPayload;
+#[cfg(feature = "conformance")]
+use qubit_event_bus::spi::conformance::AsyncConformanceHooks;
+#[cfg(feature = "conformance")]
+use qubit_event_bus::spi::conformance::run_async;
 use qubit_event_bus_redis::r#async::AsyncRedisEventBusProvider;
 use qubit_id::Id;
 use qubit_spi::AsyncServiceProvider;
@@ -51,6 +55,8 @@ fn test_async_sentinel_reconnects_after_master_failover() -> Result<(), Box<dyn 
         ("redis.claim_min_idle_ms".into(), "0".into()),
     ]
     .into();
+    #[cfg(feature = "conformance")]
+    let conformance_options = options.clone();
     let config = EventBusConfig::default().with_provider_options(options);
     let bus =
         block_on(AsyncRedisEventBusProvider.create_configured(&config)).map_err(|failure| failure.into_error())?;
@@ -83,7 +89,24 @@ fn test_async_sentinel_reconnects_after_master_failover() -> Result<(), Box<dyn 
             )
             .await?;
         Ok::<(), Box<dyn std::error::Error>>(())
-    })
+    })?;
+    #[cfg(feature = "conformance")]
+    {
+        let report = block_on(run_async(
+            || {
+                let config = EventBusConfig::default().with_provider_options(conformance_options.clone());
+                async move {
+                    AsyncRedisEventBusProvider
+                        .create_configured(&config)
+                        .await
+                        .expect("Sentinel provider settings remain valid after promotion")
+                }
+            },
+            &AsyncConformanceHooks::default(),
+        ));
+        report.assert_all_passed();
+    }
+    Ok(())
 }
 
 #[test]

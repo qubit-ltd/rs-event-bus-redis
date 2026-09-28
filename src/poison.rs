@@ -53,6 +53,8 @@ pub(crate) enum PoisonOutcome {
     /// Entry is recorded in quarantine and acknowledged from its original
     /// group.
     Quarantined,
+    /// A missing source entry was removed from the consumer group's PEL.
+    TombstoneCleared,
     /// Another consumer owns the pending entry now.
     OwnershipChanged,
     /// Entry is no longer pending or has already been removed from the stream.
@@ -65,7 +67,11 @@ local pending = redis.call('XPENDING', KEYS[1], ARGV[1], ARGV[3], ARGV[3], 1)
 if #pending == 0 then return 0 end
 if pending[1][2] ~= ARGV[2] then return -1 end
 local rows = redis.call('XRANGE', KEYS[1], ARGV[3], ARGV[3])
-if #rows == 0 then return 0 end
+if #rows == 0 then
+    local acknowledged = redis.call('XACK', KEYS[1], ARGV[1], ARGV[3])
+    if acknowledged == 1 then return 2 end
+    return 0
+end
 local fields = rows[1][2]
 local wire = ''
 local missing = '0'
@@ -132,6 +138,7 @@ pub(crate) fn quarantine<C: ConnectionLike>(
     match status {
         1 => Ok(PoisonOutcome::Quarantined),
         0 => Ok(PoisonOutcome::SourceGone),
+        2 => Ok(PoisonOutcome::TombstoneCleared),
         -1 => Ok(PoisonOutcome::OwnershipChanged),
         _ => Err(RedisError::from((
             redis::ErrorKind::ResponseError,
@@ -165,10 +172,24 @@ pub(crate) async fn quarantine_async(
     match status {
         1 => Ok(PoisonOutcome::Quarantined),
         0 => Ok(PoisonOutcome::SourceGone),
+        2 => Ok(PoisonOutcome::TombstoneCleared),
         -1 => Ok(PoisonOutcome::OwnershipChanged),
         _ => Err(RedisError::from((
             redis::ErrorKind::ResponseError,
             "invalid quarantine result",
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PoisonReason;
+
+    #[test]
+    fn test_poison_reasons_have_stable_secret_free_names() {
+        assert_eq!(PoisonReason::MissingWire.as_str(), "missing_wire");
+        assert_eq!(PoisonReason::InvalidWireField.as_str(), "invalid_wire_field");
+        assert_eq!(PoisonReason::InvalidJson.as_str(), "invalid_json");
+        assert_eq!(PoisonReason::InvalidEventMetadata.as_str(), "invalid_event_metadata");
     }
 }

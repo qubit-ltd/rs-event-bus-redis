@@ -219,7 +219,10 @@ impl AsyncEventBusSpi for AsyncRedisEventBus {
                 .arg("MKSTREAM")
                 .query_async(&mut connection)
                 .await;
-            let result = if result.is_err() {
+            let result = if result
+                .as_ref()
+                .is_err_and(|error| error.is_io_error() || error.is_timeout())
+            {
                 self.client.invalidate_async_connection().await;
                 let mut retry_connection = self
                     .client
@@ -265,6 +268,7 @@ impl AsyncEventBusSpi for AsyncRedisEventBus {
                 subscription_id: request.subscription_id(),
                 closed: false,
                 claim_min_idle_ms: self.settings.claim_min_idle_ms(),
+                recovery_interval: std::time::Duration::from_millis(self.settings.recovery_interval_ms() as u64),
                 max_unsettled: self.settings.max_unsettled_per_subscription(),
                 recovery: Arc::new(Mutex::new(RecoveryState::new())),
             }) as Box<dyn AsyncEventSubscriptionSpi>)
@@ -408,6 +412,7 @@ mod tests {
                 subscription_id: Id::new(2),
                 closed: false,
                 claim_min_idle_ms: 0,
+                recovery_interval: std::time::Duration::from_secs(1),
                 max_unsettled: 1,
                 recovery: Arc::new(std::sync::Mutex::new(crate::recovery::RecoveryState::new())),
             };

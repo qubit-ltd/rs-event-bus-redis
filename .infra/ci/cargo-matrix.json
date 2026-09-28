@@ -3,15 +3,73 @@
   "checks": [
     {
       "name": "default",
-      "commands": ["check", "test", "doc"],
+      "commands": [
+        "check",
+        "test",
+        "doc"
+      ],
       "defaultFeatures": true,
       "features": []
     },
     {
       "name": "no-default-features",
-      "commands": ["check", "test", "doc"],
+      "commands": [
+        "check",
+        "test",
+        "doc"
+      ],
       "defaultFeatures": false,
       "features": []
+    },
+    {
+      "name": "sync-only",
+      "commands": [
+        "check",
+        "test",
+        "doc"
+      ],
+      "defaultFeatures": false,
+      "features": [
+        "sync"
+      ]
+    },
+    {
+      "name": "async-only",
+      "commands": [
+        "check",
+        "test",
+        "doc"
+      ],
+      "defaultFeatures": false,
+      "features": [
+        "async"
+      ]
+    },
+    {
+      "name": "sync-discovery",
+      "commands": [
+        "check",
+        "test",
+        "doc"
+      ],
+      "defaultFeatures": false,
+      "features": [
+        "sync",
+        "discovery"
+      ]
+    },
+    {
+      "name": "async-discovery",
+      "commands": [
+        "check",
+        "test",
+        "doc"
+      ],
+      "defaultFeatures": false,
+      "features": [
+        "async",
+        "discovery"
+      ]
     }
   ]
 }

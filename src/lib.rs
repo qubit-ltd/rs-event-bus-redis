@@ -28,13 +28,18 @@ pub mod error;
 /// Redis key naming helpers.
 pub mod naming;
 /// Malformed Redis stream entry quarantine protocol.
+#[cfg(any(feature = "sync", feature = "async"))]
 mod poison;
 /// Per-subscription pending-entry recovery state.
+#[cfg(any(feature = "sync", feature = "async"))]
 mod recovery;
 /// Redis backend configuration.
 mod redis_event_bus_config;
 /// Redis provider failures.
 mod redis_provider_error;
+/// Redis Streams response normalization shared by both receiver modes.
+#[cfg(any(feature = "sync", feature = "async"))]
+mod stream_protocol;
 /// Message wire format.
 pub mod wire;
 /// Versioned Redis wire fields.
