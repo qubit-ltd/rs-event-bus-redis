@@ -1,6 +1,6 @@
 [package]
 name = "qubit-event-bus-redis"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.94"
 authors = ["Haixing Hu <starfish.hu@gmail.com>"]
@@ -23,7 +23,7 @@ discovery = ["qubit-event-bus/discovery", "qubit-spi/inventory"]
 conformance = ["qubit-event-bus/conformance"]
 
 [dependencies]
-qubit-event-bus = { version = "0.15.0", path = "../rs-event-bus" }
+qubit-event-bus = "0.15.0"
 qubit-spi = "0.13"
 qubit-id = { version = "0.6", default-features = false, features = ["uuid"] }
 async-lock = { version = "^3", optional = true }
