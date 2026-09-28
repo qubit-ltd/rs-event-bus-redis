@@ -17,6 +17,9 @@
 mod client;
 /// Redis Streams backend configuration.
 pub mod config;
+/// Unique Redis consumer identity generation.
+#[cfg(any(feature = "sync", feature = "async"))]
+mod consumer_identity;
 /// Shared provider discovery submissions.
 #[cfg(feature = "discovery")]
 mod discovery;
