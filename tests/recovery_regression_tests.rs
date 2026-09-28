@@ -1385,7 +1385,7 @@ fn async_claim_command_failure_is_reported_as_retryable() -> Result<(), Box<dyn 
 #[cfg(feature = "sync")]
 #[test]
 fn sync_drops_reader_connection_after_redis_receive_error() -> Result<(), Box<dyn std::error::Error>> {
-    let server = RedisServer::start()?;
+    let mut server = RedisServer::start()?;
     let bus = sync_bus(&server, "read-error-sync", 2)?;
     let mut receiver = bus.subscribe(request(
         "events",
@@ -1420,6 +1420,24 @@ fn sync_drops_reader_connection_after_redis_receive_error() -> Result<(), Box<dy
             ..
         }
     ));
+    server.restart()?;
+    let key = stream_key("read-error-sync", "events");
+    let group = group_name(
+        "read-error-sync",
+        "events",
+        "read-error-worker",
+        Some("read-error-group"),
+    );
+    let mut connection = Client::open(server.url())?.get_connection()?;
+    let _: usize = cmd("DEL").arg(&key).query(&mut connection)?;
+    let _: String = cmd("XGROUP")
+        .arg("CREATE")
+        .arg(key)
+        .arg(group)
+        .arg("0")
+        .arg("MKSTREAM")
+        .query(&mut connection)?;
+    assert!(matches!(receiver.receive(Duration::ZERO)?, ReceiveOutcome::TimedOut));
     Ok(())
 }
 
@@ -1427,7 +1445,7 @@ fn sync_drops_reader_connection_after_redis_receive_error() -> Result<(), Box<dy
 #[test]
 fn async_drops_reader_connection_after_redis_receive_error() -> Result<(), Box<dyn std::error::Error>> {
     futures_lite::future::block_on(async {
-        let server = RedisServer::start()?;
+        let mut server = RedisServer::start()?;
         let bus = async_bus(&server, "read-error-async", 2).await?;
         let mut receiver = bus
             .subscribe(request(
@@ -1463,6 +1481,27 @@ fn async_drops_reader_connection_after_redis_receive_error() -> Result<(), Box<d
                 retryable: Some(true),
                 ..
             }
+        ));
+        server.restart()?;
+        let key = stream_key("read-error-async", "events");
+        let group = group_name(
+            "read-error-async",
+            "events",
+            "read-error-worker",
+            Some("read-error-group"),
+        );
+        let mut connection = Client::open(server.url())?.get_connection()?;
+        let _: usize = cmd("DEL").arg(&key).query(&mut connection)?;
+        let _: String = cmd("XGROUP")
+            .arg("CREATE")
+            .arg(key)
+            .arg(group)
+            .arg("0")
+            .arg("MKSTREAM")
+            .query(&mut connection)?;
+        assert!(matches!(
+            receiver.receive(Duration::ZERO).await?,
+            ReceiveOutcome::TimedOut
         ));
         Ok::<(), Box<dyn std::error::Error>>(())
     })

@@ -427,14 +427,18 @@ mod tests {
     #[cfg(feature = "sync")]
     #[test]
     fn sync_connection_methods_report_poisoned_locks() {
-        let client = client_without_sentinel();
+        let client = Client::new(&RedisEventBusConfig::default()).expect("standalone client configuration is valid");
         let pool = std::sync::Arc::clone(&client.sync_pool);
         let _ = std::thread::spawn(move || {
             let _guard = pool.idle.lock().expect("pool lock is initially healthy");
             panic!("poison connection pool lock for error-path coverage");
         })
         .join();
-        assert!(client.get_connection().is_err());
+        let error = match client.get_connection() {
+            Err(error) => error,
+            Ok(_) => panic!("poisoned standalone pool must reject a connection checkout"),
+        };
+        assert!(error.to_string().contains("connection pool lock poisoned"));
 
         let client = sentinel_client();
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
