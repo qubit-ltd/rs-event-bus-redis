@@ -7,59 +7,21 @@
 // =============================================================================
 //! Atomic transfer of malformed pending entries into a quarantine stream.
 
+#[path = "internal/decode_failure.rs"]
+mod decode_failure;
+#[path = "internal/poison_outcome.rs"]
+mod poison_outcome;
+
+#[path = "internal/poison_reason.rs"]
+mod poison_reason;
+
+pub(crate) use decode_failure::DecodeFailure;
+pub(crate) use poison_outcome::PoisonOutcome;
+pub(crate) use poison_reason::PoisonReason;
 #[cfg(feature = "sync")]
 use redis::ConnectionLike;
 use redis::RedisError;
 use redis::cmd;
-
-/// Stable reason stored beside malformed wire data without exposing it in
-/// errors.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum PoisonReason {
-    /// Stream entry does not contain the `wire` field.
-    MissingWire,
-    /// Stream entry's `wire` value is not a byte string.
-    InvalidWireField,
-    /// The wire field is not valid JSON.
-    InvalidJson,
-    /// A decoded field cannot construct the required event metadata.
-    InvalidEventMetadata,
-}
-
-impl PoisonReason {
-    /// Returns the stable, secret-free reason stored in the quarantine stream.
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::MissingWire => "missing_wire",
-            Self::InvalidWireField => "invalid_wire_field",
-            Self::InvalidJson => "invalid_json",
-            Self::InvalidEventMetadata => "invalid_event_metadata",
-        }
-    }
-}
-
-/// Separates incompatible records from records safe to quarantine.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum DecodeFailure {
-    /// The record is malformed and can be transferred to quarantine.
-    Poison(PoisonReason),
-    /// The record uses a valid wire version this provider cannot decode.
-    UnsupportedVersion,
-}
-
-/// Result of checking and transferring a malformed group delivery.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum PoisonOutcome {
-    /// Entry is recorded in quarantine and acknowledged from its original
-    /// group.
-    Quarantined,
-    /// A missing source entry was removed from the consumer group's PEL.
-    TombstoneCleared,
-    /// Another consumer owns the pending entry now.
-    OwnershipChanged,
-    /// Entry is no longer pending or has already been removed from the stream.
-    SourceGone,
-}
 
 /// Lua transfer checks ownership, copies the raw wire field, then acknowledges.
 const QUARANTINE_SCRIPT: &str = r#"

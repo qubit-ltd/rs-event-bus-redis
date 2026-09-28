@@ -143,8 +143,8 @@ fn test_wire_encoder_rejects_pre_epoch_timestamps() -> Result<(), Box<dyn std::e
 
 #[test]
 fn test_config_debug_redacts_password_in_url() {
-    let config = RedisEventBusConfig::new("redis://user:test-secret@127.0.0.1/", "test");
-    assert!(!format!("{config:?}").contains("test-secret"));
+    let error = RedisEventBusConfig::new("redis://user:test-secret@127.0.0.1/", "test").unwrap_err();
+    assert!(!error.to_string().contains("test-secret"));
 }
 
 #[test]

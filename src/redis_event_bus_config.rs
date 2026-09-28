@@ -29,7 +29,7 @@ use crate::error::RedisProviderError;
 /// ```
 /// use qubit_event_bus_redis::config::RedisEventBusConfig;
 ///
-/// let config = RedisEventBusConfig::new("redis://127.0.0.1/", "orders");
+/// let config = RedisEventBusConfig::new("redis://127.0.0.1/", "orders").expect("valid config");
 /// assert_eq!(config.namespace(), "orders");
 /// assert_eq!(config.connection_url(), "redis://127.0.0.1/");
 /// ```
@@ -106,9 +106,7 @@ impl Default for RedisEventBusConfig {
 impl RedisEventBusConfig {
     /// Creates configuration from a credential-free Redis URL and namespace.
     ///
-    /// This constructor stores values as supplied; URL and namespace
-    /// validation is performed by
-    /// [`from_provider_options`](Self::from_provider_options).
+    /// URL and namespace validation uses the same rules as provider options.
     ///
     /// # Parameters
     ///
@@ -117,21 +115,19 @@ impl RedisEventBusConfig {
     ///
     /// # Returns
     ///
-    /// A configuration with default recovery limits and no Sentinel endpoints.
-    pub fn new(connection_url: &str, namespace: &str) -> Self {
-        Self {
-            connection_url: connection_url.into(),
-            namespace: namespace.into(),
-            sentinel_nodes: None,
-            sentinel_service: None,
-            credentials: RedisCredentials::default(),
-            sentinel_credentials: RedisCredentials::default(),
-            claim_min_idle_ms: 30_000,
-            recovery_interval_ms: 1_000,
-            max_unsettled_per_subscription: 100,
-            max_idle_connections: 8,
-            stream_maxlen_approx: None,
-        }
+    /// A validated configuration with default recovery limits and no
+    /// Sentinel endpoints.
+    ///
+    /// # Errors
+    ///
+    /// Returns a configuration error when the URL or namespace is invalid.
+    pub fn new(connection_url: &str, namespace: &str) -> Result<Self, RedisProviderError> {
+        let options: ProviderOptions = [
+            ("redis.url".to_owned(), connection_url.to_owned()),
+            ("redis.namespace".to_owned(), namespace.to_owned()),
+        ]
+        .into();
+        Self::from_provider_options(&options)
     }
 
     /// Borrows the Redis URL used when creating a client.
@@ -285,6 +281,27 @@ impl RedisEventBusConfig {
     /// unavailable credential variables, empty namespaces, or incomplete
     /// Sentinel settings.
     pub fn from_provider_options(options: &ProviderOptions) -> Result<Self, RedisProviderError> {
+        const KNOWN_OPTIONS: &[&str] = &[
+            "redis.url",
+            "redis.namespace",
+            "redis.username_env",
+            "redis.password_env",
+            "redis.sentinel.username_env",
+            "redis.sentinel.password_env",
+            "redis.sentinel.nodes",
+            "redis.sentinel.service_name",
+            "redis.claim_min_idle_ms",
+            "redis.recovery_interval_ms",
+            "redis.max_unsettled_per_subscription",
+            "redis.max_idle_connections",
+            "redis.stream_maxlen_approx",
+        ];
+        if options
+            .keys()
+            .any(|key| key.starts_with("redis.") && !KNOWN_OPTIONS.contains(&key.as_str()))
+        {
+            return Err(RedisProviderError::Configuration("unknown Redis provider option"));
+        }
         let connection_url = options
             .get("redis.url")
             .map(String::as_str)
@@ -367,17 +384,19 @@ impl RedisEventBusConfig {
                 "Sentinel nodes and service name must be configured together",
             ));
         }
-        let mut config = Self::new(connection_url, namespace);
-        config.sentinel_nodes = sentinel_nodes;
-        config.sentinel_service = sentinel_service;
-        config.credentials = credentials;
-        config.sentinel_credentials = sentinel_credentials;
-        config.claim_min_idle_ms = claim_min_idle_ms;
-        config.recovery_interval_ms = recovery_interval_ms;
-        config.max_unsettled_per_subscription = max_unsettled_per_subscription;
-        config.max_idle_connections = max_idle_connections;
-        config.stream_maxlen_approx = stream_maxlen_approx;
-        Ok(config)
+        Ok(Self {
+            connection_url: connection_url.into(),
+            namespace: namespace.into(),
+            sentinel_nodes,
+            sentinel_service,
+            credentials,
+            sentinel_credentials,
+            claim_min_idle_ms,
+            recovery_interval_ms,
+            max_unsettled_per_subscription,
+            max_idle_connections,
+            stream_maxlen_approx,
+        })
     }
 
     /// Parses Redis provider options carried by an event-bus configuration.
@@ -471,11 +490,19 @@ mod tests {
 
     #[test]
     fn new_config_exposes_supplied_values_and_defaults() {
-        let config = RedisEventBusConfig::new("redis://localhost/", "orders");
+        let config = RedisEventBusConfig::new("redis://localhost/", "orders").unwrap();
         assert_eq!(config.connection_url(), "redis://localhost/");
         assert_eq!(config.namespace(), "orders");
         assert_eq!(config.recovery_interval_ms(), 1_000);
         assert_eq!(config.max_idle_connections(), 8);
+    }
+
+    #[test]
+    fn new_rejects_invalid_url_credentials_and_namespace() {
+        assert!(RedisEventBusConfig::new("not a URL", "orders").is_err());
+        assert!(RedisEventBusConfig::new("redis://user:secret@localhost/", "orders").is_err());
+        assert!(RedisEventBusConfig::new("redis://localhost/", "").is_err());
+        assert!(RedisEventBusConfig::new("redis://localhost/", &"x".repeat(129)).is_err());
     }
 
     #[test]
@@ -554,5 +581,16 @@ mod tests {
             RedisEventBusConfig::from_provider_options(&[("redis.url".into(), "not a redis url".into())].into())
                 .unwrap_err();
         assert!(!error.to_string().contains("secret"));
+    }
+
+    #[test]
+    fn provider_options_reject_unknown_redis_keys_without_echoing_values() {
+        let options: ProviderOptions = [("redis.passwrod".into(), "secret-value".into())].into();
+        let error = RedisEventBusConfig::from_provider_options(&options).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "invalid Redis provider configuration: unknown Redis provider option"
+        );
+        assert!(!error.to_string().contains("secret-value"));
     }
 }

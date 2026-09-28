@@ -150,7 +150,7 @@ impl EventSubscriptionSpi for Subscription {
                         .filter(|entry| recovery.can_deliver(&entry.id))
                 };
                 if let Some(entry) = deferred
-                    && let Some(outcome) = read_entry(self, &mut connection, entry)?
+                    && let Some(outcome) = read_entry(self, &mut connection, entry, &mut budget)?
                 {
                     return Ok(outcome);
                 }
@@ -186,13 +186,21 @@ impl EventSubscriptionSpi for Subscription {
                     lock_state(&self.recovery, &self.topic, "receive", "recovery lock")?
                         .set_claim_cursor(claim.next_stream_id);
                     let mut deleted_count = claim.deleted_ids.len() as u64;
-                    if has_missing_entries {
+                    if has_missing_entries && budget.take_tombstone_probe(Instant::now()) {
+                        let tombstone_cursor = lock_state(&self.recovery, &self.topic, "receive", "recovery lock")?
+                            .tombstone_cursor()
+                            .to_owned();
+                        let pending_start = if tombstone_cursor == "0-0" {
+                            "-".to_owned()
+                        } else {
+                            format!("({tombstone_cursor}")
+                        };
                         let pending_reply: Value = cmd("XPENDING")
                             .arg(&self.key)
                             .arg(&self.group)
-                            .arg(&cursor)
+                            .arg(pending_start)
                             .arg("+")
-                            .arg(16)
+                            .arg(4)
                             .query(&mut connection)
                             .map_err(|_| {
                                 spi_error("receive", Some(&self.topic), RedisProviderError::Operation("XPENDING"))
@@ -200,9 +208,17 @@ impl EventSubscriptionSpi for Subscription {
                         let pending_rows = parse_pending_entries(pending_reply).map_err(|_| {
                             spi_error("receive", Some(&self.topic), RedisProviderError::Operation("XPENDING"))
                         })?;
+                        let pending_row_count = pending_rows.len();
+                        let mut scan_complete = true;
                         for (id, owner, idle_ms) in pending_rows {
                             if idle_ms < self.claim_min_idle_ms as u64 {
+                                lock_state(&self.recovery, &self.topic, "receive", "recovery lock")?
+                                    .set_tombstone_cursor(id);
                                 continue;
+                            }
+                            if !budget.take_tombstone_range(Instant::now()) {
+                                scan_complete = false;
+                                break;
                             }
                             let rows: StreamRangeReply = cmd("XRANGE")
                                 .arg(&self.key)
@@ -213,6 +229,10 @@ impl EventSubscriptionSpi for Subscription {
                                     spi_error("receive", Some(&self.topic), RedisProviderError::Operation("XRANGE"))
                                 })?;
                             if rows.ids.is_empty() {
+                                if !budget.take_maintenance_evaluation(Instant::now()) {
+                                    scan_complete = false;
+                                    break;
+                                }
                                 match quarantine(
                                     &mut connection,
                                     &self.key,
@@ -234,6 +254,12 @@ impl EventSubscriptionSpi for Subscription {
                                     PoisonOutcome::Quarantined => {}
                                 }
                             }
+                            lock_state(&self.recovery, &self.topic, "receive", "recovery lock")?
+                                .set_tombstone_cursor(id);
+                        }
+                        if scan_complete && pending_row_count < 4 {
+                            lock_state(&self.recovery, &self.topic, "receive", "recovery lock")?
+                                .reset_tombstone_cursor();
                         }
                     }
                     if deleted_count > 0 {
@@ -248,7 +274,7 @@ impl EventSubscriptionSpi for Subscription {
                     if let Some(entry) = claimed {
                         let available =
                             lock_state(&self.recovery, &self.topic, "receive", "recovery lock")?.can_deliver(&entry.id);
-                        if available && let Some(outcome) = read_entry(self, &mut connection, entry)? {
+                        if available && let Some(outcome) = read_entry(self, &mut connection, entry, &mut budget)? {
                             return Ok(outcome);
                         }
                     }
@@ -289,7 +315,7 @@ impl EventSubscriptionSpi for Subscription {
                     lock_state(&self.recovery, &self.topic, "receive", "recovery lock")?.set_pending_cursor(id.clone());
                     let available =
                         lock_state(&self.recovery, &self.topic, "receive", "recovery lock")?.can_deliver(&id);
-                    if available && let Some(outcome) = read_entry(self, &mut connection, entry)? {
+                    if available && let Some(outcome) = read_entry(self, &mut connection, entry, &mut budget)? {
                         return Ok(outcome);
                     }
                 }
@@ -315,7 +341,7 @@ impl EventSubscriptionSpi for Subscription {
                     if let Some(entry) = reply
                         .and_then(|reply| reply.keys.into_iter().next())
                         .and_then(|stream| stream.ids.into_iter().next())
-                        && let Some(outcome) = read_entry(self, &mut connection, entry)?
+                        && let Some(outcome) = read_entry(self, &mut connection, entry, &mut budget)?
                     {
                         return Ok(outcome);
                     }
@@ -357,7 +383,7 @@ impl EventSubscriptionSpi for Subscription {
                         .and_then(|reply| reply.keys.into_iter().next())
                         .and_then(|stream| stream.ids.into_iter().next());
                     if let Some(entry) = entry {
-                        if let Some(outcome) = read_entry(self, &mut connection, entry)? {
+                        if let Some(outcome) = read_entry(self, &mut connection, entry, &mut budget)? {
                             return Ok(outcome);
                         }
                         continue;
@@ -401,6 +427,9 @@ impl EventSubscriptionSpi for Subscription {
         let state = token
             .downcast_ref::<SettlementState>()
             .ok_or_else(|| invalid_token("token type is not recognized", &self.topic))?;
+        if !Arc::ptr_eq(&state.recovery, &self.recovery) {
+            return Err(invalid_token("token belongs to another receiver", &self.topic));
+        }
         let mut applied = lock_state(&state.disposition, &self.topic, "settle", "settlement lock")?;
         if let Some(previous) = *applied {
             return if previous == disposition {
@@ -520,6 +549,7 @@ fn read_entry(
     subscription: &Subscription,
     connection: &mut impl ConnectionLike,
     entry: StreamId,
+    budget: &mut RecoveryScanBudget,
 ) -> Result<Option<ReceiveOutcome>, SpiError> {
     let id = entry.id.clone();
     match decode_entry(subscription, entry) {
@@ -544,6 +574,11 @@ fn read_entry(
             source: Box::new(RedisProviderError::UnsupportedWireVersion),
         }),
         Err(DecodeFailure::Poison(reason)) => {
+            if !budget.take_maintenance_evaluation(Instant::now()) {
+                lock_state(&subscription.recovery, &subscription.topic, "receive", "recovery lock")?
+                    .reset_pending_scan();
+                return Ok(Some(ReceiveOutcome::TimedOut));
+            }
             let outcome = quarantine(
                 connection,
                 &subscription.key,
@@ -741,6 +776,28 @@ mod tests {
         let mut subscription = subscription();
         let token = SettlementToken::new(subscription.subscription_id, StartPosition::New);
         assert!(subscription.settle(&token, DeliveryDisposition::Accept).is_err());
+    }
+
+    #[test]
+    fn settle_rejects_a_token_from_a_different_receiver_with_the_same_id() {
+        let mut subscription = subscription();
+        let token = SettlementToken::new(
+            subscription.subscription_id,
+            super::super::internal::SettlementState {
+                stream: subscription.key.clone(),
+                group: subscription.group.clone(),
+                message_id: "1-0".into(),
+                disposition: Arc::new(Mutex::new(None)),
+                recovery: Arc::new(Mutex::new(RecoveryState::new())),
+            },
+        );
+        let error = subscription
+            .settle(&token, DeliveryDisposition::Retry)
+            .expect_err("foreign receiver state must be rejected");
+        assert!(matches!(
+            error,
+            qubit_event_bus::error::SpiError::InvalidSettlementToken { .. }
+        ));
     }
 
     #[test]

@@ -15,10 +15,6 @@ use std::sync::Mutex as StdMutex;
 #[cfg(feature = "async")]
 use async_lock::Mutex as AsyncMutex;
 use redis::Client as RedisConnectionClient;
-#[cfg(feature = "sync")]
-use redis::Connection;
-#[cfg(feature = "sync")]
-use redis::ConnectionLike;
 use redis::ErrorKind;
 use redis::IntoConnectionInfo;
 use redis::RedisError;
@@ -29,6 +25,13 @@ use redis::sentinel::SentinelClientBuilder;
 use redis::sentinel::SentinelServerType;
 
 use crate::config::RedisEventBusConfig;
+
+#[path = "client/internal.rs"]
+mod internal;
+#[cfg(feature = "sync")]
+pub(crate) use internal::PooledConnection;
+#[cfg(feature = "sync")]
+use internal::SyncConnectionPool;
 
 /// Redis connection factory with optional Sentinel master discovery.
 ///
@@ -212,72 +215,6 @@ impl Client {
     }
 }
 
-#[cfg(feature = "sync")]
-struct SyncConnectionPool {
-    idle: StdMutex<Vec<Connection>>,
-    max_idle: usize,
-}
-
-#[cfg(feature = "sync")]
-impl SyncConnectionPool {
-    fn new(max_idle: usize) -> Self {
-        Self {
-            idle: StdMutex::new(Vec::new()),
-            max_idle,
-        }
-    }
-}
-
-#[cfg(feature = "sync")]
-pub(crate) struct PooledConnection {
-    connection: Option<Connection>,
-    pool: Option<Arc<SyncConnectionPool>>,
-}
-
-#[cfg(feature = "sync")]
-impl PooledConnection {
-    fn new(connection: Connection, pool: Option<Arc<SyncConnectionPool>>) -> Self {
-        Self {
-            connection: Some(connection),
-            pool,
-        }
-    }
-
-    pub(crate) fn discard(&mut self) {
-        self.pool = None;
-    }
-}
-
-#[cfg(feature = "sync")]
-impl std::ops::Deref for PooledConnection {
-    type Target = Connection;
-    fn deref(&self) -> &Self::Target {
-        self.connection.as_ref().expect("pooled connection is present")
-    }
-}
-
-#[cfg(feature = "sync")]
-impl std::ops::DerefMut for PooledConnection {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.connection.as_mut().expect("pooled connection is present")
-    }
-}
-
-#[cfg(feature = "sync")]
-impl Drop for PooledConnection {
-    fn drop(&mut self) {
-        let (Some(pool), Some(connection)) = (&self.pool, self.connection.take()) else {
-            return;
-        };
-        if connection.is_open()
-            && let Ok(mut idle) = pool.idle.lock()
-            && idle.len() < pool.max_idle
-        {
-            idle.push(connection);
-        }
-    }
-}
-
 /// Constructs the authenticated Sentinel resolver used for master discovery.
 ///
 /// # Type Parameters
@@ -362,7 +299,8 @@ mod tests {
                 }
             }
         });
-        let settings = RedisEventBusConfig::new(&format!("redis://{address}/"), "pool-test");
+        let settings =
+            RedisEventBusConfig::new(&format!("redis://{address}/"), "pool-test").expect("valid test configuration");
         let client = Client::new(&settings).expect("standalone client configuration is valid");
 
         let first = client.get_connection().expect("first connection opens");
@@ -466,7 +404,8 @@ mod tests {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve a local port");
             let address = listener.local_addr().expect("listener has an address");
             drop(listener);
-            let settings = RedisEventBusConfig::new(&format!("redis://{address}/"), "unavailable");
+            let settings = RedisEventBusConfig::new(&format!("redis://{address}/"), "unavailable")
+                .expect("valid test configuration");
             let standalone = Client::new(&settings).expect("standalone client configuration is valid");
             assert!(standalone.get_async_connection().await.is_err());
             assert!(standalone.get_async_dedicated_connection().await.is_err());

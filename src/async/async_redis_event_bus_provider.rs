@@ -120,14 +120,7 @@ impl AsyncServiceProvider<EventBusSpec> for AsyncRedisEventBusProvider {
 ///
 /// An SPI error that omits the raw Redis client diagnostic.
 pub(super) fn spi_error(operation: &'static str, topic: Option<&TopicAddress>, source: RedisProviderError) -> SpiError {
-    SpiError::Operation {
-        provider_id: "redis-streams".into(),
-        operation,
-        resource: topic.map(|value| value.as_str().into()),
-        kind: "redis_error",
-        retryable: Some(true),
-        source: Box::new(source),
-    }
+    crate::error::to_spi_error(operation, topic, source)
 }
 
 #[cfg(test)]

@@ -13,12 +13,17 @@ mod support;
 
 use std::any::TypeId;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
+use std::task::Context;
+use std::task::Poll;
+use std::task::Waker;
 use std::time::Duration;
 use std::time::SystemTime;
 
 use futures_lite::future::block_on;
+use futures_lite::future::race;
 use qubit_event_bus::EventBusConfig;
 use qubit_event_bus::model::ConsumerGroup;
 use qubit_event_bus::model::ContentType;
@@ -46,11 +51,13 @@ use qubit_event_bus::spi::conformance::ConformanceProfile;
 #[cfg(feature = "conformance")]
 use qubit_event_bus::spi::conformance::run_async_with_profile;
 use qubit_event_bus_redis::r#async::AsyncRedisEventBusProvider;
+use qubit_event_bus_redis::naming::group_name;
 use qubit_event_bus_redis::naming::stream_key;
 use qubit_id::Id;
 use qubit_spi::AsyncServiceProvider;
 use redis::Client;
 use redis::cmd;
+use support::controlled_redis::ControlledRedis;
 use support::redis_server::RedisServer;
 
 static SUBSCRIPTION_IDS: AtomicU64 = AtomicU64::new(100);
@@ -132,8 +139,12 @@ fn test_async_stream_is_untrimmed_by_default() -> Result<(), Box<dyn std::error:
 }
 
 fn create_bus(server: &RedisServer) -> Result<Arc<dyn AsyncEventBusSpi>, Box<dyn std::error::Error>> {
+    create_bus_url(server.url())
+}
+
+fn create_bus_url(url: &str) -> Result<Arc<dyn AsyncEventBusSpi>, Box<dyn std::error::Error>> {
     let options: ProviderOptions = [
-        ("redis.url".into(), server.url().into()),
+        ("redis.url".into(), url.into()),
         ("redis.namespace".into(), "async-tests".into()),
         ("redis.claim_min_idle_ms".into(), "0".into()),
         ("redis.max_unsettled_per_subscription".into(), "1".into()),
@@ -381,11 +392,47 @@ async fn test_async_spi_runs_on_tokio_executor() -> Result<(), Box<dyn std::erro
 #[test]
 fn test_async_receive_cancellation_leaves_pending_message_recoverable() -> Result<(), Box<dyn std::error::Error>> {
     let server = RedisServer::start()?;
-    let bus = create_bus(&server)?;
+    let proxy = ControlledRedis::start(server.url())?;
+    let gate = proxy.gate();
+    let bus = create_bus_url(&proxy.url())?;
     block_on(async {
         bus.publish(message("async-events", "cancel-1", b"recover")?).await?;
         let mut receiver = bus.subscribe(request("async-events", "worker-c")?).await?;
-        drop(receiver.receive(Duration::from_secs(1)));
+        let cancel = Arc::new(CancelReceive::default());
+        let worker_cancel = Arc::clone(&cancel);
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        gate.arm();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let result = block_on(race(
+                    async { Some(receiver.receive(Duration::from_secs(2)).await) },
+                    WaitForCancel(Arc::clone(&worker_cancel)),
+                ));
+                let _ = result_tx.send(result);
+            });
+            let reached = gate.wait_until_reached(Duration::from_secs(3));
+            cancel.cancel();
+            let result = result_rx.recv_timeout(Duration::from_secs(2))?;
+            assert!(result.is_none(), "receive future should be cancelled");
+            gate.release();
+            if !reached {
+                return Err("XREADGROUP response gate was not reached".into());
+            }
+            let mut connection = Client::open(server.url())?.get_connection()?;
+            let pending: Vec<redis::Value> = cmd("XPENDING")
+                .arg(stream_key("async-tests", "async-events"))
+                .arg(group_name("async-tests", "async-events", "worker-c", Some("workers")))
+                .arg("-")
+                .arg("+")
+                .arg(10)
+                .query(&mut connection)?;
+            assert_eq!(
+                pending.len(),
+                1,
+                "Redis must have applied XREADGROUP before cancellation"
+            );
+            Ok::<(), Box<dyn std::error::Error>>(())
+        })?;
         let ReceiveOutcome::Message(received) = receiver.receive(Duration::from_secs(2)).await? else {
             return Err("pending record was not recovered".into());
         };
@@ -407,6 +454,36 @@ fn test_async_receive_cancellation_leaves_pending_message_recoverable() -> Resul
         receiver.close().await?;
         Ok(())
     })
+}
+
+#[derive(Default)]
+struct CancelReceive {
+    cancelled: std::sync::atomic::AtomicBool,
+    waker: Mutex<Option<Waker>>,
+}
+
+impl CancelReceive {
+    fn cancel(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+        if let Some(waker) = self.waker.lock().expect("cancel waker lock is healthy").take() {
+            waker.wake();
+        }
+    }
+}
+
+struct WaitForCancel(Arc<CancelReceive>);
+
+impl std::future::Future for WaitForCancel {
+    type Output = Option<Result<ReceiveOutcome, qubit_event_bus::error::SpiError>>;
+
+    fn poll(self: std::pin::Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        if self.0.cancelled.load(Ordering::SeqCst) {
+            Poll::Ready(None)
+        } else {
+            *self.0.waker.lock().expect("cancel waker lock is healthy") = Some(context.waker().clone());
+            Poll::Pending
+        }
+    }
 }
 
 #[test]

@@ -43,6 +43,7 @@ use crate::naming::group_name;
 use crate::naming::poison_key;
 use crate::naming::stream_key;
 use crate::recovery::RecoveryState;
+use crate::redis_provider_error::from_redis_error;
 use crate::wire::WireFields;
 
 /// Validated Redis settings and client shared by publishers and subscribers.
@@ -93,13 +94,10 @@ impl EventBusSpi for RedisEventBus {
                 RedisProviderError::Operation("encode message"),
             )
         })?;
-        let mut connection = self.client.get_connection().map_err(|_| {
-            spi_error(
-                "publish",
-                Some(message.topic()),
-                RedisProviderError::Operation("connect"),
-            )
-        })?;
+        let mut connection = self
+            .client
+            .get_connection()
+            .map_err(|error| spi_error("publish", Some(message.topic()), from_redis_error("publish", &error)))?;
         let mut command = cmd("XADD");
         command.arg(&key);
         if let Some(maxlen) = self.settings.stream_maxlen_approx() {
@@ -110,7 +108,7 @@ impl EventBusSpi for RedisEventBus {
             .arg("wire")
             .arg(payload)
             .query(&mut connection)
-            .map_err(|_| spi_error("publish", Some(message.topic()), RedisProviderError::Operation("XADD")))?;
+            .map_err(|error| spi_error("publish", Some(message.topic()), from_redis_error("publish", &error)))?;
         Ok(PublishAcknowledgement::Accepted {
             provider_message_id: Some(message_id),
             metadata: Default::default(),
@@ -292,14 +290,7 @@ pub(super) const fn redis_capabilities() -> EventBusCapabilities {
 ///
 /// A retryable SPI operation error without raw Redis diagnostics.
 pub(super) fn spi_error(operation: &'static str, topic: Option<&TopicAddress>, source: RedisProviderError) -> SpiError {
-    SpiError::Operation {
-        provider_id: "redis-streams".into(),
-        operation,
-        resource: topic.map(|value| value.as_str().into()),
-        kind: "redis_error",
-        retryable: Some(true),
-        source: Box::new(source),
-    }
+    crate::error::to_spi_error(operation, topic, source)
 }
 
 #[cfg(test)]
@@ -359,7 +350,8 @@ mod tests {
 
     #[test]
     fn connection_failures_are_returned_for_publish_and_subscribe() {
-        let settings = RedisEventBusConfig::new("redis://127.0.0.1:1/", "connection-errors");
+        let settings =
+            RedisEventBusConfig::new("redis://127.0.0.1:1/", "connection-errors").expect("valid test configuration");
         let bus = RedisEventBus {
             client: Arc::new(Client::new(&settings).expect("unreachable Redis URL is syntactically valid")),
             settings,

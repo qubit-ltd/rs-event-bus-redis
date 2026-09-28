@@ -44,6 +44,7 @@ use crate::naming::group_name;
 use crate::naming::poison_key;
 use crate::naming::stream_key;
 use crate::recovery::RecoveryState;
+use crate::redis_provider_error::from_redis_error;
 use crate::wire::WireFields;
 
 /// Client and validated settings shared by asynchronous SPI operations.
@@ -111,7 +112,7 @@ impl AsyncEventBusSpi for AsyncRedisEventBus {
                 .client
                 .get_async_connection()
                 .await
-                .map_err(|_| spi_error("publish", Some(&topic), RedisProviderError::Operation("connect")))?;
+                .map_err(|error| spi_error("publish", Some(&topic), from_redis_error("publish", &error)))?;
             let mut command = cmd("XADD");
             command.arg(key);
             if let Some(maxlen) = self.settings.stream_maxlen_approx() {
@@ -125,13 +126,9 @@ impl AsyncEventBusSpi for AsyncRedisEventBus {
                 .await;
             let message_id = match result {
                 Ok(id) => id,
-                Err(_) => {
+                Err(error) => {
                     self.client.invalidate_async_connection().await;
-                    return Err(spi_error(
-                        "publish",
-                        Some(&topic),
-                        RedisProviderError::Operation("XADD"),
-                    ));
+                    return Err(spi_error("publish", Some(&topic), from_redis_error("publish", &error)));
                 }
             };
             Ok(PublishAcknowledgement::Accepted {
@@ -358,7 +355,8 @@ mod tests {
     #[test]
     fn connection_failures_are_returned_for_publish_and_subscribe() {
         block_on(async {
-            let settings = RedisEventBusConfig::new("redis://127.0.0.1:1/", "connection-errors");
+            let settings = RedisEventBusConfig::new("redis://127.0.0.1:1/", "connection-errors")
+                .expect("valid test configuration");
             let bus = AsyncRedisEventBus {
                 client: Arc::new(Client::new(&settings).expect("unreachable Redis URL is syntactically valid")),
                 settings,

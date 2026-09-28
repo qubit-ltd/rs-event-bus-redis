@@ -5,13 +5,12 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-//! Test support for isolated Redis services.
+//! Private Redis client resource types.
 
-#[allow(dead_code)]
-pub mod controlled_redis;
-#[allow(dead_code)]
-pub mod redis_server;
-#[allow(dead_code)]
-pub mod scripted_redis;
-#[allow(dead_code)]
-pub mod sentinel;
+#[path = "internal/pooled_connection.rs"]
+mod pooled_connection;
+
+#[cfg(feature = "sync")]
+pub(crate) use pooled_connection::PooledConnection;
+#[cfg(feature = "sync")]
+pub(crate) use pooled_connection::SyncConnectionPool;

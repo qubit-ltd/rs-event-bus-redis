@@ -50,13 +50,13 @@ fn receive_faults() -> Vec<ReceiveFault> {
         ReceiveFault {
             name: "malformed XAUTOCLAIM",
             category: "XAUTOCLAIM",
-            timeout: Duration::ZERO,
+            timeout: Duration::from_millis(50),
             steps: vec![Step::reply("XAUTOCLAIM", b":1\r\n")],
         },
         ReceiveFault {
             name: "XPENDING command failure",
             category: "XPENDING",
-            timeout: Duration::ZERO,
+            timeout: Duration::from_millis(50),
             steps: vec![
                 Step::reply("XAUTOCLAIM", TOMBSTONE_CLAIM),
                 Step::reply("XPENDING", FAULT),
@@ -65,7 +65,7 @@ fn receive_faults() -> Vec<ReceiveFault> {
         ReceiveFault {
             name: "malformed XPENDING",
             category: "XPENDING",
-            timeout: Duration::ZERO,
+            timeout: Duration::from_millis(50),
             steps: vec![
                 Step::reply("XAUTOCLAIM", TOMBSTONE_CLAIM),
                 Step::reply("XPENDING", b":1\r\n"),
@@ -74,7 +74,7 @@ fn receive_faults() -> Vec<ReceiveFault> {
         ReceiveFault {
             name: "XRANGE command failure",
             category: "XRANGE",
-            timeout: Duration::ZERO,
+            timeout: Duration::from_millis(50),
             steps: vec![
                 Step::reply("XAUTOCLAIM", TOMBSTONE_CLAIM),
                 Step::reply("XPENDING", PENDING_ROW),
@@ -84,7 +84,7 @@ fn receive_faults() -> Vec<ReceiveFault> {
         ReceiveFault {
             name: "tombstone acknowledgement failure",
             category: "XACK tombstone",
-            timeout: Duration::ZERO,
+            timeout: Duration::from_millis(50),
             steps: vec![
                 Step::reply("XAUTOCLAIM", TOMBSTONE_CLAIM),
                 Step::reply("XPENDING", PENDING_ROW),
@@ -139,6 +139,7 @@ fn config(server: &ScriptedRedis) -> EventBusConfig {
         ("redis.url".into(), server.url().into()),
         ("redis.namespace".into(), "fault-tests".into()),
         ("redis.claim_min_idle_ms".into(), "0".into()),
+        ("redis.recovery_interval_ms".into(), "50".into()),
     ]
     .into();
     EventBusConfig::default().with_provider_options(options)
@@ -254,6 +255,58 @@ fn test_async_receive_protocol_faults_are_sanitized_and_retryable() {
             );
             verify_receive_commands(&server.finish(), fault.name);
         }
+    });
+}
+
+#[cfg(feature = "sync")]
+#[test]
+fn test_sync_zero_timeout_skips_tombstone_maintenance() {
+    let server = ScriptedRedis::start(vec![
+        Step::reply("XGROUP", b"+OK\r\n"),
+        Step::reply("XAUTOCLAIM", TOMBSTONE_CLAIM),
+        Step::reply("XREADGROUP", b"*0\r\n"),
+        Step::reply("XREADGROUP", b"*0\r\n"),
+    ])
+    .expect("start RESP endpoint");
+    let bus = sync_bus(&server);
+    let mut subscription = bus.subscribe(request()).expect("create scripted group");
+
+    assert!(matches!(
+        subscription.receive(Duration::ZERO),
+        Ok(ReceiveOutcome::TimedOut)
+    ));
+    let commands = server.finish();
+    assert_eq!(commands.iter().filter(|command| command[0] == "XAUTOCLAIM").count(), 1);
+    assert_eq!(commands.iter().filter(|command| command[0] == "XREADGROUP").count(), 2);
+    assert!(!commands.iter().any(|command| command[0] == "XPENDING"));
+    assert!(!commands.iter().any(|command| command[0] == "XRANGE"));
+    assert!(!commands.iter().any(|command| command[0] == "EVAL"));
+}
+
+#[cfg(feature = "async")]
+#[test]
+fn test_async_zero_timeout_skips_tombstone_maintenance() {
+    futures_lite::future::block_on(async {
+        let server = ScriptedRedis::start(vec![
+            Step::reply("XGROUP", b"+OK\r\n"),
+            Step::reply("XAUTOCLAIM", TOMBSTONE_CLAIM),
+            Step::reply("XREADGROUP", b"*0\r\n"),
+            Step::reply("XREADGROUP", b"*0\r\n"),
+        ])
+        .expect("start RESP endpoint");
+        let bus = async_bus(&server).await;
+        let mut subscription = bus.subscribe(request()).await.expect("create scripted group");
+
+        assert!(matches!(
+            subscription.receive(Duration::ZERO).await,
+            Ok(ReceiveOutcome::TimedOut)
+        ));
+        let commands = server.finish();
+        assert_eq!(commands.iter().filter(|command| command[0] == "XAUTOCLAIM").count(), 1);
+        assert_eq!(commands.iter().filter(|command| command[0] == "XREADGROUP").count(), 2);
+        assert!(!commands.iter().any(|command| command[0] == "XPENDING"));
+        assert!(!commands.iter().any(|command| command[0] == "XRANGE"));
+        assert!(!commands.iter().any(|command| command[0] == "EVAL"));
     });
 }
 
