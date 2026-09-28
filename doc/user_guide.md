@@ -105,6 +105,12 @@ Redis does not report a `ReceiveOutcome::Gap` for records trimmed before any con
 
 With a `ConsumerGroup` set, instances using the same namespace, topic, and group share work. A different group gets its own stream cursor and receives its own copy. Without an explicit group, the subscriber ID becomes the group identity.
 
+Each Redis subscription receives a random `qubit:consumer:<uuid>` consumer name. The facade's local subscription ID is not globally unique and is not used as the Redis consumer identity. A process restart creates a new consumer; pending records belonging to the old name remain in the group and can be recovered by `XAUTOCLAIM` after `redis.claim_min_idle_ms`.
+
+The wire format currently supports version 1. A valid numeric version other than 1 returns a non-retryable `SpiError::Operation` with kind `unsupported_wire_version`; the source entry stays pending and is not quarantined or acknowledged. Stop old consumers, deploy a provider that understands the new version, then restart consumers in the same group. Verify recovery with `XPENDING` until the old entry is settled. Do not clear the pending entry to silence the error. Invalid JSON, missing or non-numeric versions, and malformed version 1 records continue to use quarantine.
+
+Each `receive` call performs at most 16 recovery commands across both claim and own-pending scans. Recovery cursors continue on later calls. `Duration::ZERO` performs bounded non-blocking recovery (at most one claim, one own-pending read, and one new-message read). `Duration::MAX` waits indefinitely by issuing finite one-second Redis blocking reads. A finite timeout limits extra recovery round trips and the Redis `BLOCK` duration; it cannot forcibly cancel a single network command already in progress.
+
 ## 4. Run the asynchronous SPI
 
 Async bus creation, publish, subscribe, and receive return runtime-neutral futures. The example uses `futures_lite::future::block_on` for a small application. A long-running service usually polls these futures on its existing executor and runs the subscription concurrently with other service work.
