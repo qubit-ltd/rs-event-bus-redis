@@ -29,6 +29,7 @@ use qubit_event_bus::spi::SettlementCapabilities;
 use qubit_event_bus::spi::ShutdownMode;
 use qubit_event_bus::spi::ShutdownOutcome;
 use qubit_event_bus::spi::SpiSubscriptionRequest;
+use qubit_event_bus::spi::SubscriptionModes;
 use qubit_event_bus::spi::TopicAddress;
 use redis::RedisError;
 use redis::cmd;
@@ -36,6 +37,7 @@ use redis::cmd;
 use super::subscription::Subscription;
 use crate::client::Client;
 use crate::config::RedisEventBusConfig;
+use crate::consumer_identity::new_consumer_name;
 use crate::error::RedisProviderError;
 use crate::naming::group_name;
 use crate::naming::poison_key;
@@ -208,7 +210,14 @@ impl EventBusSpi for RedisEventBus {
                 RedisProviderError::Operation("XGROUP CREATE"),
             ));
         }
-        let consumer = request.subscription_id().to_string();
+        let consumer = new_consumer_name().map_err(|_| SpiError::Operation {
+            provider_id: "redis-streams".into(),
+            operation: "subscribe",
+            resource: Some(topic.as_str().into()),
+            kind: "consumer_identity_unavailable",
+            retryable: Some(false),
+            source: Box::new(RedisProviderError::Operation("generate consumer identity")),
+        })?;
         Ok(Box::new(Subscription {
             client: Arc::clone(&self.client),
             receive_connection: None,
@@ -259,7 +268,7 @@ pub(super) const fn redis_capabilities() -> EventBusCapabilities {
         OrderingCapability::None,
         DelayedDeliveryCapability::None,
         DurabilityCapability::Durable,
-        qubit_event_bus::spi::SubscriptionModes::DURABLE,
+        SubscriptionModes::DURABLE,
         true,
         ReplayCapability::Position,
         PublishGuarantee::Accepted,
@@ -351,6 +360,16 @@ mod tests {
             client: Arc::new(Client::new(&settings).expect("unreachable Redis URL is syntactically valid")),
             settings,
         };
+        let native_message = OutboundMessage::new(
+            TopicAddress::new("native").expect("topic is valid"),
+            EventId::new("native-event").expect("event ID is valid"),
+            SystemTime::UNIX_EPOCH,
+            Headers::new(),
+            None,
+            None,
+            TransportPayload::Native(Arc::new(7_u8)),
+        );
+        assert!(EventBusSpi::publish(&bus, native_message).is_err());
         let topic = TopicAddress::new("events").expect("topic is valid");
         let message = OutboundMessage::new(
             topic.clone(),

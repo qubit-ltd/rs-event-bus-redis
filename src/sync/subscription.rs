@@ -33,9 +33,12 @@ use super::redis_event_bus::spi_error;
 use crate::client::Client;
 use crate::client::PooledConnection;
 use crate::error::RedisProviderError;
+use crate::poison::DecodeFailure;
 use crate::poison::PoisonOutcome;
 use crate::poison::PoisonReason;
 use crate::poison::quarantine;
+use crate::recovery::RecoveryScanBudget;
+use crate::recovery::RecoveryScanStage;
 use crate::recovery::RecoveryState;
 use crate::wire::WireFields;
 
@@ -122,6 +125,7 @@ impl EventSubscriptionSpi for Subscription {
         if lock_state(&self.recovery, &self.topic, "receive", "recovery lock")?.active_len() >= self.max_unsettled {
             return Ok(ReceiveOutcome::TimedOut);
         }
+        let started = Instant::now();
         let mut connection = match self.receive_connection.take() {
             Some(connection) => connection,
             None => self
@@ -130,9 +134,8 @@ impl EventSubscriptionSpi for Subscription {
                 .map_err(|_| spi_error("receive", Some(&self.topic), RedisProviderError::Operation("connect")))?,
         };
         let result = (|| {
-            let deadline = Instant::now().checked_add(timeout).unwrap_or_else(Instant::now);
-            let scan_limit = self.max_unsettled.saturating_add(2);
-            for _ in 0..scan_limit {
+            let mut budget = RecoveryScanBudget::new(timeout, started);
+            while budget.take_recovery_command(RecoveryScanStage::Claim, Instant::now()) {
                 let cursor = lock_state(&self.recovery, &self.topic, "receive", "recovery lock")?
                     .claim_cursor()
                     .to_owned();
@@ -174,7 +177,7 @@ impl EventSubscriptionSpi for Subscription {
                 }
             }
 
-            for _ in 0..scan_limit {
+            while budget.take_recovery_command(RecoveryScanStage::Pending, Instant::now()) {
                 let cursor = lock_state(&self.recovery, &self.topic, "receive", "recovery lock")?
                     .pending_cursor()
                     .to_owned();
@@ -238,11 +241,13 @@ impl EventSubscriptionSpi for Subscription {
                 return Ok(ReceiveOutcome::TimedOut);
             }
             loop {
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                if remaining.is_zero() {
+                let Some(block_interval) = budget.block_interval(Instant::now()) else {
+                    return Ok(ReceiveOutcome::TimedOut);
+                };
+                if !budget.can_read_new(Instant::now()) {
                     return Ok(ReceiveOutcome::TimedOut);
                 }
-                let block_ms = remaining.as_millis().clamp(1, 1_000) as usize;
+                let block_ms = block_interval.as_millis().clamp(1, 1_000) as usize;
                 let reply: Option<StreamReadReply> = cmd("XREADGROUP")
                     .arg("GROUP")
                     .arg(&self.group)
@@ -271,7 +276,7 @@ impl EventSubscriptionSpi for Subscription {
                     }
                     continue;
                 }
-                if Instant::now() >= deadline {
+                if !budget.can_read_new(Instant::now()) {
                     return Ok(ReceiveOutcome::TimedOut);
                 }
             }
@@ -364,18 +369,25 @@ impl EventSubscriptionSpi for Subscription {
 /// # Errors
 ///
 /// Returns a stable reason when the wire field or event metadata is malformed.
-fn decode_entry(subscription: &Subscription, entry: StreamId) -> Result<InboundMessage, PoisonReason> {
+fn decode_entry(subscription: &Subscription, entry: StreamId) -> Result<InboundMessage, DecodeFailure> {
     let Some(value) = entry.map.get("wire") else {
-        return Err(PoisonReason::MissingWire);
+        return Err(DecodeFailure::Poison(PoisonReason::MissingWire));
     };
-    let payload: String = String::from_redis_value(value).map_err(|_| PoisonReason::InvalidWireField)?;
-    let fields: WireFields = serde_json::from_str(&payload).map_err(|_| PoisonReason::InvalidJson)?;
+    let payload: String =
+        String::from_redis_value(value).map_err(|_| DecodeFailure::Poison(PoisonReason::InvalidWireField))?;
+    let fields = WireFields::decode_wire(&payload).map_err(|error| {
+        if matches!(error, RedisProviderError::UnsupportedWireVersion) {
+            DecodeFailure::UnsupportedVersion
+        } else {
+            DecodeFailure::Poison(PoisonReason::InvalidJson)
+        }
+    })?;
     let (topic, event_id, timestamp, headers, ordering_key, payload) =
         fields.into_parts(subscription.topic.clone()).map_err(|error| {
             if matches!(error, RedisProviderError::UnsupportedWireVersion) {
-                PoisonReason::UnsupportedVersion
+                DecodeFailure::UnsupportedVersion
             } else {
-                PoisonReason::InvalidEventMetadata
+                DecodeFailure::Poison(PoisonReason::InvalidEventMetadata)
             }
         })?;
     let settlement = SettlementToken::new(
@@ -436,7 +448,15 @@ fn read_entry(
             }
             Ok(Some(ReceiveOutcome::Message(message)))
         }
-        Err(reason) => {
+        Err(DecodeFailure::UnsupportedVersion) => Err(SpiError::Operation {
+            provider_id: "redis-streams".into(),
+            operation: "receive",
+            resource: Some(subscription.topic.as_str().into()),
+            kind: "unsupported_wire_version",
+            retryable: Some(false),
+            source: Box::new(RedisProviderError::UnsupportedWireVersion),
+        }),
+        Err(DecodeFailure::Poison(reason)) => {
             let outcome = quarantine(
                 connection,
                 &subscription.key,
@@ -540,30 +560,17 @@ mod tests {
     fn decode_entry_reports_each_malformed_wire_category() {
         let subscription = subscription();
         let cases = [
-            (stream_entry(None), crate::poison::PoisonReason::MissingWire),
+            (
+                stream_entry(None),
+                crate::poison::DecodeFailure::Poison(crate::poison::PoisonReason::MissingWire),
+            ),
             (
                 stream_entry(Some(Value::Nil)),
-                crate::poison::PoisonReason::InvalidWireField,
+                crate::poison::DecodeFailure::Poison(crate::poison::PoisonReason::InvalidWireField),
             ),
             (
                 stream_entry(Some(Value::BulkString(b"{".to_vec()))),
-                crate::poison::PoisonReason::InvalidJson,
-            ),
-            (
-                stream_entry(Some(Value::BulkString(
-                    serde_json::to_vec(&WireFields {
-                        version: 99,
-                        event_id: "event-1".into(),
-                        timestamp_ms: 0,
-                        headers_json: "{}".into(),
-                        ordering_key: None,
-                        content_type: "application/octet-stream".into(),
-                        schema_id: None,
-                        payload: Vec::new(),
-                    })
-                    .expect("wire fields serialize"),
-                ))),
-                crate::poison::PoisonReason::UnsupportedVersion,
+                crate::poison::DecodeFailure::Poison(crate::poison::PoisonReason::InvalidJson),
             ),
             (
                 stream_entry(Some(Value::BulkString(
@@ -579,17 +586,23 @@ mod tests {
                     })
                     .expect("wire fields serialize"),
                 ))),
-                crate::poison::PoisonReason::InvalidEventMetadata,
+                crate::poison::DecodeFailure::Poison(crate::poison::PoisonReason::InvalidEventMetadata),
             ),
         ];
 
         for (entry, expected) in cases {
             let error = match decode_entry(&subscription, entry) {
-                Ok(_) => panic!("malformed wire should be rejected"),
+                Ok(_) => panic!("invalid wire should be rejected"),
                 Err(error) => error,
             };
             assert_eq!(error, expected);
         }
+        let unsupported = stream_entry(Some(Value::BulkString(br#"{"version":99}"#.to_vec())));
+        let error = match decode_entry(&subscription, unsupported) {
+            Ok(_) => panic!("unsupported wire version should be rejected"),
+            Err(error) => error,
+        };
+        assert_eq!(error, crate::poison::DecodeFailure::UnsupportedVersion);
     }
 
     #[test]

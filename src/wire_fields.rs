@@ -97,6 +97,34 @@ pub struct WireFields {
 }
 
 impl WireFields {
+    /// Parses the protocol version before applying the version 1 field layout.
+    ///
+    /// # Parameters
+    ///
+    /// - `encoded`: JSON wire value stored in the Redis stream.
+    ///
+    /// # Returns
+    ///
+    /// The decoded version 1 fields.
+    ///
+    /// # Errors
+    ///
+    /// Returns `UnsupportedWireVersion` for a valid numeric version other than
+    /// 1 and an operation error for malformed JSON or version 1 fields.
+    pub(crate) fn decode_wire(encoded: &str) -> Result<Self, RedisProviderError> {
+        let value: serde_json::Value =
+            serde_json::from_str(encoded).map_err(|_| RedisProviderError::Operation("decode wire JSON"))?;
+        let version = value
+            .as_object()
+            .and_then(|fields| fields.get("version"))
+            .and_then(serde_json::Value::as_u64)
+            .ok_or(RedisProviderError::Operation("decode wire version"))?;
+        if version != 1 {
+            return Err(RedisProviderError::UnsupportedWireVersion);
+        }
+        serde_json::from_value(value).map_err(|_| RedisProviderError::Operation("decode wire fields"))
+    }
+
     /// Converts an outbound event into the version 1 Redis wire representation.
     ///
     /// Native in-process payloads cannot be persisted and are rejected. The

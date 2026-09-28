@@ -424,13 +424,6 @@ fn insert_poison_fixtures(connection: &mut redis::Connection, stream: &str) -> R
         .arg("wire")
         .arg(&[0xff_u8][..])
         .query::<String>(connection)?;
-    let unsupported = r#"{"version":2,"event_id":"unknown-version","timestamp_ms":0,"headers_json":"{}","ordering_key":null,"content_type":"application/octet-stream","schema_id":null,"payload":[]}"#;
-    cmd("XADD")
-        .arg(stream)
-        .arg("*")
-        .arg("wire")
-        .arg(unsupported)
-        .query::<String>(connection)?;
     let invalid_id = r#"{"version":1,"event_id":"","timestamp_ms":0,"headers_json":"{}","ordering_key":null,"content_type":"application/octet-stream","schema_id":null,"payload":[]}"#;
     cmd("XADD")
         .arg(stream)
@@ -508,17 +501,13 @@ fn sync_poison_does_not_block_next() -> Result<(), Box<dyn std::error::Error>> {
         receiver.receive(Duration::from_secs(2))?,
         ReceiveOutcome::Gap(_)
     ));
-    assert!(matches!(
-        receiver.receive(Duration::from_secs(2))?,
-        ReceiveOutcome::Gap(_)
-    ));
     let quarantine = poison_key(
         "poison-sync",
         "events",
         &group_name("poison-sync", "events", "sync-poison-worker", Some("sync-poison-group")),
     );
     let quarantined: usize = cmd("XLEN").arg(quarantine).query(&mut connection)?;
-    assert_eq!(quarantined, 5);
+    assert_eq!(quarantined, 4);
     let records: redis::streams::StreamRangeReply = cmd("XRANGE")
         .arg(poison_key(
             "poison-sync",
@@ -528,7 +517,7 @@ fn sync_poison_does_not_block_next() -> Result<(), Box<dyn std::error::Error>> {
         .arg("-")
         .arg("+")
         .query(&mut connection)?;
-    assert_eq!(records.ids.len(), 5);
+    assert_eq!(records.ids.len(), 4);
     let raw_wire = String::from_redis_value(records.ids[1].map.get("wire").ok_or("quarantine record omitted wire")?)?;
     assert_eq!(raw_wire, "not-json");
     let pending: Vec<redis::Value> = cmd("XPENDING")
@@ -548,6 +537,53 @@ fn sync_poison_does_not_block_next() -> Result<(), Box<dyn std::error::Error>> {
         return Err("valid message after poison records was not received".into());
     };
     assert_eq!(valid.id().as_str(), "sync-after-poison");
+    Ok(())
+}
+
+#[cfg(feature = "sync")]
+#[test]
+fn sync_unknown_wire_version_stays_pending() -> Result<(), Box<dyn std::error::Error>> {
+    let server = RedisServer::start()?;
+    let namespace = "unsupported-version-sync";
+    let bus = sync_bus(&server, namespace, 2)?;
+    let stream = stream_key(namespace, "events");
+    let unsupported = r#"{"version":2,"future_field":"kept by newer consumers"}"#;
+    let mut connection = Client::open(server.url())?.get_connection()?;
+    let message_id: String = cmd("XADD")
+        .arg(&stream)
+        .arg("*")
+        .arg("wire")
+        .arg(unsupported)
+        .query(&mut connection)?;
+    let mut receiver = bus.subscribe(request(
+        "events",
+        "version-worker",
+        "version-group",
+        SubscriptionDurability::Durable,
+    )?)?;
+
+    let error = match receiver.receive(Duration::from_secs(2)) {
+        Ok(_) => return Err("unsupported wire version was not rejected".into()),
+        Err(error) => error,
+    };
+    assert_eq!(error.kind(), "unsupported_wire_version");
+    assert_eq!(error.retryable(), Some(false));
+    let pending: Vec<redis::Value> = cmd("XPENDING")
+        .arg(&stream)
+        .arg(group_name(namespace, "events", "version-worker", Some("version-group")))
+        .arg(&message_id)
+        .arg(&message_id)
+        .arg(1)
+        .query(&mut connection)?;
+    assert_eq!(pending.len(), 1);
+    let quarantined: usize = cmd("XLEN")
+        .arg(poison_key(
+            namespace,
+            "events",
+            &group_name(namespace, "events", "version-worker", Some("version-group")),
+        ))
+        .query(&mut connection)?;
+    assert_eq!(quarantined, 0);
     Ok(())
 }
 
@@ -683,10 +719,6 @@ fn async_poison_does_not_block_next() -> Result<(), Box<dyn std::error::Error>> 
             )?)
             .await?;
 
-        assert!(matches!(
-            receiver.receive(Duration::from_secs(2)).await?,
-            ReceiveOutcome::Gap(_)
-        ));
         for _ in 0..4 {
             assert!(matches!(
                 receiver.receive(Duration::from_secs(2)).await?,
@@ -702,7 +734,7 @@ fn async_poison_does_not_block_next() -> Result<(), Box<dyn std::error::Error>> 
         );
         let quarantine = poison_key("poison-async", "events", &group);
         let quarantined: usize = cmd("XLEN").arg(quarantine).query(&mut verify)?;
-        assert_eq!(quarantined, 5);
+        assert_eq!(quarantined, 4);
         let records: redis::streams::StreamRangeReply = cmd("XRANGE")
             .arg(poison_key(
                 "poison-async",
@@ -717,7 +749,7 @@ fn async_poison_does_not_block_next() -> Result<(), Box<dyn std::error::Error>> 
             .arg("-")
             .arg("+")
             .query(&mut verify)?;
-        assert_eq!(records.ids.len(), 5);
+        assert_eq!(records.ids.len(), 4);
         let raw_wire =
             String::from_redis_value(records.ids[1].map.get("wire").ok_or("quarantine record omitted wire")?)?;
         assert_eq!(raw_wire, "not-json");
@@ -733,6 +765,57 @@ fn async_poison_does_not_block_next() -> Result<(), Box<dyn std::error::Error>> 
             return Err("valid message after poison records was not received".into());
         };
         assert_eq!(valid.id().as_str(), "async-after-poison");
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })
+}
+
+#[cfg(feature = "async")]
+#[test]
+fn async_unknown_wire_version_stays_pending() -> Result<(), Box<dyn std::error::Error>> {
+    futures_lite::future::block_on(async {
+        let server = RedisServer::start()?;
+        let namespace = "unsupported-version-async";
+        let bus = async_bus(&server, namespace, 2).await?;
+        let stream = stream_key(namespace, "events");
+        let unsupported = r#"{"version":2,"future_field":"kept by newer consumers"}"#;
+        let mut connection = Client::open(server.url())?.get_connection()?;
+        let message_id: String = cmd("XADD")
+            .arg(&stream)
+            .arg("*")
+            .arg("wire")
+            .arg(unsupported)
+            .query(&mut connection)?;
+        let mut receiver = bus
+            .subscribe(request(
+                "events",
+                "version-worker",
+                "version-group",
+                SubscriptionDurability::Durable,
+            )?)
+            .await?;
+
+        let error = match receiver.receive(Duration::from_secs(2)).await {
+            Ok(_) => return Err("unsupported wire version was not rejected".into()),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), "unsupported_wire_version");
+        assert_eq!(error.retryable(), Some(false));
+        let pending: Vec<redis::Value> = cmd("XPENDING")
+            .arg(&stream)
+            .arg(group_name(namespace, "events", "version-worker", Some("version-group")))
+            .arg(&message_id)
+            .arg(&message_id)
+            .arg(1)
+            .query(&mut connection)?;
+        assert_eq!(pending.len(), 1);
+        let quarantined: usize = cmd("XLEN")
+            .arg(poison_key(
+                namespace,
+                "events",
+                &group_name(namespace, "events", "version-worker", Some("version-group")),
+            ))
+            .query(&mut connection)?;
+        assert_eq!(quarantined, 0);
         Ok::<(), Box<dyn std::error::Error>>(())
     })
 }
@@ -839,6 +922,131 @@ fn async_empty_receive_observes_zero_and_bounded_timeouts() -> Result<(), Box<dy
             receiver.receive(Duration::from_millis(20)).await?,
             ReceiveOutcome::TimedOut
         ));
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })
+}
+
+#[cfg(feature = "sync")]
+#[test]
+fn sync_zero_timeout_progresses_past_active_pending_records() -> Result<(), Box<dyn std::error::Error>> {
+    let server = RedisServer::start()?;
+    let bus = sync_bus(&server, "scan-budget-sync", 64)?;
+    for index in 0..24 {
+        bus.publish(event("events", &format!("pending-{index}"), b"payload")?)?;
+    }
+    let mut receiver = bus.subscribe(request(
+        "events",
+        "scan-worker",
+        "scan-group",
+        SubscriptionDurability::Durable,
+    )?)?;
+    for _ in 0..24 {
+        assert!(matches!(
+            receiver.receive(Duration::from_secs(2))?,
+            ReceiveOutcome::Message(_)
+        ));
+    }
+    bus.publish(event("events", "after-pending", b"payload")?)?;
+    let mut found = false;
+    for _ in 0..24 {
+        if let ReceiveOutcome::Message(message) = receiver.receive(Duration::ZERO)? {
+            assert_eq!(message.id().as_str(), "after-pending");
+            found = true;
+            break;
+        }
+    }
+    assert!(found, "zero-timeout scans did not progress to a new message");
+    Ok(())
+}
+
+#[cfg(feature = "async")]
+#[test]
+fn async_zero_timeout_progresses_past_active_pending_records() -> Result<(), Box<dyn std::error::Error>> {
+    futures_lite::future::block_on(async {
+        let server = RedisServer::start()?;
+        let bus = async_bus(&server, "scan-budget-async", 64).await?;
+        for index in 0..24 {
+            bus.publish(event("events", &format!("pending-{index}"), b"payload")?)
+                .await?;
+        }
+        let mut receiver = bus
+            .subscribe(request(
+                "events",
+                "scan-worker",
+                "scan-group",
+                SubscriptionDurability::Durable,
+            )?)
+            .await?;
+        for _ in 0..24 {
+            assert!(matches!(
+                receiver.receive(Duration::from_secs(2)).await?,
+                ReceiveOutcome::Message(_)
+            ));
+        }
+        bus.publish(event("events", "after-pending", b"payload")?).await?;
+        let mut found = false;
+        for _ in 0..24 {
+            if let ReceiveOutcome::Message(message) = receiver.receive(Duration::ZERO).await? {
+                assert_eq!(message.id().as_str(), "after-pending");
+                found = true;
+                break;
+            }
+        }
+        assert!(found, "zero-timeout scans did not progress to a new message");
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })
+}
+
+#[cfg(feature = "sync")]
+#[test]
+fn sync_duration_max_waits_for_a_message() -> Result<(), Box<dyn std::error::Error>> {
+    let server = RedisServer::start()?;
+    let bus = sync_bus(&server, "timeout-max-sync", 2)?;
+    let publisher = Arc::clone(&bus);
+    let message = event("events", "max-timeout-event", b"payload")?;
+    let thread = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(50));
+        publisher.publish(message)
+    });
+    let mut receiver = bus.subscribe(request(
+        "events",
+        "max-timeout-worker",
+        "max-timeout-group",
+        SubscriptionDurability::Durable,
+    )?)?;
+    let ReceiveOutcome::Message(message) = receiver.receive(Duration::MAX)? else {
+        return Err("Duration::MAX receive returned before message arrival".into());
+    };
+    assert_eq!(message.id().as_str(), "max-timeout-event");
+    thread.join().map_err(|_| "publisher thread panicked")??;
+    Ok(())
+}
+
+#[cfg(feature = "async")]
+#[test]
+fn async_duration_max_waits_for_a_message() -> Result<(), Box<dyn std::error::Error>> {
+    futures_lite::future::block_on(async {
+        let server = RedisServer::start()?;
+        let bus = async_bus(&server, "timeout-max-async", 2).await?;
+        let publisher = Arc::clone(&bus);
+        let outbound = event("events", "max-timeout-event", b"payload")?;
+        let thread = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            futures_lite::future::block_on(publisher.publish(outbound))
+        });
+        let mut receiver = bus
+            .subscribe(request(
+                "events",
+                "max-timeout-worker",
+                "max-timeout-group",
+                SubscriptionDurability::Durable,
+            )?)
+            .await?;
+        let ReceiveOutcome::Message(message) = receiver.receive(Duration::MAX).await? else {
+            return Err("Duration::MAX receive returned before message arrival".into());
+        };
+        assert_eq!(message.id().as_str(), "max-timeout-event");
+        thread.join().map_err(|_| "publisher thread panicked")??;
         Ok::<(), Box<dyn std::error::Error>>(())
     })
 }

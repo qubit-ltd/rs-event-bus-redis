@@ -493,7 +493,7 @@ fn test_async_reject_acks_and_malformed_wire_is_quarantined() -> Result<(), Box<
         let stream = stream_key("async-tests", "async-malformed");
         for wire in [
             "not-json",
-            r#"{"version":999,"event_id":"event","timestamp_ms":0,"headers_json":"{}","ordering_key":null,"content_type":"application/octet-stream","schema_id":null,"payload":[]}"#,
+            r#"{"version":1,"event_id":"event","timestamp_ms":0,"headers_json":"{","ordering_key":null,"content_type":"application/octet-stream","schema_id":null,"payload":[]}"#,
             r#"{"version":1,"event_id":"","timestamp_ms":0,"headers_json":"{}","ordering_key":null,"content_type":"application/octet-stream","schema_id":null,"payload":[]}"#,
         ] {
             cmd("XADD")

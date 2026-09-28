@@ -105,6 +105,12 @@ fn start_service() -> Result<(), Box<dyn std::error::Error>> {
 
 指定 `ConsumerGroup` 后，namespace、topic 和 group 相同的实例会共同分工。不同 group 各自维护读取位置，因此都能收到自己的副本。未指定 group 时，subscriber ID 用作 group 身份。
 
+每个 Redis 订阅都会获得随机生成的 `qubit:consumer:<uuid>` consumer 名称。facade 的本地订阅 ID 不具备全局唯一性，因此不会用作 Redis consumer 身份。进程重启后会创建新 consumer；旧名称对应的 pending 记录仍保留在 group 中，达到 `redis.claim_min_idle_ms` 后可由 `XAUTOCLAIM` 恢复。
+
+当前 wire 格式支持版本 1。合法数字版本但不等于 1 时，provider 返回 kind 为 `unsupported_wire_version` 的非重试 `SpiError::Operation`，源记录保留在 pending 中，不会隔离或确认。应停止旧 consumer，部署支持该版本的 provider，再重启同一 group 的 consumer。使用 `XPENDING` 检查旧记录是否已恢复并结算。不要为了消除错误而直接清除 pending 记录。无效 JSON、缺失或非数字版本，以及格式错误的版本 1 记录仍会进入隔离流。
+
+每次 `receive` 在 claim 和本 consumer pending 扫描之间最多执行 16 条恢复命令；后续调用会从保留的游标继续。`Duration::ZERO` 执行有界非阻塞恢复（最多一次 claim、一次本 consumer pending 查询和一次新消息查询）。`Duration::MAX` 表示无限等待，内部以 1 秒的有限 Redis 阻塞读取循环实现。有限超时限制额外恢复往返次数和 Redis `BLOCK` 时长，但不能强制取消已经开始执行的单条网络命令。
+
 ## 4. 驱动异步 SPI
 
 异步 bus 的创建、发布、订阅和接收操作都会返回 runtime-neutral future。小型示例用 `futures_lite::future::block_on` 驱动；长期运行的服务通常会在现有 executor 上轮询这些 future，并让订阅与其他服务工作并发运行。
@@ -157,7 +163,7 @@ fn publish_async() -> Result<(), Box<dyn std::error::Error>> {
 
 ## 6. 理解投递、重试和清理
 
-provider 将一条 JSON wire record 写入 Redis Stream 的 `wire` 字段。内容包括协议版本、事件 ID、时间戳、headers、可选排序 key、content type、可选 schema ID 和 payload 字节。未知版本会返回 provider 错误。`XADD` 成功返回 `Accepted`；如果连接在收到回复前中断，调用方无法确定记录是否写入，重试发布可能产生重复事件。
+provider 将一条 JSON wire record 写入 Redis Stream 的 `wire` 字段。内容包括协议版本、事件 ID、时间戳、headers、可选排序 key、content type、可选 schema ID 和 payload 字节。未知版本会返回 `unsupported_wire_version`，并保留在消费组 pending 列表中，详见下方恢复说明。`XADD` 成功返回 `Accepted`；如果连接在收到回复前中断，调用方无法确定记录是否写入，重试发布可能产生重复事件。
 
 | 操作 | Redis 行为 | 对应用的影响 |
 | --- | --- | --- |

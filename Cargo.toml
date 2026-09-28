@@ -25,7 +25,7 @@ conformance = ["qubit-event-bus/conformance"]
 [dependencies]
 qubit-event-bus = { version = "0.14.0", path = "../rs-event-bus" }
 qubit-spi = "0.13"
-qubit-id = "0.6"
+qubit-id = { version = "0.6", default-features = false, features = ["uuid"] }
 async-lock = { version = "^3", optional = true }
 redis = { version = "^0.32.7", default-features = false, features = ["streams", "sentinel"] }
 serde = { version = "^1.0", features = ["derive"] }

@@ -22,8 +22,6 @@ pub(crate) enum PoisonReason {
     InvalidWireField,
     /// The wire field is not valid JSON.
     InvalidJson,
-    /// The wire payload has an unsupported protocol version.
-    UnsupportedVersion,
     /// A decoded field cannot construct the required event metadata.
     InvalidEventMetadata,
 }
@@ -35,10 +33,18 @@ impl PoisonReason {
             Self::MissingWire => "missing_wire",
             Self::InvalidWireField => "invalid_wire_field",
             Self::InvalidJson => "invalid_json",
-            Self::UnsupportedVersion => "unsupported_version",
             Self::InvalidEventMetadata => "invalid_event_metadata",
         }
     }
+}
+
+/// Separates incompatible records from records safe to quarantine.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DecodeFailure {
+    /// The record is malformed and can be transferred to quarantine.
+    Poison(PoisonReason),
+    /// The record uses a valid wire version this provider cannot decode.
+    UnsupportedVersion,
 }
 
 /// Result of checking and transferring a malformed group delivery.

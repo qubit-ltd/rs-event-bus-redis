@@ -30,6 +30,7 @@ use qubit_event_bus::spi::ShutdownMode;
 use qubit_event_bus::spi::ShutdownOutcome;
 use qubit_event_bus::spi::SpiFuture;
 use qubit_event_bus::spi::SpiSubscriptionRequest;
+use qubit_event_bus::spi::SubscriptionModes;
 use redis::RedisError;
 use redis::cmd;
 
@@ -37,6 +38,7 @@ use super::async_redis_event_bus_provider::spi_error;
 use super::subscription::Subscription;
 use crate::client::Client;
 use crate::config::RedisEventBusConfig;
+use crate::consumer_identity::new_consumer_name;
 use crate::error::RedisProviderError;
 use crate::naming::group_name;
 use crate::naming::poison_key;
@@ -66,7 +68,7 @@ impl AsyncEventBusSpi for AsyncRedisEventBus {
             OrderingCapability::None,
             DelayedDeliveryCapability::None,
             DurabilityCapability::Durable,
-            qubit_event_bus::spi::SubscriptionModes::DURABLE,
+            SubscriptionModes::DURABLE,
             true,
             ReplayCapability::Position,
             PublishGuarantee::Accepted,
@@ -244,13 +246,21 @@ impl AsyncEventBusSpi for AsyncRedisEventBus {
                     RedisProviderError::Operation("XGROUP CREATE"),
                 ));
             }
+            let consumer = new_consumer_name().map_err(|_| SpiError::Operation {
+                provider_id: "redis-streams".into(),
+                operation: "subscribe",
+                resource: Some(topic.as_str().into()),
+                kind: "consumer_identity_unavailable",
+                retryable: Some(false),
+                source: Box::new(RedisProviderError::Operation("generate consumer identity")),
+            })?;
             Ok(Box::new(Subscription {
                 client: Arc::clone(&self.client),
                 receive_connection: None,
                 key,
                 group,
                 quarantine,
-                consumer: request.subscription_id().to_string(),
+                consumer,
                 topic,
                 subscription_id: request.subscription_id(),
                 closed: false,
@@ -349,6 +359,16 @@ mod tests {
                 client: Arc::new(Client::new(&settings).expect("unreachable Redis URL is syntactically valid")),
                 settings,
             };
+            let native_message = OutboundMessage::new(
+                TopicAddress::new("native").expect("topic is valid"),
+                EventId::new("native-event").expect("event ID is valid"),
+                SystemTime::UNIX_EPOCH,
+                Headers::new(),
+                None,
+                None,
+                TransportPayload::Native(Arc::new(7_u8)),
+            );
+            assert!(AsyncEventBusSpi::publish(&bus, native_message).await.is_err());
             let topic = TopicAddress::new("events").expect("topic is valid");
             let message = OutboundMessage::new(
                 topic.clone(),
