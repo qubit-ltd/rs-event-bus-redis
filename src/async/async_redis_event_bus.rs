@@ -30,7 +30,6 @@ use qubit_event_bus::spi::ShutdownMode;
 use qubit_event_bus::spi::ShutdownOutcome;
 use qubit_event_bus::spi::SpiFuture;
 use qubit_event_bus::spi::SpiSubscriptionRequest;
-use qubit_event_bus::spi::SubscriptionModes;
 use redis::RedisError;
 use redis::cmd;
 
@@ -67,12 +66,12 @@ impl AsyncEventBusSpi for AsyncRedisEventBus {
             OrderingCapability::None,
             DelayedDeliveryCapability::None,
             DurabilityCapability::Durable,
+            qubit_event_bus::spi::SubscriptionModes::DURABLE,
             true,
             ReplayCapability::Position,
             PublishGuarantee::Accepted,
             PublishVisibility::Opaque,
         )
-        .with_subscription_modes(SubscriptionModes::DURABLE)
     }
 
     /// Appends an encoded event to the topic stream with Redis `XADD`.

@@ -29,7 +29,6 @@ use qubit_event_bus::spi::SettlementCapabilities;
 use qubit_event_bus::spi::ShutdownMode;
 use qubit_event_bus::spi::ShutdownOutcome;
 use qubit_event_bus::spi::SpiSubscriptionRequest;
-use qubit_event_bus::spi::SubscriptionModes;
 use qubit_event_bus::spi::TopicAddress;
 use redis::RedisError;
 use redis::cmd;
@@ -260,12 +259,12 @@ pub(super) const fn redis_capabilities() -> EventBusCapabilities {
         OrderingCapability::None,
         DelayedDeliveryCapability::None,
         DurabilityCapability::Durable,
+        qubit_event_bus::spi::SubscriptionModes::DURABLE,
         true,
         ReplayCapability::Position,
         PublishGuarantee::Accepted,
         PublishVisibility::Opaque,
     )
-    .with_subscription_modes(SubscriptionModes::DURABLE)
 }
 
 /// Wraps a provider failure without retaining raw Redis diagnostics.
