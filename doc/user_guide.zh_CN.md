@@ -1,6 +1,6 @@
 # Redis Streams 用户指南
 
-**读者：** 使用 `qubit-event-bus` 0.14 和 `qubit-event-bus-redis` 0.1 的 Rust 服务开发者。本指南以订单发布服务和账单消费服务为例，说明如何通过 Redis 共享事件，同时让应用代码继续使用 event-bus facade。
+**读者：** 使用 `qubit-event-bus` 0.15 和 `qubit-event-bus-redis` 0.3 的 Rust 服务开发者。本指南以订单发布服务和账单消费服务为例，说明如何通过 Redis 共享事件，同时让应用代码继续使用 event-bus facade。
 
 [English](user_guide.md) · [README](../README.zh_CN.md) · [API 文档](https://docs.rs/qubit-event-bus-redis)
 
@@ -10,8 +10,8 @@
 
 ```toml
 [dependencies]
-qubit-event-bus = { version = "0.14", features = ["discovery"] }
-qubit-event-bus-redis = "0.1"
+qubit-event-bus = { version = "0.15", features = ["discovery"] }
+qubit-event-bus-redis = "0.3"
 qubit-spi = "0.13"
 ```
 
@@ -148,8 +148,10 @@ fn publish_async() -> Result<(), Box<dyn std::error::Error>> {
 | `redis.url` | `redis://127.0.0.1/` | 单实例 Redis URL；不允许在 URL 中直接写 username/password。 |
 | `redis.namespace` | `qubit` | 用于生成 stream 和消费组 key 的命名空间。 |
 | `redis.claim_min_idle_ms` | `30000` | 其他 consumer 可以认领 pending entry 前所需的空闲毫秒数。 |
+| `redis.recovery_interval_ms` | `1000` | 长时间 receive 期间的恢复扫描间隔，可设为 50 至 60,000 毫秒。 |
 | `redis.max_unsettled_per_subscription` | `100` | 每个订阅已投递但未结算的消息上限；达到上限后 receive 会等待。 |
 | `redis.max_idle_connections` | `8` | 同步 standalone 命令连接的最大空闲复用数，范围为 1 到 64。阻塞接收器的专用连接另计。 |
+| `redis.stream_maxlen_approx` | 未设置 | 可选的近似 stream 条目上限，通过 `XADD MAXLEN ~` 应用；可能裁剪未读或 pending 记录。 |
 | `redis.username_env` | 未设置 | 保存 Redis ACL username 的环境变量名称。 |
 | `redis.password_env` | 未设置 | 保存 Redis ACL password 的环境变量名称。 |
 | `redis.sentinel.nodes` | 未设置 | Sentinel 的逗号分隔 `host:port` 地址。 |
@@ -176,6 +178,8 @@ provider 将一条 JSON wire record 写入 Redis Stream 的 `wire` 字段。内�
 Redis 提供至少一次投递，因此 handler 应具备幂等性。如果 handler 运行时间超过 `redis.claim_min_idle_ms`，另一个 consumer 可能在原 handler 仍执行时认领同一事件。idle threshold 应覆盖常见和最慢的处理时间；重复代价高时，应用还应按业务 ID 去重。
 
 每个订阅的未结算消息达到 `redis.max_unsettled_per_subscription` 后会暂停接收新记录。结算或 retry 后会释放容量。该设置限制进程内的投递压力，不会限制 Redis stream 增长。
+
+长时间等待的 `receive` 会每隔 `redis.recovery_interval_ms` 毫秒重新扫描恢复记录，默认 1,000 毫秒，可设为 50–60,000 毫秒。调小间隔能更快接管达到 idle threshold 的 pending 消息，同时会增加 Redis 扫描命令。
 
 `StartPosition::New` 会在当前 stream 尾部创建 group；`Earliest` 会从 `0-0` 开始创建新 group；`At("milliseconds-sequence")` 使用 Redis Stream ID。group 一旦创建，读取游标由 Redis 保留；之后更改请求的 start position 不会重置现有 group。
 

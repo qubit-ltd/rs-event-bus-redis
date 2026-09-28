@@ -1,6 +1,6 @@
 # Redis Streams User Guide
 
-**For:** Rust service developers using `qubit-event-bus` 0.14 and `qubit-event-bus-redis` 0.1. This guide shows how an order publisher and billing consumer share events through Redis while keeping application code on the event-bus facade.
+**For:** Rust service developers using `qubit-event-bus` 0.15 and `qubit-event-bus-redis` 0.3. This guide shows how an order publisher and billing consumer share events through Redis while keeping application code on the event-bus facade.
 
 [简体中文](user_guide.zh_CN.md) · [README](../README.md) · [API docs](https://docs.rs/qubit-event-bus-redis)
 
@@ -10,8 +10,8 @@ Add both the facade and provider as direct dependencies. `discovery` is on by de
 
 ```toml
 [dependencies]
-qubit-event-bus = { version = "0.14", features = ["discovery"] }
-qubit-event-bus-redis = "0.1"
+qubit-event-bus = { version = "0.15", features = ["discovery"] }
+qubit-event-bus-redis = "0.3"
 qubit-spi = "0.13"
 ```
 
@@ -99,6 +99,8 @@ Malformed wire records are moved atomically to a group-specific quarantine strea
 
 Delivery remains at least once. If a handler runs longer than `redis.claim_min_idle_ms`, another consumer may claim its pending entry. A publish whose `XADD` reply is lost has an unknown outcome and may be duplicated if retried. `redis.max_unsettled_per_subscription` bounds locally active deliveries (default 100).
 
+During a long `receive` call, recovery scans repeat every `redis.recovery_interval_ms` milliseconds (default 1,000; valid range 50–60,000). Shorter intervals reduce the wait before idle pending records can be reclaimed, at the cost of more Redis scan commands.
+
 Streams are unlimited by default. To enable approximate trimming, add `("redis.stream_maxlen_approx".into(), "100000".into())` to the `ProviderOptions` map shown above. Every publish then uses `XADD MAXLEN ~ 100000`. Redis may trim unread records or entries still referenced by a consumer group's pending list; trimming does not guarantee delivery and can make old work unrecoverable. Keep this disabled when pending history must remain available for recovery. Malformed-record quarantine streams follow their separate operator retention policy.
 
 Redis does not report a `ReceiveOutcome::Gap` for records trimmed before any consumer read them. The provider cannot identify those missing IDs, so applications must treat opt-in trimming as possible silent history loss and monitor retention outside the delivery API.
@@ -148,8 +150,10 @@ The async facade also requires the same codec registry as the sync example. `Asy
 | `redis.url` | `redis://127.0.0.1/` | Standalone Redis connection URL; inline username and password are rejected. |
 | `redis.namespace` | `qubit` | Prefix scope used to derive stream and group keys. |
 | `redis.claim_min_idle_ms` | `30000` | Minimum pending idle time before another consumer can claim an entry. |
+| `redis.recovery_interval_ms` | `1000` | Recovery scan interval during a long receive call; accepts 50 through 60,000 ms. |
 | `redis.max_unsettled_per_subscription` | `100` | Maximum delivered but unsettled messages held by one subscription; receive waits while the limit is reached. |
 | `redis.max_idle_connections` | `8` | Maximum idle synchronous standalone command connections retained for reuse; accepts 1 through 64. Dedicated blocking receiver connections are counted separately. |
+| `redis.stream_maxlen_approx` | unset | Optional approximate stream entry limit applied with `XADD MAXLEN ~`; may trim unread or pending records. |
 | `redis.username_env` | unset | Environment variable name containing the Redis ACL username. |
 | `redis.password_env` | unset | Environment variable name containing the Redis ACL password. |
 | `redis.sentinel.nodes` | unset | Comma-separated Sentinel `host:port` endpoints. |

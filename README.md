@@ -13,8 +13,8 @@
 
 ```toml
 [dependencies]
-qubit-event-bus = { version = "0.14", features = ["discovery"] }
-qubit-event-bus-redis = "0.1"
+qubit-event-bus = { version = "0.15", features = ["discovery"] }
+qubit-event-bus-redis = "0.3"
 qubit-spi = "0.13"
 ```
 
@@ -32,6 +32,7 @@ use qubit_event_bus::facade::EventBusFacadeConfig;
 use qubit_event_bus::registry::EventBusConfig;
 use qubit_event_bus::registry::EventBusRegistry;
 use qubit_event_bus::model::ProviderOptions;
+use qubit_event_bus_redis as _;
 use qubit_spi::ProviderSelection;
 
 fn create_order_bus() -> Result<qubit_event_bus::EventBus, Box<dyn std::error::Error>> {
