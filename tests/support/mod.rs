@@ -10,4 +10,6 @@
 #[allow(dead_code)]
 pub mod redis_server;
 #[allow(dead_code)]
+pub mod scripted_redis;
+#[allow(dead_code)]
 pub mod sentinel;

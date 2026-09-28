@@ -142,9 +142,14 @@ impl EventSubscriptionSpi for Subscription {
             let mut budget = RecoveryScanBudget::new(timeout, started, self.recovery_interval)
                 .map_err(|error| spi_error("receive", Some(&self.topic), error))?;
             'receive: loop {
-                if let Some(entry) =
-                    lock_state(&self.recovery, &self.topic, "receive", "recovery lock")?.take_deferred_claim()
-                    && lock_state(&self.recovery, &self.topic, "receive", "recovery lock")?.can_deliver(&entry.id)
+                // Release the guard before read_entry acquires recovery state again.
+                let deferred = {
+                    let mut recovery = lock_state(&self.recovery, &self.topic, "receive", "recovery lock")?;
+                    recovery
+                        .take_deferred_claim()
+                        .filter(|entry| recovery.can_deliver(&entry.id))
+                };
+                if let Some(entry) = deferred
                     && let Some(outcome) = read_entry(self, &mut connection, entry)?
                 {
                     return Ok(outcome);
