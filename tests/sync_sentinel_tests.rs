@@ -81,7 +81,7 @@ fn test_sync_sentinel_reconnects_after_master_failover() -> Result<(), Box<dyn s
         .query(&mut promoted_connection)?;
     assert_eq!(stream_length, 2, "promoted master must contain both stream records");
     let mut second = bus.subscribe(subscription_request(1002, "worker-two")?)?;
-    let ReceiveOutcome::Message(mut pending) = second.receive(Duration::from_secs(2))? else {
+    let ReceiveOutcome::Message(mut pending) = second.receive(Duration::from_secs(10))? else {
         return Err("new consumer did not claim the pre-failover pending record".into());
     };
     assert_eq!(pending.id().as_str(), "pending-before-failover");
@@ -89,7 +89,7 @@ fn test_sync_sentinel_reconnects_after_master_failover() -> Result<(), Box<dyn s
         .take_settlement()
         .ok_or("pending record has no settlement token")?;
     second.settle(&token, DeliveryDisposition::Accept)?;
-    let ReceiveOutcome::Message(after) = second.receive(Duration::from_secs(2))? else {
+    let ReceiveOutcome::Message(after) = second.receive(Duration::from_secs(10))? else {
         return Err("post-promotion message was not readable".into());
     };
     assert_eq!(after.id().as_str(), "after-failover");

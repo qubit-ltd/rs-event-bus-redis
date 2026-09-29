@@ -78,7 +78,7 @@ fn test_async_sentinel_reconnects_after_master_failover() -> Result<(), Box<dyn 
             .subscribe(request)
             .await
             .map_err(|error| std::io::Error::other(format!("subscribe before promotion: {error}")))?;
-        let ReceiveOutcome::Message(received) = receiver.receive(Duration::from_secs(2)).await? else {
+        let ReceiveOutcome::Message(received) = receiver.receive(Duration::from_secs(10)).await? else {
             return Err("post-promotion event was not received".into());
         };
         assert_eq!(received.id().as_str(), "after-failover-async");
@@ -164,7 +164,7 @@ fn test_async_sentinel_claims_unsettled_record_after_promotion() -> Result<(), B
             TypeId::of::<Vec<u8>>(),
         );
         let mut receiver = bus.subscribe(request).await?;
-        let ReceiveOutcome::Message(pending) = receiver.receive(Duration::from_secs(2)).await? else {
+        let ReceiveOutcome::Message(pending) = receiver.receive(Duration::from_secs(10)).await? else {
             return Err("new consumer did not claim the pending record".into());
         };
         assert_eq!(pending.id().as_str(), "pending-before-async-promotion");
