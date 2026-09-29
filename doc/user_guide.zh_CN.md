@@ -1,6 +1,6 @@
 # Redis Streams 用户指南
 
-**读者：** 使用 `qubit-event-bus` 0.15 和 `qubit-event-bus-redis` 0.3 的 Rust 服务开发者。本指南以订单发布服务和账单消费服务为例，说明如何通过 Redis 共享事件，同时让应用代码继续使用 event-bus facade。
+**读者：** 使用 `qubit-event-bus` 0.16 和 `qubit-event-bus-redis` 0.4 的 Rust 服务开发者。本指南以订单发布服务和账单消费服务为例，说明如何通过 Redis 共享事件，同时让应用代码继续使用 event-bus facade。
 
 [English](user_guide.md) · [README](../README.zh_CN.md) · [API 文档](https://docs.rs/qubit-event-bus-redis)
 
@@ -10,8 +10,8 @@
 
 ```toml
 [dependencies]
-qubit-event-bus = { version = "0.15", features = ["discovery"] }
-qubit-event-bus-redis = "0.3"
+qubit-event-bus = { version = "0.16", features = ["discovery"] }
+qubit-event-bus-redis = "0.4"
 qubit-spi = "0.13"
 ```
 
