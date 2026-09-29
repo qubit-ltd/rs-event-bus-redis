@@ -77,7 +77,7 @@ fn type_conversion_failure_after_query_is_uncertain() {
     let server = ScriptedRedis::start(vec![Step::reply("XADD", b"*1\r\n:42\r\n")]).unwrap();
     let error = bus(server.url()).publish(message()).unwrap_err();
     assert_eq!(error.publish_effect(), PublishEffect::MayHaveBeenAccepted);
-    assert_eq!(error.kind(), "protocol");
+    assert_eq!(error.kind(), "outcome_unknown");
     server.finish();
 }
 
@@ -118,7 +118,6 @@ fn applied_xadd_reply_loss(
     use qubit_event_bus::EventBus;
     use qubit_event_bus::codec::CodecRegistry;
     use qubit_event_bus::facade::EventBusFacadeConfig;
-    use qubit_event_bus::model::DuplicateRiskPolicy;
     use qubit_event_bus::model::ProviderId;
     use qubit_event_bus::model::PublishRequest;
     use qubit_event_bus::model::Topic;
@@ -155,20 +154,13 @@ fn applied_xadd_reply_loss(
     assert_eq!(applied, 1, "first XADD actually executed before reply loss");
     gate.release_without_reply();
     let (event_id, result) = worker.join().expect("publish worker completes");
-    if policy == DuplicateRiskPolicy::Forbid {
-        assert_eq!(result.unwrap_err().effect(), PublishEffect::MayHaveBeenAccepted);
-    } else {
-        assert!(result?.duplicate_possible());
-    }
+    assert_eq!(result.unwrap_err().effect(), PublishEffect::MayHaveBeenAccepted);
     let records: redis::streams::StreamRangeReply = redis::cmd("XRANGE")
         .arg(&stream)
         .arg("-")
         .arg("+")
         .query(&mut observer)?;
-    assert_eq!(
-        records.ids.len(),
-        if policy == DuplicateRiskPolicy::Forbid { 1 } else { 2 }
-    );
+    assert_eq!(records.ids.len(), 1,);
     let wires: Vec<String> = records
         .ids
         .iter()
@@ -191,7 +183,7 @@ fn applied_xadd_lost_reply_forbid_has_one_record() -> Result<(), Box<dyn std::er
 }
 
 #[test]
-fn applied_xadd_lost_reply_allow_duplicates_reports_two_records() -> Result<(), Box<dyn std::error::Error>> {
+fn applied_xadd_lost_reply_allow_duplicates_does_not_blindly_retry() -> Result<(), Box<dyn std::error::Error>> {
     applied_xadd_reply_loss(qubit_event_bus::model::DuplicateRiskPolicy::AllowDuplicates)
 }
 
@@ -279,20 +271,13 @@ fn async_applied_xadd_reply_loss_covers_both_duplicate_policies() -> Result<(), 
         assert_eq!(applied, 1);
         gate.release_without_reply();
         let (event_id, result) = worker.join().expect("async publish completes");
-        if policy == DuplicateRiskPolicy::Forbid {
-            assert_eq!(result.unwrap_err().effect(), PublishEffect::MayHaveBeenAccepted);
-        } else {
-            assert!(result?.duplicate_possible());
-        }
+        assert_eq!(result.unwrap_err().effect(), PublishEffect::MayHaveBeenAccepted);
         let records: redis::streams::StreamRangeReply = redis::cmd("XRANGE")
             .arg(&stream)
             .arg("-")
             .arg("+")
             .query(&mut observer)?;
-        assert_eq!(
-            records.ids.len(),
-            if policy == DuplicateRiskPolicy::Forbid { 1 } else { 2 }
-        );
+        assert_eq!(records.ids.len(), 1,);
         let wires: Vec<String> = records
             .ids
             .iter()
@@ -450,7 +435,7 @@ fn invalid_xadd_id_reply_does_not_claim_acceptance() {
         .publish(message())
         .expect_err("malformed XADD id is an uncertain protocol failure");
     assert_eq!(error.publish_effect(), PublishEffect::MayHaveBeenAccepted);
-    assert_eq!(error.kind(), "protocol");
+    assert_eq!(error.kind(), "outcome_unknown");
     server.finish();
 }
 

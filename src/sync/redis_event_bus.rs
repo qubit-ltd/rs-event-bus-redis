@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use qubit_event_bus::error::SpiError;
 use qubit_event_bus::model::PublishAcknowledgement;
+use qubit_event_bus::model::PublishEffect;
 use qubit_event_bus::model::StartPosition;
 use qubit_event_bus::model::SubscriptionDurability;
 use qubit_event_bus::spi::DelayedDeliveryCapability;
@@ -42,6 +43,9 @@ use crate::client::Client;
 use crate::config::RedisEventBusConfig;
 use crate::consumer_identity::new_consumer_name;
 use crate::error::RedisProviderError;
+use crate::error::invalid_publish_reply;
+use crate::error::query_publish_error;
+use crate::error::to_publish_error;
 use crate::internal::RecoveryState;
 use crate::internal::WireLimits;
 use crate::naming::group_name;
@@ -91,12 +95,12 @@ impl EventBusSpi for RedisEventBus {
     /// outcome-unknown without replay.
     fn publish(&self, message: OutboundMessage) -> Result<PublishAcknowledgement, SpiError> {
         let payload = encode_bounded(&message, WireLimits::from_config(&self.settings))
-            .map_err(|error| spi_error("publish", Some(message.topic()), error))?;
+            .map_err(|error| to_publish_error(message.topic(), error, PublishEffect::NotAccepted))?;
         let key = stream_key(self.settings.namespace(), message.topic().as_str());
         let mut connection = self
             .client
             .get_connection()
-            .map_err(|error| spi_error("publish", Some(message.topic()), error))?;
+            .map_err(|error| to_publish_error(message.topic(), error, PublishEffect::NotAccepted))?;
         let mut command = cmd("XADD");
         command.arg(&key);
         if let Some(maxlen) = self.settings.stream_maxlen_approx() {
@@ -109,28 +113,20 @@ impl EventBusSpi for RedisEventBus {
                 Ok(id) if valid_stream_id(&id) && id != "0-0" => id,
                 _ => {
                     connection.discard();
-                    return Err(spi_error(
-                        "publish",
-                        Some(message.topic()),
-                        RedisProviderError::OutcomeUnknown { operation: "publish" },
-                    ));
+                    return Err(invalid_publish_reply(message.topic()));
                 }
             },
             Ok(Value::ServerError(error)) => {
                 let error: RedisError = error.into();
-                return Err(spi_error(
-                    "publish",
-                    Some(message.topic()),
-                    from_redis_error("publish", &error),
-                ));
+                return Err(query_publish_error(message.topic(), &error));
             }
-            Ok(_) | Err(_) => {
+            Ok(_) => {
                 connection.discard();
-                return Err(spi_error(
-                    "publish",
-                    Some(message.topic()),
-                    RedisProviderError::OutcomeUnknown { operation: "publish" },
-                ));
+                return Err(invalid_publish_reply(message.topic()));
+            }
+            Err(error) => {
+                connection.discard();
+                return Err(query_publish_error(message.topic(), &error));
             }
         };
         Ok(PublishAcknowledgement::Accepted {

@@ -25,8 +25,10 @@ Redis 6.2 or newer is required. The integration tests use Docker to start isolat
 
 Redis stores encoded bytes, so every payload type used by the facade needs an `EventCodec<T>`. This example uses UTF-8 `String` messages. Production applications can replace it with JSON, Protobuf, or another schema-aware codec.
 
+<!-- doc-example: codec -->
 <!-- BEGIN DOC UTF8 CODEC -->
 ```rust
+use std::error::Error;
 use std::sync::Arc;
 
 use qubit_event_bus::codec::CodecRegistry;
@@ -62,7 +64,7 @@ impl EventCodec<String> for Utf8Codec {
     }
 }
 
-fn facade_config() -> Result<EventBusFacadeConfig, Box<dyn std::error::Error>> {
+pub(crate) fn facade_config() -> Result<EventBusFacadeConfig, Box<dyn Error>> {
     let mut codecs = CodecRegistry::new();
     codecs.register::<String>(Arc::new(Utf8Codec(ContentType::new("text/plain")?)));
     Ok(EventBusFacadeConfig::new().with_codec_registry(Arc::new(codecs)))

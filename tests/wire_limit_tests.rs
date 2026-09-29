@@ -64,9 +64,15 @@ fn positive_wire_options_are_supported() {
 }
 
 #[test]
-fn payload_limit_is_checked_before_copying_outbound_payload() {
-    assert!(WireFields::from_outbound(&message(1_048_577)).is_err());
-    assert!(WireFields::from_outbound(&message(1_048_576)).is_ok());
+fn public_wire_constructor_copies_payload_without_provider_limits() {
+    assert_eq!(
+        WireFields::from_outbound(&message(1_048_577)).unwrap().payload.len(),
+        1_048_577
+    );
+    assert_eq!(
+        WireFields::from_outbound(&message(1_048_576)).unwrap().payload.len(),
+        1_048_576
+    );
 }
 
 #[test]
@@ -115,13 +121,16 @@ mod durable {
     /// Constructs direct SPI settings with one independently restricted
     /// component.
     fn bus(url: &str, namespace: &str, key: &str, limit: usize) -> Arc<dyn EventBusSpi> {
-        let options: ProviderOptions = [
+        let mut options: ProviderOptions = [
             ("redis.url".into(), url.into()),
             ("redis.namespace".into(), namespace.into()),
             ("redis.claim_min_idle_ms".into(), "0".into()),
             (key.into(), limit.to_string()),
         ]
         .into();
+        if key == "redis.max_wire_bytes" {
+            options.insert("redis.max_payload_bytes".into(), "5".into());
+        }
         RedisEventBusProvider
             .create_configured(&EventBusConfig::default().with_provider_options(options))
             .unwrap()
@@ -290,7 +299,14 @@ mod durable {
             };
             let restricted = bus(server.url(), "direct-publish-limits", key, exact - 1);
             let error = restricted.publish(message(5)).unwrap_err();
-            assert_eq!(error.kind(), "publish_limit_exceeded");
+            assert_eq!(
+                error.kind(),
+                if index == 1 {
+                    "payload_too_large"
+                } else {
+                    "wire_too_large"
+                }
+            );
             assert_eq!(error.publish_effect(), PublishEffect::NotAccepted);
             assert_eq!(error.retryable(), Some(false));
             assert!(
@@ -436,13 +452,16 @@ mod durable {
                 .query::<String>(&mut observer)?;
             futures_lite::future::block_on(async {
                 for (attempt, limit) in [exact - 1, exact].into_iter().enumerate() {
-                    let options: ProviderOptions = [
+                    let mut options: ProviderOptions = [
                         ("redis.url".into(), server.url().into()),
                         ("redis.namespace".into(), namespace.clone()),
                         ("redis.claim_min_idle_ms".into(), "0".into()),
                         (key.to_string(), limit.to_string()),
                     ]
                     .into();
+                    if *key == "redis.max_wire_bytes" {
+                        options.insert("redis.max_payload_bytes".into(), "5".into());
+                    }
                     let spi = AsyncRedisEventBusProvider
                         .create_configured(&EventBusConfig::default().with_provider_options(options))
                         .await

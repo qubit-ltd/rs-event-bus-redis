@@ -141,6 +141,24 @@ fn assert_quarantined(observer: &mut Connection, namespace: &str, id: &str, wire
     Ok(())
 }
 
+/// Verifies a limit failure leaves the source pending and creates no poison
+/// copy.
+fn assert_retained(observer: &mut Connection, namespace: &str, id: &str) -> TestResult {
+    let entries = pending(observer, namespace)?;
+    assert_eq!(entries.len(), 1, "limit failure must retain source in PEL");
+    let row: Vec<Value> = redis::from_redis_value(&entries[0])?;
+    let pending_id: String = redis::from_redis_value(&row[0])?;
+    assert_eq!(pending_id, id);
+    let group = group_name(namespace, "events", "worker", Some("group"));
+    let rows: StreamRangeReply = cmd("XRANGE")
+        .arg(poison_key(namespace, "events", &group))
+        .arg("-")
+        .arg("+")
+        .query(observer)?;
+    assert!(rows.ids.is_empty(), "limit failure must not quarantine");
+    Ok(())
+}
+
 /// Deterministic malformed and oversized representations share one fixture.
 fn malformed_cases() -> Vec<(Vec<u8>, &'static str)> {
     let payload = WireFields {
@@ -200,12 +218,18 @@ fn test_sync_historical_valid_wire_is_inclusive_at_exact_byte_limit() -> TestRes
             .create_configured(&config_limits(server.url(), &namespace, 1, exact))
             .map_err(|failure| failure.into_error())?;
         let mut receiver = bus.subscribe(request())?;
-        let outcome = receiver.receive(Duration::ZERO)?;
+        let outcome = receiver.receive(Duration::ZERO);
         if over {
-            assert!(matches!(outcome, ReceiveOutcome::Gap(_)));
-            assert_quarantined(&mut observer, &namespace, &id, &bytes, "oversized_wire")?;
+            assert!(matches!(
+                outcome,
+                Err(SpiError::Operation {
+                    kind: "receive_limit_exceeded",
+                    ..
+                })
+            ));
+            assert_retained(&mut observer, &namespace, &id)?;
         } else {
-            let ReceiveOutcome::Message(message) = outcome else {
+            let ReceiveOutcome::Message(message) = outcome? else {
                 panic!("exact wire and payload limits must be inclusive");
             };
             let TransportPayload::Encoded(payload) = message.payload() else {
@@ -242,12 +266,18 @@ fn test_async_historical_valid_wire_is_inclusive_at_exact_byte_limit() -> TestRe
                 .await
                 .map_err(|failure| failure.into_error())?;
             let mut receiver = bus.subscribe(request()).await?;
-            let outcome = receiver.receive(Duration::ZERO).await?;
+            let outcome = receiver.receive(Duration::ZERO).await;
             if over {
-                assert!(matches!(outcome, ReceiveOutcome::Gap(_)));
-                assert_quarantined(&mut observer, &namespace, &id, &bytes, "oversized_wire")?;
+                assert!(matches!(
+                    outcome,
+                    Err(SpiError::Operation {
+                        kind: "receive_limit_exceeded",
+                        ..
+                    })
+                ));
+                assert_retained(&mut observer, &namespace, &id)?;
             } else {
-                let ReceiveOutcome::Message(message) = outcome else {
+                let ReceiveOutcome::Message(message) = outcome? else {
                     panic!("exact wire and payload limits must be inclusive");
                 };
                 let TransportPayload::Encoded(payload) = message.payload() else {
@@ -266,7 +296,7 @@ fn test_async_historical_valid_wire_is_inclusive_at_exact_byte_limit() -> TestRe
 
 #[cfg(feature = "sync")]
 #[test]
-fn test_sync_historical_oversize_and_malformed_wire_quarantine_and_ack() -> TestResult {
+fn test_sync_historical_oversize_is_retained_and_malformed_wire_is_quarantined() -> TestResult {
     let server = RedisServer::start()?;
     let mut observer = Client::open(server.url())?.get_connection()?;
     for (index, (wire, reason)) in malformed_cases().into_iter().enumerate() {
@@ -276,19 +306,31 @@ fn test_sync_historical_oversize_and_malformed_wire_quarantine_and_ack() -> Test
             .create_configured(&config(server.url(), &namespace))
             .map_err(|failure| failure.into_error())?;
         let mut receiver = bus.subscribe(request())?;
-        assert!(
-            matches!(receiver.receive(Duration::from_secs(2))?, ReceiveOutcome::Gap(_)),
-            "{reason} must return Gap"
-        );
-        assert_quarantined(&mut observer, &namespace, &id, &wire, reason)?;
-        assert!(matches!(receiver.receive(Duration::ZERO)?, ReceiveOutcome::TimedOut));
+        let outcome = receiver.receive(Duration::from_secs(2));
+        if index < 2 {
+            assert!(
+                matches!(
+                    outcome,
+                    Err(SpiError::Operation {
+                        kind: "receive_limit_exceeded",
+                        ..
+                    })
+                ),
+                "{reason} must retain the pending record"
+            );
+            assert_retained(&mut observer, &namespace, &id)?;
+        } else {
+            assert!(matches!(outcome?, ReceiveOutcome::Gap(_)), "{reason} must return Gap");
+            assert_quarantined(&mut observer, &namespace, &id, &wire, reason)?;
+            assert!(matches!(receiver.receive(Duration::ZERO)?, ReceiveOutcome::TimedOut));
+        }
     }
     Ok(())
 }
 
 #[cfg(feature = "async")]
 #[test]
-fn test_async_historical_oversize_and_malformed_wire_quarantine_and_ack() -> TestResult {
+fn test_async_historical_oversize_is_retained_and_malformed_wire_is_quarantined() -> TestResult {
     block_on(async {
         let server = RedisServer::start()?;
         let mut observer = Client::open(server.url())?.get_connection()?;
@@ -300,15 +342,27 @@ fn test_async_historical_oversize_and_malformed_wire_quarantine_and_ack() -> Tes
                 .await
                 .map_err(|failure| failure.into_error())?;
             let mut receiver = bus.subscribe(request()).await?;
-            assert!(
-                matches!(receiver.receive(Duration::from_secs(2)).await?, ReceiveOutcome::Gap(_)),
-                "{reason} must return Gap"
-            );
-            assert_quarantined(&mut observer, &namespace, &id, &wire, reason)?;
-            assert!(matches!(
-                receiver.receive(Duration::ZERO).await?,
-                ReceiveOutcome::TimedOut
-            ));
+            let outcome = receiver.receive(Duration::from_secs(2)).await;
+            if index < 2 {
+                assert!(
+                    matches!(
+                        outcome,
+                        Err(SpiError::Operation {
+                            kind: "receive_limit_exceeded",
+                            ..
+                        })
+                    ),
+                    "{reason} must retain the pending record"
+                );
+                assert_retained(&mut observer, &namespace, &id)?;
+            } else {
+                assert!(matches!(outcome?, ReceiveOutcome::Gap(_)), "{reason} must return Gap");
+                assert_quarantined(&mut observer, &namespace, &id, &wire, reason)?;
+                assert!(matches!(
+                    receiver.receive(Duration::ZERO).await?,
+                    ReceiveOutcome::TimedOut
+                ));
+            }
         }
         Ok(())
     })
@@ -316,10 +370,10 @@ fn test_async_historical_oversize_and_malformed_wire_quarantine_and_ack() -> Tes
 
 #[cfg(feature = "sync")]
 #[test]
-fn test_sync_historical_payload_over_limit_is_quarantined_instead_of_delivered() -> TestResult {
+fn test_sync_historical_payload_over_limit_remains_pending() -> TestResult {
     let server = RedisServer::start()?;
     let namespace = "history-payload-sync";
-    let (wire, reason) = malformed_cases().remove(1);
+    let (wire, _) = malformed_cases().remove(1);
     let mut observer = Client::open(server.url())?.get_connection()?;
     let id = inject(&mut observer, namespace, &wire)?;
     let bus = RedisEventBusProvider
@@ -327,20 +381,26 @@ fn test_sync_historical_payload_over_limit_is_quarantined_instead_of_delivered()
         .map_err(|failure| failure.into_error())?;
     let mut receiver = bus.subscribe(request())?;
     assert!(
-        matches!(receiver.receive(Duration::ZERO)?, ReceiveOutcome::Gap(_)),
-        "historical max + 1 payload must not be delivered"
+        matches!(
+            receiver.receive(Duration::ZERO),
+            Err(SpiError::Operation {
+                kind: "receive_limit_exceeded",
+                ..
+            })
+        ),
+        "historical max + 1 payload must remain pending"
     );
-    assert_quarantined(&mut observer, namespace, &id, &wire, reason)?;
+    assert_retained(&mut observer, namespace, &id)?;
     Ok(())
 }
 
 #[cfg(feature = "async")]
 #[test]
-fn test_async_historical_payload_over_limit_is_quarantined_instead_of_delivered() -> TestResult {
+fn test_async_historical_payload_over_limit_remains_pending() -> TestResult {
     block_on(async {
         let server = RedisServer::start()?;
         let namespace = "history-payload-async";
-        let (wire, reason) = malformed_cases().remove(1);
+        let (wire, _) = malformed_cases().remove(1);
         let mut observer = Client::open(server.url())?.get_connection()?;
         let id = inject(&mut observer, namespace, &wire)?;
         let bus = AsyncRedisEventBusProvider
@@ -349,10 +409,16 @@ fn test_async_historical_payload_over_limit_is_quarantined_instead_of_delivered(
             .map_err(|failure| failure.into_error())?;
         let mut receiver = bus.subscribe(request()).await?;
         assert!(
-            matches!(receiver.receive(Duration::ZERO).await?, ReceiveOutcome::Gap(_)),
-            "historical max + 1 payload must not be delivered"
+            matches!(
+                receiver.receive(Duration::ZERO).await,
+                Err(SpiError::Operation {
+                    kind: "receive_limit_exceeded",
+                    ..
+                })
+            ),
+            "historical max + 1 payload must remain pending"
         );
-        assert_quarantined(&mut observer, namespace, &id, &wire, reason)?;
+        assert_retained(&mut observer, namespace, &id)?;
         Ok(())
     })
 }

@@ -111,6 +111,16 @@ fn assert_limit(error: SpiError, expected: &str) {
             assert_eq!(kind, expected);
             assert_eq!(retryable, Some(false));
         }
+        SpiError::Publish {
+            kind,
+            retryable,
+            effect,
+            ..
+        } => {
+            assert_eq!(kind, expected);
+            assert_eq!(retryable, Some(false));
+            assert_eq!(effect, qubit_event_bus::model::PublishEffect::NotAccepted);
+        }
         error => panic!("expected byte-limit operation error, got {error:?}"),
     }
 }

@@ -115,6 +115,8 @@ pub(crate) fn query_publish_error(topic: &TopicAddress, error: &RedisError) -> S
             kind: "protocol",
             retryable: Some(false),
         }
+    } else if error.code().is_none() {
+        RedisProviderError::OutcomeUnknown { operation: "publish" }
     } else {
         classify_redis_error("publish", error)
     };
@@ -127,11 +129,7 @@ pub(crate) fn query_publish_error(topic: &TopicAddress, error: &RedisError) -> S
 pub(crate) fn invalid_publish_reply(topic: &TopicAddress) -> SpiError {
     to_publish_error(
         topic,
-        RedisProviderError::Transport {
-            operation: "publish",
-            kind: "protocol",
-            retryable: Some(false),
-        },
+        RedisProviderError::OutcomeUnknown { operation: "publish" },
         qubit_event_bus::model::PublishEffect::MayHaveBeenAccepted,
     )
 }

@@ -56,6 +56,21 @@ pub(crate) fn assert_error(error: SpiError, expected_kind: &str, expected_retrya
             assert_eq!(kind, expected_kind);
             assert_eq!(retryable, Some(expected_retryable));
         }
+        SpiError::Publish {
+            kind,
+            retryable,
+            effect,
+            ..
+        } => {
+            assert_eq!(kind, expected_kind);
+            assert_eq!(retryable, Some(expected_retryable));
+            let expected_effect = if expected_kind == "outcome_unknown" {
+                qubit_event_bus::model::PublishEffect::MayHaveBeenAccepted
+            } else {
+                qubit_event_bus::model::PublishEffect::NotAccepted
+            };
+            assert_eq!(effect, expected_effect);
+        }
         other => panic!("unexpected error: {other}"),
     }
 }

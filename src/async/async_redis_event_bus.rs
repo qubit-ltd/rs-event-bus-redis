@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use qubit_event_bus::SpiError;
 use qubit_event_bus::model::PublishAcknowledgement;
+use qubit_event_bus::model::PublishEffect;
 use qubit_event_bus::model::StartPosition;
 use qubit_event_bus::model::SubscriptionDurability;
 use qubit_event_bus::spi::AsyncEventBusSpi;
@@ -42,6 +43,9 @@ use crate::client::Client;
 use crate::config::RedisEventBusConfig;
 use crate::consumer_identity::new_consumer_name;
 use crate::error::RedisProviderError;
+use crate::error::invalid_publish_reply;
+use crate::error::query_publish_error;
+use crate::error::to_publish_error;
 use crate::internal::RecoveryState;
 use crate::internal::WireLimits;
 use crate::naming::group_name;
@@ -109,13 +113,13 @@ impl AsyncEventBusSpi for AsyncRedisEventBus {
         Box::pin(async move {
             let topic = message.topic().clone();
             let payload = encode_bounded(&message, WireLimits::from_config(&self.settings))
-                .map_err(|error| spi_error("publish", Some(&topic), error))?;
+                .map_err(|error| to_publish_error(&topic, error, PublishEffect::NotAccepted))?;
             let key = stream_key(self.settings.namespace(), topic.as_str());
             let mut connection = self
                 .client
                 .get_async_connection()
                 .await
-                .map_err(|error| spi_error("publish", Some(&topic), error))?;
+                .map_err(|error| to_publish_error(&topic, error, PublishEffect::NotAccepted))?;
             let mut command = cmd("XADD");
             command.arg(key);
             if let Some(maxlen) = self.settings.stream_maxlen_approx() {
@@ -128,24 +132,20 @@ impl AsyncEventBusSpi for AsyncRedisEventBus {
                     Ok(id) if valid_stream_id(&id) && id != "0-0" => id,
                     _ => {
                         self.client.invalidate_async_connection(connection.generation).await;
-                        return Err(spi_error(
-                            "publish",
-                            Some(&topic),
-                            RedisProviderError::OutcomeUnknown { operation: "publish" },
-                        ));
+                        return Err(invalid_publish_reply(&topic));
                     }
                 },
                 Ok(Value::ServerError(error)) => {
                     let error: RedisError = error.into();
-                    return Err(spi_error("publish", Some(&topic), from_redis_error("publish", &error)));
+                    return Err(query_publish_error(&topic, &error));
                 }
-                Ok(_) | Err(_) => {
+                Ok(_) => {
                     self.client.invalidate_async_connection(connection.generation).await;
-                    return Err(spi_error(
-                        "publish",
-                        Some(&topic),
-                        RedisProviderError::OutcomeUnknown { operation: "publish" },
-                    ));
+                    return Err(invalid_publish_reply(&topic));
+                }
+                Err(error) => {
+                    self.client.invalidate_async_connection(connection.generation).await;
+                    return Err(query_publish_error(&topic, &error));
                 }
             };
             Ok(PublishAcknowledgement::Accepted {

@@ -684,7 +684,9 @@ fn test_sync_sentinel_explicit_permission_rejection_keeps_authentication_categor
             .create_configured(&EventBusConfig::default().with_provider_options(sentinel_options(sentinel.url())))
             .expect("provider");
         match bus.publish(message()).expect_err("explicit rejection") {
-            SpiError::Operation { kind, retryable, .. } => classifications.push((kind, retryable)),
+            SpiError::Operation { kind, retryable, .. } | SpiError::Publish { kind, retryable, .. } => {
+                classifications.push((kind, retryable))
+            }
             other => panic!("unexpected error: {other}"),
         }
         assert_eq!(sentinel.finish().len(), 1);
@@ -712,7 +714,9 @@ fn test_async_sentinel_explicit_permission_rejection_keeps_authentication_catego
         )
         .expect("provider");
         match block_on(bus.publish(message())).expect_err("explicit rejection") {
-            SpiError::Operation { kind, retryable, .. } => classifications.push((kind, retryable)),
+            SpiError::Operation { kind, retryable, .. } | SpiError::Publish { kind, retryable, .. } => {
+                classifications.push((kind, retryable))
+            }
             other => panic!("unexpected error: {other}"),
         }
         assert_eq!(sentinel.finish().len(), 1);

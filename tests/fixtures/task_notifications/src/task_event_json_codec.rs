@@ -13,6 +13,7 @@ use qubit_event_bus::codec::EventCodec;
 use qubit_event_bus::error::CodecError;
 use qubit_event_bus::model::ContentType;
 use qubit_event_bus::model::SchemaId;
+use qubit_event_bus::spi::EncodedPayload;
 use qubit_task::event::TaskEvent;
 use serde_json::from_slice;
 use serde_json::to_vec;
@@ -33,8 +34,8 @@ impl EventCodec<TaskEvent> for TaskEventJsonCodec {
             source: Box::new(source),
         })
     }
-    fn decode(&self, bytes: &[u8]) -> Result<TaskEvent, CodecError> {
-        from_slice(bytes).map_err(|source| CodecError::Decode {
+    fn decode(&self, payload: &EncodedPayload) -> Result<TaskEvent, CodecError> {
+        from_slice(payload.bytes()).map_err(|source| CodecError::Decode {
             source: Box::new(source),
         })
     }

@@ -10,5 +10,5 @@
 mod internal;
 mod utf8_codec;
 
-pub(crate) use internal::facade_config;
 pub(crate) use internal::provider_options;
+pub(crate) use utf8_codec::facade_config;

@@ -7,24 +7,7 @@
 // =============================================================================
 //! Shared configuration helpers for runnable provider examples.
 
-use std::error::Error;
-use std::sync::Arc;
-
-use qubit_event_bus::codec::CodecRegistry;
-use qubit_event_bus::facade::EventBusFacadeConfig;
-use qubit_event_bus::model::ContentType;
 use qubit_event_bus::model::ProviderOptions;
-
-use super::utf8_codec::Utf8Codec;
-
-/// Returns a facade configured with the UTF-8 string codec without I/O;
-/// returns the content-type validation error if the fixed MIME type is
-/// rejected.
-pub(crate) fn facade_config() -> Result<EventBusFacadeConfig, Box<dyn Error>> {
-    let mut codecs = CodecRegistry::new();
-    codecs.register::<String>(Arc::new(Utf8Codec(ContentType::new("text/plain")?)));
-    Ok(EventBusFacadeConfig::new().with_codec_registry(Arc::new(codecs)))
-}
 
 /// Returns options for `redis_url` and `namespace` without I/O.
 /// `sentinel` adds nodes/service for `Some`, and uses standalone mode for

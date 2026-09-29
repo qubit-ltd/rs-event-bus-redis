@@ -25,8 +25,10 @@ Redis 需要 6.2 或更高版本。集成测试使用 Docker 启动隔离的 Red
 
 Redis 保存编码字节，因此通过 facade 使用的每种 payload 类型都要提供 `EventCodec<T>`。下面以 UTF-8 `String` 为例。生产应用可替换为 JSON、Protobuf 或带 schema 的 codec。
 
+<!-- doc-example: codec -->
 <!-- BEGIN DOC UTF8 CODEC -->
 ```rust
+use std::error::Error;
 use std::sync::Arc;
 
 use qubit_event_bus::codec::CodecRegistry;
@@ -62,7 +64,7 @@ impl EventCodec<String> for Utf8Codec {
     }
 }
 
-fn facade_config() -> Result<EventBusFacadeConfig, Box<dyn std::error::Error>> {
+pub(crate) fn facade_config() -> Result<EventBusFacadeConfig, Box<dyn Error>> {
     let mut codecs = CodecRegistry::new();
     codecs.register::<String>(Arc::new(Utf8Codec(ContentType::new("text/plain")?)));
     Ok(EventBusFacadeConfig::new().with_codec_registry(Arc::new(codecs)))
