@@ -13,8 +13,8 @@
 
 ```toml
 [dependencies]
-qubit-event-bus = { version = "0.16", features = ["discovery"] }
-qubit-event-bus-redis = "0.4"
+qubit-event-bus = { version = "0.17", features = ["discovery"] }
+qubit-event-bus-redis = "0.5"
 qubit-spi = "0.13"
 ```
 
@@ -67,6 +67,8 @@ event-bus SPI 允许应用更换传输实现，而不改业务 handler。Redis S
 - 测试会通过 Docker 启动隔离的 Redis 6.2、Redis 7 和 Sentinel 服务。
 
 Redis 使用至少一次投递，业务 handler 应能处理重复事件。`XADD` 成功只表示 Redis 接受了命令，不能证明记录已经 fsync 或完成处理。默认不会裁剪 stream。设置 `redis.stream_maxlen_approx` 可显式启用 Redis `XADD MAXLEN ~ N`；近似保留策略可能删除尚未消费或仍处于 pending 的历史记录并产生缺口，仅在业务接受这类损失时使用。当前不支持 Cluster、native/delayed delivery、TLS 配置或死信策略。stream 和消费组由运维人员负责清理。
+
+provider 对单条 wire、payload 和解码后的 headers 字符串设置有限容量，默认分别为 8 MiB、1 MiB 和 64 KiB；facade 另有默认各 1 MiB 的编码发布/接收限制。接收超限会停止订阅，保留 pending 记录，不确认也不隔离。公开发布错误可通过 `PublishFailure.effect()` 判断效果；`XADD` 回复丢失属于未知结果，默认禁止盲目重发。仍支持 wire 版本 1。升级步骤见[迁移指南](doc/migration.zh_CN.md)。
 
 ## 延伸阅读
 

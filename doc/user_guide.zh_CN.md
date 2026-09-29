@@ -1,6 +1,6 @@
 # Redis Streams 用户指南
 
-**读者：** 使用 `qubit-event-bus` 0.16 和 `qubit-event-bus-redis` 0.4 的 Rust 服务开发者。本指南以订单发布服务和账单消费服务为例，说明如何通过 Redis 共享事件，同时让应用代码继续使用 event-bus facade。
+**读者：** 使用 `qubit-event-bus` 0.17 和 `qubit-event-bus-redis` 0.5 的 Rust 服务开发者。本指南以订单发布服务和账单消费服务为例，说明如何通过 Redis 共享事件，同时让应用代码继续使用 event-bus facade。
 
 [English](user_guide.md) · [README](../README.zh_CN.md) · [API 文档](https://docs.rs/qubit-event-bus-redis)
 
@@ -10,8 +10,8 @@
 
 ```toml
 [dependencies]
-qubit-event-bus = { version = "0.16", features = ["discovery"] }
-qubit-event-bus-redis = "0.4"
+qubit-event-bus = { version = "0.17", features = ["discovery"] }
+qubit-event-bus-redis = "0.5"
 qubit-spi = "0.13"
 ```
 
@@ -23,26 +23,42 @@ Redis 需要 6.2 或更高版本。集成测试使用 Docker 启动隔离的 Red
 
 Redis 保存编码字节，因此通过 facade 使用的每种 payload 类型都要提供 `EventCodec<T>`。下面以 UTF-8 `String` 为例。生产应用可替换为 JSON、Protobuf 或带 schema 的 codec。
 
+<!-- BEGIN DOC UTF8 CODEC -->
 ```rust
 use std::sync::Arc;
 
 use qubit_event_bus::codec::EventCodec;
 use qubit_event_bus::error::CodecError;
 use qubit_event_bus::model::ContentType;
+use qubit_event_bus::model::SchemaId;
+use qubit_event_bus::spi::EncodedPayload;
 
-struct Utf8Codec(ContentType);
+/// Encodes owned strings as UTF-8 bytes.
+/// Uses the default strict metadata validation for this content type and no
+/// schema.
+pub(crate) struct Utf8Codec(pub(crate) ContentType);
 
 impl EventCodec<String> for Utf8Codec {
-    fn content_type(&self) -> &ContentType { &self.0 }
-    fn schema_id(&self) -> Option<&qubit_event_bus::model::SchemaId> { None }
+    fn content_type(&self) -> &ContentType {
+        &self.0
+    }
+
+    fn schema_id(&self) -> Option<&SchemaId> {
+        None
+    }
+
     fn encode(&self, value: &String) -> Result<Arc<[u8]>, CodecError> {
         Ok(Arc::from(value.as_bytes()))
     }
-    fn decode(&self, bytes: &[u8]) -> Result<String, CodecError> {
-        String::from_utf8(bytes.to_vec()).map_err(|source| CodecError::Decode { source: Box::new(source) })
+
+    fn decode(&self, payload: &EncodedPayload) -> Result<String, CodecError> {
+        String::from_utf8(payload.bytes().to_vec()).map_err(|source| CodecError::Decode {
+            source: Box::new(source),
+        })
     }
 }
 ```
+<!-- END DOC UTF8 CODEC -->
 
 创建 `CodecRegistry` 并注册 `Utf8Codec`，再将它放入 `EventBusFacadeConfig`。缺少 codec 时，facade 会在访问 Redis 前拒绝该类型的发布或订阅。
 
@@ -95,9 +111,9 @@ fn start_service() -> Result<(), Box<dyn std::error::Error>> {
 
 示例先写入事件，再创建 `Earliest` 消费组，因此新组能读取已保留的记录。生产服务若使用 `New`，应先注册 consumer，再依赖后续发布的事件。Redis Streams 只接受 `Durable` 订阅；`Ephemeral` 会在执行 Redis I/O 前被拒绝。服务断连或关闭订阅时，group 会保留，未结算记录仍在 pending entries list 中。Redis 只在首次创建 group 时应用起始位置。
 
-格式错误的 wire 记录会被原子转移到按 group 隔离的 stream（`qubit:poison:*`），并从源 group 确认。隔离记录包含 `source_stream`、`source_id`、`group`、稳定的 `reason`、原始 `wire` 字节和 `wire_missing`。隔离成功后返回 `Gap`，不会把 payload 放进错误信息。可用 `XRANGE <quarantine-key> - +` 检查记录，并用 `XLEN`、`XPENDING` 监控隔离流、源 stream 和 pending 数量。provider 不会自动裁剪这些 stream；运维应按保留策略归档或清理隔离数据。
+限额内格式错误的版本 1 wire 记录会被原子复制到按 group 隔离的 stream（`qubit:poison:*`），并从源 group 确认。隔离记录包含 `source_stream`、`source_id`、`group`、稳定的 `reason`、原始 `wire` 字节和 `wire_missing`。隔离成功后返回 `Gap`，不会把 payload 放进错误信息。可用 `XRANGE <quarantine-key> - +` 检查记录，并用 `XLEN`、`XPENDING` 监控隔离流、源 stream 和 pending 数量。provider 不会自动裁剪这些 stream；运维应按保留策略归档或清理隔离数据。
 
-投递语义仍是至少一次。如果 handler 运行时间超过 `redis.claim_min_idle_ms`，其他 consumer 可能接管该 pending 记录。若 `XADD` 回复丢失，发布结果未知，重试可能产生重复事件。`redis.max_unsettled_per_subscription` 限制本地活跃投递数，默认值为 100。
+投递语义仍是至少一次。如果 handler 运行时间超过 `redis.claim_min_idle_ms`，其他 consumer 可能接管该 pending 记录。若 `XADD` 回复丢失，发布结果未知，facade 默认安全门阻止自动重发；人工或明确允许的重试仍可能重复。`redis.max_unsettled_per_subscription` 限制本地活跃投递数，默认值为 100。
 
 默认不限制 stream 长度。可在上方 `ProviderOptions` map 中添加 `("redis.stream_maxlen_approx".into(), "100000".into())` 启用近似裁剪。此后每次发布都会使用 `XADD MAXLEN ~ 100000`。Redis 可能裁剪尚未消费的记录，或消费组 pending 列表仍引用的记录；裁剪不保证投递，旧消息可能无法恢复。需要保留 pending 历史用于恢复时应保持此选项关闭。格式错误记录的隔离 stream 遵循单独的运维保留策略。
 
@@ -164,6 +180,9 @@ REDIS_SENTINEL_SERVICE_NAME=qeventbus \
 | `redis.claim_min_idle_ms` | `30000` | 其他 consumer 可以认领 pending entry 前所需的空闲毫秒数。 |
 | `redis.recovery_interval_ms` | `1000` | 长时间 receive 期间的恢复扫描间隔，可设为 50 至 60,000 毫秒。 |
 | `redis.max_unsettled_per_subscription` | `100` | 每个订阅已投递但未结算的消息上限；达到上限后 receive 会等待。 |
+| `redis.max_wire_bytes` | `8388608` | 序列化 wire 总字节上限。 |
+| `redis.max_payload_bytes` | `1048576` | 解码后 payload 字节上限。 |
+| `redis.max_headers_bytes` | `65536` | 二次 JSON 解析前的 headers 字符串字节上限。 |
 | `redis.max_idle_connections` | `8` | 同步 standalone 命令连接的最大空闲复用数，范围为 1 到 64。阻塞接收器的专用连接另计。 |
 | `redis.stream_maxlen_approx` | 未设置 | 可选的近似 stream 条目上限，通过 `XADD MAXLEN ~` 应用；可能裁剪未读或 pending 记录。 |
 | `redis.username_env` | 未设置 | 保存 Redis ACL username 的环境变量名称。 |
@@ -198,6 +217,24 @@ Redis 提供至少一次投递，因此 handler 应具备幂等性。如果 hand
 `StartPosition::New` 会在当前 stream 尾部创建 group；`Earliest` 会从 `0-0` 开始创建新 group；`At("milliseconds-sequence")` 使用 Redis Stream ID。group 一旦创建，读取游标由 Redis 保留；之后更改请求的 start position 不会重置现有 group。
 
 provider 不会裁剪 stream 或删除 group。应监控 Redis 内存和 stream 增长。删除 stream 或 group 前，先停止 consumer 并决定如何处理 pending 消息；删除 pending record 可能导致 `ReceiveOutcome::Gap`。Redis persistence 和 replication 配置需符合业务恢复目标：`Accepted` 不代表已 fsync，Sentinel 切换也可能丢失尚未复制的写入。
+
+### 限制单条记录并恢复不兼容的 consumer
+
+`redis.max_wire_bytes`、`redis.max_payload_bytes`、`redis.max_headers_bytes` 默认分别为 8,388,608、1,048,576、65,536 字节。值必须为正整数，零、非法数字和溢出都是配置错误。三个限额独立，payload 未超限仍可能因 JSON 膨胀使 wire 超限。facade 的 `PayloadLimits` 另有默认各 1 MiB 的双向限制，需要一起配置。
+
+发布先在复制 payload 前检查大小，再用有界 writer 序列化 headers/wire，成功后才调用 `XADD`。接收先借用 wire 字节检查长度，再复制字符串；先解析版本，随后对版本 1 字段做有界解码，不构造完整 JSON Value 树。payload 每次 push 前检查增长，headers 字符串在二次 JSON 解析前检查，嵌套 JSON 保持深度保护。这不阻止 Redis 客户端首次分配 RESP frame。
+
+`receive_limit_exceeded` 停止订阅，保留 PEL 记录，不执行 `XACK`、`XDEL` 或隔离。合法但不支持的 wire 版本同样保留。修复容量或部署兼容 provider/codec 后，使用同一 group 创建新订阅，并通过 `XPENDING` 验证认领结果。不要删除 pending 记录掩盖问题。限额内格式错误的版本 1 数据仍走隔离；旧版本发布的 wire 版本 1 继续可读。
+
+codec 接收 `&EncodedPayload`，默认精确验证 content type 和可选 schema；`None` 与具名 schema 不同。需要支持旧 schema 时明确重写验证方法。元数据不兼容或 codec panic 会使 facade 停止接收而不结算；查看 `terminal_failure()`，修复 codec，再创建新持久订阅。普通 `CodecError::Decode` 仍以 `XACK` 拒绝坏消息。
+
+### 处理结果未知的 `XADD`
+
+公开 facade 错误为 `PublishFailure`，保留事件 ID、效果和原因。提交前 wire/配置失败、打开连接失败和明确 server 拒绝为 `NotAccepted`；进入 query 后的断连、超时或响应转换失败为 `MayHaveBeenAccepted`。没有收到回复不能证明 Redis 拒绝记录。
+
+默认 `DuplicateRiskPolicy::Forbid` 在自定义规则前停止未知接纳的自动重试。`AllowDuplicates` 只允许已配置的策略继续判断。未知效果跨尝试保留，后来成功回执以 `duplicate_possible()` 报告风险。provider 尝试开始后被 retry 取消，结果未知；丢弃公开 future 则没有失败返回值。须保留 EventId 并核对业务结果。RetryPolicy 是软预算，不承诺所有执行中的 Redis 命令均能硬超时取消。
+
+provider 和 Redis Streams 都不按 EventId 自动去重，消费者应保证业务副作用幂等。facade 死信转发与源 `XACK` 是独立操作：转发成功后确认失败，可能再次产生同一逻辑死信。转发结果未知时使用相同安全门、保留持久源消息并停止源订阅。
 
 ## 7. 排查常见问题
 

@@ -1,6 +1,6 @@
 # Redis Streams User Guide
 
-**For:** Rust service developers using `qubit-event-bus` 0.16 and `qubit-event-bus-redis` 0.4. This guide shows how an order publisher and billing consumer share events through Redis while keeping application code on the event-bus facade.
+**For:** Rust service developers using `qubit-event-bus` 0.17 and `qubit-event-bus-redis` 0.5. This guide shows how an order publisher and billing consumer share events through Redis while keeping application code on the event-bus facade.
 
 [简体中文](user_guide.zh_CN.md) · [README](../README.md) · [API docs](https://docs.rs/qubit-event-bus-redis)
 
@@ -10,8 +10,8 @@ Add both the facade and provider as direct dependencies. `discovery` is on by de
 
 ```toml
 [dependencies]
-qubit-event-bus = { version = "0.16", features = ["discovery"] }
-qubit-event-bus-redis = "0.4"
+qubit-event-bus = { version = "0.17", features = ["discovery"] }
+qubit-event-bus-redis = "0.5"
 qubit-spi = "0.13"
 ```
 
@@ -23,26 +23,42 @@ Redis 6.2 or newer is required. The integration tests use Docker to start isolat
 
 Redis stores encoded bytes, so every payload type used by the facade needs an `EventCodec<T>`. This example uses UTF-8 `String` messages. Production applications can replace it with JSON, Protobuf, or another schema-aware codec.
 
+<!-- BEGIN DOC UTF8 CODEC -->
 ```rust
 use std::sync::Arc;
 
 use qubit_event_bus::codec::EventCodec;
 use qubit_event_bus::error::CodecError;
 use qubit_event_bus::model::ContentType;
+use qubit_event_bus::model::SchemaId;
+use qubit_event_bus::spi::EncodedPayload;
 
-struct Utf8Codec(ContentType);
+/// Encodes owned strings as UTF-8 bytes.
+/// Uses the default strict metadata validation for this content type and no
+/// schema.
+pub(crate) struct Utf8Codec(pub(crate) ContentType);
 
 impl EventCodec<String> for Utf8Codec {
-    fn content_type(&self) -> &ContentType { &self.0 }
-    fn schema_id(&self) -> Option<&qubit_event_bus::model::SchemaId> { None }
+    fn content_type(&self) -> &ContentType {
+        &self.0
+    }
+
+    fn schema_id(&self) -> Option<&SchemaId> {
+        None
+    }
+
     fn encode(&self, value: &String) -> Result<Arc<[u8]>, CodecError> {
         Ok(Arc::from(value.as_bytes()))
     }
-    fn decode(&self, bytes: &[u8]) -> Result<String, CodecError> {
-        String::from_utf8(bytes.to_vec()).map_err(|source| CodecError::Decode { source: Box::new(source) })
+
+    fn decode(&self, payload: &EncodedPayload) -> Result<String, CodecError> {
+        String::from_utf8(payload.bytes().to_vec()).map_err(|source| CodecError::Decode {
+            source: Box::new(source),
+        })
     }
 }
 ```
+<!-- END DOC UTF8 CODEC -->
 
 Create a `CodecRegistry`, register `Utf8Codec`, and place it in `EventBusFacadeConfig`. If the codec is missing, the facade rejects a typed publish or subscription before calling Redis.
 
@@ -95,9 +111,9 @@ fn start_service() -> Result<(), Box<dyn std::error::Error>> {
 
 The example writes before it creates the `Earliest` group, so that group can read the retained event. In production, register the consumer before relying on `New`, which starts after the group is created. Redis Streams accepts only `Durable` subscriptions; `Ephemeral` is rejected before Redis I/O. Groups remain when a service disconnects, and closing a subscription leaves unsettled records pending. Redis applies the start position only when it first creates a group.
 
-Malformed wire records are moved atomically to a group-specific quarantine stream (`qubit:poison:*`) and acknowledged from the source group. The quarantine record stores `source_stream`, `source_id`, `group`, a stable `reason`, the original `wire` bytes, and `wire_missing`. A successful quarantine is returned as a `Gap` without exposing payload bytes. Inspect entries with `XRANGE <quarantine-key> - +`; monitor quarantine length, source stream length, and pending entries with `XLEN` and `XPENDING`. The provider never trims these streams automatically, so operators should archive or remove quarantine records under their retention policy.
+Malformed in-limit version 1 wire records are copied atomically to a group-specific quarantine stream (`qubit:poison:*`) and acknowledged from the source group. The quarantine record stores `source_stream`, `source_id`, `group`, a stable `reason`, the original `wire` bytes, and `wire_missing`. A successful quarantine is returned as a `Gap` without exposing payload bytes. Inspect entries with `XRANGE <quarantine-key> - +`; monitor quarantine length, source stream length, and pending entries with `XLEN` and `XPENDING`. The provider never trims these streams automatically, so operators should archive or remove quarantine records under their retention policy.
 
-Delivery remains at least once. If a handler runs longer than `redis.claim_min_idle_ms`, another consumer may claim its pending entry. A publish whose `XADD` reply is lost has an unknown outcome and may be duplicated if retried. `redis.max_unsettled_per_subscription` bounds locally active deliveries (default 100).
+Delivery remains at least once. If a handler runs longer than `redis.claim_min_idle_ms`, another consumer may claim its pending entry. A publish whose `XADD` reply is lost has an unknown outcome; the default facade uncertainty gate prevents automatic resubmission, and manual or explicitly permitted retries may duplicate it. `redis.max_unsettled_per_subscription` bounds locally active deliveries (default 100).
 
 During a long `receive` call, recovery scans repeat every `redis.recovery_interval_ms` milliseconds (default 1,000; valid range 50–60,000). Shorter intervals reduce the wait before idle pending records can be reclaimed, at the cost of more Redis scan commands.
 
@@ -166,6 +182,9 @@ The async example runs until it consumes the event, then waits for Enter before 
 | `redis.claim_min_idle_ms` | `30000` | Minimum pending idle time before another consumer can claim an entry. |
 | `redis.recovery_interval_ms` | `1000` | Recovery scan interval during a long receive call; accepts 50 through 60,000 ms. |
 | `redis.max_unsettled_per_subscription` | `100` | Maximum delivered but unsettled messages held by one subscription; receive waits while the limit is reached. |
+| `redis.max_wire_bytes` | `8388608` | Maximum serialized wire bytes. |
+| `redis.max_payload_bytes` | `1048576` | Maximum decoded payload bytes. |
+| `redis.max_headers_bytes` | `65536` | Maximum decoded headers string bytes before JSON parsing. |
 | `redis.max_idle_connections` | `8` | Maximum idle synchronous standalone command connections retained for reuse; accepts 1 through 64. Dedicated blocking receiver connections are counted separately. |
 | `redis.stream_maxlen_approx` | unset | Optional approximate stream entry limit applied with `XADD MAXLEN ~`; may trim unread or pending records. |
 | `redis.username_env` | unset | Environment variable name containing the Redis ACL username. |
@@ -198,6 +217,24 @@ Each subscription stops receiving new entries while its unsettled count reaches 
 `StartPosition::New` creates a group at the current stream tail. `Earliest` starts a new group at `0-0`. `At("milliseconds-sequence")` supplies a Redis Stream ID. Once a group exists, Redis retains its cursor, so changing the requested start position does not rewind that existing group.
 
 The provider does not trim streams or delete groups. Monitor Redis memory and stream growth. Before deleting a stream or group, stop consumers and decide how to handle every pending event; deleting pending records can produce `ReceiveOutcome::Gap`. Configure Redis persistence and replication to match the application's recovery objectives: `Accepted` does not mean fsynced, and Sentinel replication can lose writes that were not replicated before promotion.
+
+### Bound one record and recover an incompatible consumer
+
+The provider options `redis.max_wire_bytes`, `redis.max_payload_bytes`, and `redis.max_headers_bytes` default to 8,388,608, 1,048,576, and 65,536 bytes. Values must be positive integers; zero, invalid numbers, and overflow are configuration errors. They are independent: JSON expansion can exceed the wire limit even when payload bytes fit. The facade's separate `PayloadLimits` defaults to 1 MiB in both directions; configure both layers deliberately.
+
+Publication checks payload before copying bytes and uses capped headers/wire serialization before `XADD`. Reception checks borrowed wire bytes before copying a string, parses the version without a complete JSON value tree, then bounds version 1 fields as they are decoded. Payload growth is checked before each push; headers string length is checked before parsing headers JSON, and nested JSON remains depth bounded. These checks do not prevent the Redis client from initially allocating a RESP frame.
+
+`receive_limit_exceeded` stops the subscription and leaves the entry in the PEL without `XACK`, `XDEL`, or quarantine. Unsupported valid wire versions are retained the same way. Fix the limits or deploy a compatible provider/codec, then create a new subscription in the same group and verify reclamation with `XPENDING`. Do not delete pending records to hide the error. In-limit malformed version 1 data continues to use quarantine. Wire version 1 from older releases remains readable.
+
+The codec receives `&EncodedPayload`, and default metadata validation requires exact content type and optional schema equality. `None` and a named schema are different. Override validation explicitly when the application supports an old schema. Metadata mismatch or codec panic stops facade reception without settlement; inspect `terminal_failure()`, fix the codec, and create a new durable subscription. Ordinary `CodecError::Decode` still rejects a bad message with `XACK`.
+
+### Handle an uncertain `XADD` result
+
+Public facade errors are `PublishFailure`, preserving event ID, effect, and cause. Pre-submission wire/configuration failure, failure to open a connection, and explicit server rejection are `NotAccepted`. Connection loss, timeout, or response conversion failure after entering query are `MayHaveBeenAccepted`; failure to receive a reply does not prove that Redis rejected the record.
+
+Default `DuplicateRiskPolicy::Forbid` stops automatic retries after uncertain admission, before custom retry rules. `AllowDuplicates` only permits the configured retry policy to consider another attempt. Uncertainty remains across attempts; a later successful receipt reports `duplicate_possible()`. Retry cancellation after a provider attempt starts is uncertain, while dropping the public future produces no failure value. Retain the EventId and reconcile the business operation. RetryPolicy budgets are soft and do not promise universal hard cancellation of in-flight Redis commands.
+
+Neither the Redis provider nor Redis Streams deduplicates publication by EventId. Deduplicate business effects in consumers. Facade dead-letter forwarding and source `XACK` are separate operations; successful forwarding followed by failed acknowledgement can produce another logical dead-letter. Unknown forwarding results retain durable source work and stop the source subscription under the same uncertainty gate.
 
 ## 7. Diagnose common failures
 
