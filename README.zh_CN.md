@@ -9,6 +9,8 @@
 
 `qubit-event-bus-redis` 为使用 Qubit Event Bus 的应用提供同步和运行时中立的异步 Redis Streams provider。服务可以把编码后的事件写入 Redis，再由另一个进程通过同一套类型化 facade 消费并确认；provider 通过 SPI 自动发现。
 
+当前工作树的 Cargo 版本仍为 `0.4.0`，其中限额及错误处理的变更尚未发布。升级前请阅读指南的迁移说明；本文不表示已经发布 `0.5.0`。
+
 ## 安装
 
 ```toml
@@ -18,40 +20,20 @@ qubit-event-bus-redis = "0.5"
 qubit-spi = "0.13"
 ```
 
+这里的版本写法用于展示依赖关系。使用本文所述未发布变更时，应将 provider 依赖改为指向当前 checkout 的 `path`；上游 facade 尚未发布的快照也应使用已核对的本地路径。仓库 example 命令运行当前源码，不能据此推断 registry 版本可用。
+
 默认启用 `sync`、`async` 和 `discovery`。也可以关闭默认 feature，只选择部署所需的 `sync` 或 `async`。`XAUTOCLAIM` 恢复需要 Redis 6.2 或更高版本。
 
 ## 快速开始
 
 订单服务可以在启动阶段选择 Redis provider。应用像普通依赖一样链接该 crate；provider 会提交到两个 registry inventory，业务代码仍通过 `qubit-event-bus` facade 发布和订阅类型化消息。
 
-```rust,no_run
-use std::sync::Arc;
-
-use qubit_event_bus::codec::CodecRegistry;
-use qubit_event_bus::facade::EventBusFacadeConfig;
-use qubit_event_bus::registry::EventBusConfig;
-use qubit_event_bus::registry::EventBusRegistry;
-use qubit_event_bus::model::ProviderOptions;
-use qubit_event_bus_redis as _;
-use qubit_spi::ProviderSelection;
-
-fn create_order_bus() -> Result<qubit_event_bus::EventBus, Box<dyn std::error::Error>> {
-    let registry = EventBusRegistry::discover()?;
-    let options: ProviderOptions = [
-        ("redis.url".into(), "redis://127.0.0.1/".into()),
-        ("redis.namespace".into(), "orders".into()),
-    ].into();
-    let config = EventBusConfig::default()
-        .with_selection(ProviderSelection::named("redis-streams")?)
-        .with_provider_options(options)
-        .with_facade_config(EventBusFacadeConfig::new().with_codec_registry(Arc::new(CodecRegistry::new())));
-    Ok(registry.create(&config)?)
-}
+```bash
+cargo run --example sync_orders -- redis://127.0.0.1/ local-sync-orders
+cargo run --example async_orders -- redis://127.0.0.1/ local-async-orders
 ```
 
-使用 Redis 的 payload 类型时，需要在 facade 的 `CodecRegistry` 中注册对应的 `EventCodec<T>`。之后即可调用常规的类型化 `publish` 和 `subscribe`。完整 codec、consumer、异步及 Sentinel 示例见[用户指南](doc/user_guide.zh_CN.md)。
-
-仓库提供可运行的发布、消费和关闭示例：`sync_orders`、`async_orders` 与 `sentinel_orders`。可用 `cargo run --example <名称> -- <Redis URL> <namespace>` 启动；Sentinel 示例从环境变量读取 `REDIS_SENTINEL_NODES` 和 `REDIS_SENTINEL_SERVICE_NAME`。具体命令和生命周期说明见用户指南。
+启动 Redis 后，两个示例会注册 UTF-8 codec、发布订单事件、消费并关闭资源。同步示例等待 handler 完成；异步示例打印已消费事件后等待 Enter。[用户指南](doc/user_guide.zh_CN.md) 提供可直接复制的 Markdown 程序、自动发现与手动注册所需的准确 features，以及 Sentinel 配置。
 
 ## 为什么需要这个项目
 
@@ -63,7 +45,7 @@ event-bus SPI 允许应用更换传输实现，而不改业务 handler。Redis S
 - 支持 Redis 单实例与 Sentinel 主节点发现；异步调用可由 Smol 或 Tokio host 驱动，应用无需启动 Tokio。
 - 使用带版本的 stream 记录保存编码 payload、headers、事件 ID、content type，以及可选 schema 和排序元数据。
 - 支持消费组、`Accept`/`Reject` 确认、通过待处理列表执行 `Retry`，并用 `XAUTOCLAIM` 恢复消息。
-- 限制每个订阅的未结算活跃投递数，并原子隔离格式错误的 stream 记录；Redis 订阅必须显式使用 `Durable`。
+- 提供 client 级命令/receiver 准入限制、有限连接/命令等待、payload/wire 字节限制，以及每个订阅的未结算投递上限；格式错误或超限的历史记录通过单条 Lua 脚本隔离；Redis 订阅必须显式使用 `Durable`。
 - 测试会通过 Docker 启动隔离的 Redis 6.2、Redis 7 和 Sentinel 服务。
 
 Redis 使用至少一次投递，业务 handler 应能处理重复事件。`XADD` 成功只表示 Redis 接受了命令，不能证明记录已经 fsync 或完成处理。默认不会裁剪 stream。设置 `redis.stream_maxlen_approx` 可显式启用 Redis `XADD MAXLEN ~ N`；近似保留策略可能删除尚未消费或仍处于 pending 的历史记录并产生缺口，仅在业务接受这类损失时使用。当前不支持 Cluster、native/delayed delivery、TLS 配置或死信策略。stream 和消费组由运维人员负责清理。
@@ -73,6 +55,9 @@ provider 对单条 wire、payload 和解码后的 headers 字符串设置有限�
 ## 延伸阅读
 
 - [用户指南](doc/user_guide.zh_CN.md)（[English](doc/user_guide.md)）
+- [设计与迁移边界](doc/design.zh_CN.md)（[English](doc/design.md)）
+- [工作负载基准](doc/connection-reuse-benchmark.zh_CN.md)（[English](doc/connection-reuse-benchmark.md)）
+- [覆盖率评估](doc/coverage-review.zh_CN.md)（[English](doc/coverage-review.md)）
 - [API 文档](https://docs.rs/qubit-event-bus-redis)
 - [English README](README.md)
 

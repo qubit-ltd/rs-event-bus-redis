@@ -9,6 +9,8 @@
 
 `qubit-event-bus-redis` adds synchronous and runtime-neutral asynchronous Redis Streams providers to applications using Qubit Event Bus. A service can publish an encoded event to Redis, then let another process consume and acknowledge it through the same typed facade and automatically discovered SPI provider.
 
+This working tree retains Cargo version `0.4.0` and includes unreleased changes to limits and error handling. See the guide’s migration notes before upgrading; no `0.5.0` release is implied.
+
 ## Installation
 
 ```toml
@@ -18,40 +20,20 @@ qubit-event-bus-redis = "0.5"
 qubit-spi = "0.13"
 ```
 
+The version dependency form shows the package relationships. To use the unreleased changes described here, replace the provider dependency with a `path` to this checkout; use the verified local facade path for an unpublished upstream snapshot too. Repository example commands run current sources and do not establish registry availability.
+
 The default features enable `sync`, `async`, and `discovery`. Disable defaults and select `sync` or `async` to keep a deployment's feature set smaller. Redis 6.2 or later is required for `XAUTOCLAIM` recovery.
 
 ## Quick Start
 
 An order service can select the Redis provider during startup. The provider is linked as an ordinary dependency and submitted to both registry inventories; the application still uses the `qubit-event-bus` facade for typed publish and subscribe calls.
 
-```rust,no_run
-use std::sync::Arc;
-
-use qubit_event_bus::codec::CodecRegistry;
-use qubit_event_bus::facade::EventBusFacadeConfig;
-use qubit_event_bus::registry::EventBusConfig;
-use qubit_event_bus::registry::EventBusRegistry;
-use qubit_event_bus::model::ProviderOptions;
-use qubit_event_bus_redis as _;
-use qubit_spi::ProviderSelection;
-
-fn create_order_bus() -> Result<qubit_event_bus::EventBus, Box<dyn std::error::Error>> {
-    let registry = EventBusRegistry::discover()?;
-    let options: ProviderOptions = [
-        ("redis.url".into(), "redis://127.0.0.1/".into()),
-        ("redis.namespace".into(), "orders".into()),
-    ].into();
-    let config = EventBusConfig::default()
-        .with_selection(ProviderSelection::named("redis-streams")?)
-        .with_provider_options(options)
-        .with_facade_config(EventBusFacadeConfig::new().with_codec_registry(Arc::new(CodecRegistry::new())));
-    Ok(registry.create(&config)?)
-}
+```bash
+cargo run --example sync_orders -- redis://127.0.0.1/ local-sync-orders
+cargo run --example async_orders -- redis://127.0.0.1/ local-async-orders
 ```
 
-Register an `EventCodec<T>` in the facade's `CodecRegistry` for every payload type used with Redis. Then call the normal typed `publish` and `subscribe` APIs. See the [user guide](doc/user_guide.md) for a complete codec, consumer, async, and Sentinel example.
-
-Runnable publish-consume-close examples are available as `sync_orders`, `async_orders`, and `sentinel_orders`. Run them with `cargo run --example <name> -- <redis-url> <namespace>`; the Sentinel example reads `REDIS_SENTINEL_NODES` and `REDIS_SENTINEL_SERVICE_NAME` from the environment. See the user guide for exact commands and lifecycle notes.
+With a running Redis service, each example registers a UTF-8 codec, publishes an order event, consumes it, and closes its resources. The sync example waits for handler completion; the async example asks for Enter after printing its consumed event. The [user guide](doc/user_guide.md) includes directly copyable Markdown programs, exact features for discovery/manual registration, and Sentinel setup.
 
 ## Why This Project Exists
 
@@ -63,7 +45,7 @@ The event-bus SPI lets an application choose a transport without changing busine
 - Redis standalone and Sentinel master discovery; async calls can be driven by Smol or Tokio hosts without requiring the application to start Tokio.
 - Stream records with a versioned encoded payload, headers, event ID, content type, and optional schema and ordering metadata.
 - Consumer groups, `Accept`/`Reject` acknowledgement, `Retry` through the pending entries list, and recovery with `XAUTOCLAIM`.
-- Bounded per-subscription unsettled delivery tracking and atomic quarantine for malformed stream records; Redis subscriptions must explicitly use `Durable`.
+- Per-client command/receiver admission, finite connection/command waits, payload/wire byte limits, and per-subscription unsettled tracking; malformed or oversized history is quarantined with a serialized Lua script; Redis subscriptions must explicitly use `Durable`.
 - Test fixtures that start isolated Redis 6.2, Redis 7, and Sentinel services in Docker.
 
 Redis delivery is at least once. Handlers should tolerate duplicates. A successful `XADD` means Redis accepted the command; it does not prove the record was fsynced or processed. By default streams are not trimmed. Set `redis.stream_maxlen_approx` to opt into Redis `XADD MAXLEN ~ N`; this approximate retention can remove unread or pending history and cause gaps, so use it only when that loss policy is acceptable. The provider does not implement Cluster, native/delayed delivery, TLS configuration, or a dead-letter policy. Stream and group cleanup is an operator task.
@@ -73,6 +55,9 @@ Each wire record, payload, and decoded headers string has a finite provider limi
 ## Learn More
 
 - [User guide](doc/user_guide.md) ([简体中文](doc/user_guide.zh_CN.md))
+- [Design and migration boundaries](doc/design.md) ([简体中文](doc/design.zh_CN.md))
+- [Workload benchmark](doc/connection-reuse-benchmark.md) ([简体中文](doc/connection-reuse-benchmark.zh_CN.md))
+- [Coverage review](doc/coverage-review.md) ([简体中文](doc/coverage-review.zh_CN.md))
 - [API documentation](https://docs.rs/qubit-event-bus-redis)
 - [简体中文 README](README.zh_CN.md)
 

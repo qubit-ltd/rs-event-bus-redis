@@ -15,7 +15,9 @@ qubit-event-bus-redis = "0.5"
 qubit-spi = "0.13"
 ```
 
-如果应用只使用一种 SPI，可设置 `default-features = false`，再选择 `features = ["sync"]` 或 `features = ["async"]`。`async` 可以使用 Redis client 的 Smol adapter，也能在 Tokio host 中运行。crate 不会启动 Tokio runtime 或生成订阅 worker；异步 facade 的 runner 由应用现有 executor 驱动。
+这里的版本写法用于展示依赖关系。使用本文所述未发布变更时，应将 provider 依赖改为指向当前 checkout 的 `path`；上游 facade 尚未发布的快照也应使用已核对的本地路径。仓库 example 命令运行当前源码，不能据此推断 registry 版本可用。
+
+采用自动发现时，provider 关闭默认 feature 后应选择 `["sync", "discovery"]` 或 `["async", "discovery"]`，facade 也须启用 `discovery`。采用手动注册时，provider 只需 `["sync"]` 或 `["async"]`，facade 无须启用发现功能。`async` 可以使用 Redis client 的 Smol adapter，也能在 Tokio host 中运行。crate 不会启动 Tokio runtime 或生成订阅 worker；异步 facade 的 runner 由应用现有 executor 驱动。
 
 Redis 需要 6.2 或更高版本。集成测试使用 Docker 启动隔离的 Redis 6.2、Redis 7 和 Sentinel 进程。
 
@@ -27,8 +29,10 @@ Redis 保存编码字节，因此通过 facade 使用的每种 payload 类型都
 ```rust
 use std::sync::Arc;
 
+use qubit_event_bus::codec::CodecRegistry;
 use qubit_event_bus::codec::EventCodec;
 use qubit_event_bus::error::CodecError;
+use qubit_event_bus::facade::EventBusFacadeConfig;
 use qubit_event_bus::model::ContentType;
 use qubit_event_bus::model::SchemaId;
 use qubit_event_bus::spi::EncodedPayload;
@@ -57,59 +61,81 @@ impl EventCodec<String> for Utf8Codec {
         })
     }
 }
+
+fn facade_config() -> Result<EventBusFacadeConfig, Box<dyn std::error::Error>> {
+    let mut codecs = CodecRegistry::new();
+    codecs.register::<String>(Arc::new(Utf8Codec(ContentType::new("text/plain")?)));
+    Ok(EventBusFacadeConfig::new().with_codec_registry(Arc::new(codecs)))
+}
 ```
 <!-- END DOC UTF8 CODEC -->
 
-创建 `CodecRegistry` 并注册 `Utf8Codec`，再将它放入 `EventBusFacadeConfig`。缺少 codec 时，facade 会在访问 Redis 前拒绝该类型的发布或订阅。
+这是可复用的模块片段。将它放到下方任一 `main` 之前的 `src/main.rs` 中；完整程序通过 `facade_config()` 注册 codec，不依赖读者补充隐藏对象。创建 `CodecRegistry` 并注册 `Utf8Codec`，再将它放入 `EventBusFacadeConfig`。缺少 codec 时，facade 会在访问 Redis 前拒绝该类型的发布或订阅。
 
 ## 3. 使用同步 SPI 发布和消费
 
 服务配置只需要 Redis URL 和 namespace。显式选择 `redis-streams`，避免 registry fallback 意外使用其他 provider。
 
-```rust,no_run
-use std::sync::Arc;
+<!-- doc-example: sync-discovery -->
+```rust
+use std::time::Duration;
 
-use qubit_event_bus::codec::CodecRegistry;
-use qubit_event_bus::facade::EventBusFacadeConfig;
-use qubit_event_bus::model::{ContentType, ConsumerGroup, PublishRequest, StartPosition, SubscribeRequest, SubscriptionDurability, Topic};
-use qubit_event_bus::registry::{EventBusConfig, EventBusRegistry};
+use qubit_event_bus::SubscriberId;
+use qubit_event_bus::model::ConsumerGroup;
 use qubit_event_bus::model::ProviderOptions;
+use qubit_event_bus::model::PublishRequest;
+use qubit_event_bus::model::StartPosition;
+use qubit_event_bus::model::SubscribeRequest;
+use qubit_event_bus::model::SubscriptionDurability;
+use qubit_event_bus::model::Topic;
+use qubit_event_bus::registry::EventBusConfig;
+use qubit_event_bus::spi::ShutdownMode;
+use qubit_event_bus::spi::ShutdownOutcome;
+use qubit_event_bus_redis as _;
 use qubit_spi::ProviderSelection;
+use qubit_event_bus::EventBusRegistry;
 
-fn start_service() -> Result<(), Box<dyn std::error::Error>> {
-    let mut codecs = CodecRegistry::new();
-    codecs.register::<String>(Arc::new(Utf8Codec(ContentType::new("text/plain")?)));
-    let facade = EventBusFacadeConfig::new().with_codec_registry(Arc::new(codecs));
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1/".into());
+    let namespace = std::env::var("REDIS_NAMESPACE").unwrap_or_else(|_| "orders-guide-sync".into());
     let options: ProviderOptions = [
-        ("redis.url".into(), "redis://127.0.0.1/".into()),
-        ("redis.namespace".into(), "orders".into()),
+        ("redis.url".into(), url),
+        ("redis.namespace".into(), namespace),
     ].into();
     let config = EventBusConfig::default()
         .with_selection(ProviderSelection::named("redis-streams")?)
         .with_provider_options(options)
-        .with_facade_config(facade);
+        .with_facade_config(facade_config()?);
     let registry = EventBusRegistry::discover()?;
     let bus = registry.create(&config)?;
     let topic = Topic::<String>::new("orders.created")?;
-    bus.publish(PublishRequest::new(topic.clone(), "order-42".to_owned())?)?;
-
-    let request = SubscribeRequest::builder()
-        .subscriber_id(qubit_event_bus::SubscriberId::new("billing-worker")?)
-        .topic(topic)
-        .consumer_group(ConsumerGroup::new("billing")?)
-        .durability(SubscriptionDurability::Durable)
-        .start_position(StartPosition::Earliest)
-        .build()?;
-    let subscription = bus.subscribe(request, |delivery| {
-        println!("process order event: {}", delivery.payload());
-    })?;
-    // 长期运行的服务保留 subscription，并在关闭时取消它。
-    drop(subscription);
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let subscription = bus.subscribe(
+        SubscribeRequest::builder()
+            .subscriber_id(SubscriberId::new("billing-worker")?)
+            .topic(topic.clone())
+            .consumer_group(ConsumerGroup::new("billing")?)
+            .durability(SubscriptionDurability::Durable)
+            .start_position(StartPosition::Earliest)
+            .build()?,
+        move |delivery| {
+            sender.send(delivery.payload().clone())
+                .map_err(|source| qubit_event_bus::DeliveryError::Handler { source: Box::new(source) })
+        },
+    )?;
+    bus.publish(PublishRequest::new(topic, "order-42".to_owned())?)?;
+    let received = receiver.recv_timeout(Duration::from_secs(5))?;
+    println!("consumed order event: {received}");
+    subscription.cancel()?;
+    let report = bus.shutdown(ShutdownMode::Graceful { timeout: Duration::from_secs(5) })?;
+    if report.outcome != ShutdownOutcome::Complete {
+        return Err("graceful shutdown did not complete".into());
+    }
     Ok(())
 }
 ```
 
-示例先写入事件，再创建 `Earliest` 消费组，因此新组能读取已保留的记录。生产服务若使用 `New`，应先注册 consumer，再依赖后续发布的事件。Redis Streams 只接受 `Durable` 订阅；`Ephemeral` 会在执行 Redis I/O 前被拒绝。服务断连或关闭订阅时，group 会保留，未结算记录仍在 pending entries list 中。Redis 只在首次创建 group 时应用起始位置。
+此入门练习先安装账单 handler，再发布 `order-42`，等待 handler 发出通知，打印 `consumed order event: order-42`，最后取消订阅并关闭总线。生产 handler 应完成并提交应用自己的账单变更后才返回 `Ok(())`；打印和 channel 通知只是练习的验收信号。总线和订阅应由服务的启动、关闭模块持有。新建的 `Earliest` 消费组也能读取已保留的记录。生产服务若使用 `New`，应先注册 consumer，再依赖后续发布的事件。Redis Streams 只接受 `Durable` 订阅；`Ephemeral` 会在执行 Redis I/O 前被拒绝。服务断连或关闭订阅时，group 会保留，未结算记录仍在 pending entries list 中。Redis 只在首次创建 group 时应用起始位置。
 
 限额内格式错误的版本 1 wire 记录会被原子复制到按 group 隔离的 stream（`qubit:poison:*`），并从源 group 确认。隔离记录包含 `source_stream`、`source_id`、`group`、稳定的 `reason`、原始 `wire` 字节和 `wire_missing`。隔离成功后返回 `Gap`，不会把 payload 放进错误信息。可用 `XRANGE <quarantine-key> - +` 检查记录，并用 `XLEN`、`XPENDING` 监控隔离流、源 stream 和 pending 数量。provider 不会自动裁剪这些 stream；运维应按保留策略归档或清理隔离数据。
 
@@ -123,39 +149,121 @@ fn start_service() -> Result<(), Box<dyn std::error::Error>> {
 
 每个 Redis 订阅都会获得随机生成的 `qubit:consumer:<uuid>` consumer 名称。facade 的本地订阅 ID 不具备全局唯一性，因此不会用作 Redis consumer 身份。进程重启后会创建新 consumer；旧名称对应的 pending 记录仍保留在 group 中，达到 `redis.claim_min_idle_ms` 后可由 `XAUTOCLAIM` 恢复。
 
-当前 wire 格式支持版本 1。合法数字版本但不等于 1 时，provider 返回 kind 为 `unsupported_wire_version` 的非重试 `SpiError::Operation`，源记录保留在 pending 中，不会隔离或确认。应停止旧 consumer，部署支持该版本的 provider，再重启同一 group 的 consumer。使用 `XPENDING` 检查旧记录是否已恢复并结算。不要为了消除错误而直接清除 pending 记录。无效 JSON、缺失或非数字版本，以及格式错误的版本 1 记录仍会进入隔离流。
+当前 wire 格式支持版本 1。wire 未超过 `redis.max_wire_bytes` 且版本为不等于 1 的合法 `u64` 整数时，provider 返回 kind 为 `unsupported_wire_version` 的非重试 `SpiError::Operation`，源记录保留在 pending 中，不会隔离或确认。应停止旧 consumer，部署支持该版本的 provider，再重启同一 group 的 consumer。使用 `XPENDING` 检查旧记录是否已恢复并结算。不要为了消除错误而直接清除 pending 记录。无效 JSON、缺失或非数字版本，以及格式错误的版本 1 记录仍会进入隔离流。
 
-恢复工作按时间间隔分批限额：claim 和本 consumer pending 扫描各最多执行 8 条命令；tombstone 修复每轮最多执行一次 `XPENDING`、四次 `XRANGE` 和四次隔离 `EVAL`。扫描游标会跨间隔和 receive 调用保留。`Duration::ZERO` 执行有界非阻塞恢复（最多一次 claim、一次本 consumer pending 查询和一次新消息查询），跳过 tombstone 扫描，并允许隔离一条格式错误的记录。`Duration::MAX` 表示无限等待，内部以 1 秒的有限 Redis 阻塞读取循环实现。有限超时限制额外恢复往返次数和 Redis `BLOCK` 时长，但不能强制取消已经开始执行的单条网络命令。
+恢复工作按时间间隔分批限额：claim 和本 consumer pending 扫描各最多执行 8 条命令；tombstone 修复每轮最多执行一次 `XPENDING`、四次 `XRANGE` 和四次隔离 `EVAL`。扫描游标会跨间隔和 receive 调用保留。`Duration::ZERO` 执行有界非阻塞恢复（最多一次 claim、一次本 consumer pending 查询和一次新消息查询），跳过 tombstone 扫描，并允许隔离一条格式错误的记录。`Duration::MAX` 表示无限等待，内部以 1 秒的有限 Redis 阻塞读取循环实现。有限超时是调度截止时间，限制继续发起恢复工作及实际 Redis `BLOCK` 时长。零超时表示不在 Redis 等待新消息，不表示网络操作必须在 0ms 内完成。阻塞读取的响应等待预算为实际 `BLOCK` 加 `redis.command_timeout_ms`。同步 socket 超时只是每次 I/O 等待的软限制；DNS、多地址尝试、setup 各阶段及持续小包传输都可能使整体调用超出预算。已经发出的命令不会被强制停止。
 
 ## 4. 驱动异步 SPI
 
 异步 bus 的创建、发布、订阅和接收操作都会返回 runtime-neutral future。小型示例用 `futures_lite::future::block_on` 驱动；长期运行的服务通常会在现有 executor 上轮询这些 future，并让订阅与其他服务工作并发运行。
 
-```rust,no_run
-use futures_lite::future::block_on;
-use qubit_event_bus::registry::{AsyncEventBusRegistry, EventBusConfig};
-use qubit_event_bus::model::{ProviderOptions, PublishRequest, Topic};
-use qubit_spi::ProviderSelection;
+<!-- doc-example: async-discovery -->
+```rust
+use std::time::Duration;
 
-fn publish_async() -> Result<(), Box<dyn std::error::Error>> {
-    block_on(async {
+use qubit_event_bus::SubscriberId;
+use qubit_event_bus::model::ConsumerGroup;
+use qubit_event_bus::model::ProviderOptions;
+use qubit_event_bus::model::PublishRequest;
+use qubit_event_bus::model::StartPosition;
+use qubit_event_bus::model::SubscribeRequest;
+use qubit_event_bus::model::SubscriptionDurability;
+use qubit_event_bus::model::Topic;
+use qubit_event_bus::registry::EventBusConfig;
+use qubit_event_bus::spi::ShutdownMode;
+use qubit_event_bus::spi::ShutdownOutcome;
+use qubit_event_bus_redis as _;
+use qubit_spi::ProviderSelection;
+use futures_channel::oneshot;
+use futures_lite::future;
+use qubit_event_bus::AsyncEventBusRegistry;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    future::block_on(async {
+        let url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1/".into());
+        let namespace = std::env::var("REDIS_NAMESPACE").unwrap_or_else(|_| "orders-guide-async".into());
         let options: ProviderOptions = [
-            ("redis.url".into(), "redis://127.0.0.1/".into()),
-            ("redis.namespace".into(), "orders".into()),
+            ("redis.url".into(), url),
+            ("redis.namespace".into(), namespace),
         ].into();
         let config = EventBusConfig::default()
             .with_selection(ProviderSelection::named("redis-streams")?)
-            .with_provider_options(options);
+            .with_provider_options(options)
+            .with_facade_config(facade_config()?);
         let registry = AsyncEventBusRegistry::discover()?;
         let bus = registry.create(&config).await?;
         let topic = Topic::<String>::new("orders.created")?;
+        let mut subscription = bus.subscribe(
+            SubscribeRequest::builder()
+                .subscriber_id(SubscriberId::new("billing-worker")?)
+                .topic(topic.clone())
+                .consumer_group(ConsumerGroup::new("billing")?)
+                .durability(SubscriptionDurability::Durable)
+                .start_position(StartPosition::Earliest)
+                .build()?,
+        ).await?;
         bus.publish(PublishRequest::new(topic, "order-43".to_owned())?).await?;
+        let (sender, received) = oneshot::channel();
+        let sender = Arc::new(std::sync::Mutex::new(Some(sender)));
+        let run = subscription.run(move |delivery| {
+            let sender = Arc::clone(&sender);
+            let value = delivery.payload().clone();
+            async move {
+                println!("consumed order event: {value}");
+                if let Some(sender) = sender.lock().expect("notification lock").take() {
+                    let _ = sender.send(());
+                }
+                Ok::<(), qubit_event_bus::DeliveryError>(())
+            }
+        });
+        let stop = async {
+            received.await?;
+            // Keep polling the runner while shutdown drains the handler and settlement.
+            let report = bus.shutdown(ShutdownMode::Graceful { timeout: Duration::from_secs(5) }).await?;
+            if report.outcome != ShutdownOutcome::Complete {
+                return Err("graceful shutdown did not complete".into());
+            }
+            Ok::<(), Box<dyn std::error::Error>>(())
+        };
+        let (run_result, stop_result) = future::zip(run, stop).await;
+        run_result?;
+        stop_result?;
+        subscription.close().await?;
         Ok(())
     })
 }
 ```
 
-异步 facade 也要配置与同步示例相同的 codec registry。`AsyncSubscription::run` 由调用方驱动，future 应由应用 executor 轮询。丢弃尚未完成的 `receive` future 不会确认消息。Redis 会把记录留在消费组的 pending entries list；当前 consumer 后续可以再次读取，其他 consumer 则可在 idle threshold 到期后通过 `XAUTOCLAIM` 接管。
+将 codec 片段放在此 `main` 之前，并添加依赖 `futures-lite = "2"` 和 `futures-channel = "0.3"`。程序打印 `consumed order event: order-43`；handler 完成后发出关闭通知，继续并行轮询 runner 与优雅关闭，直到两者结束。异步 facade 同样通过 codec registry 编解码 payload。`AsyncSubscription::run` 由调用方驱动，future 应由应用 executor 轮询。丢弃尚未完成的 `receive` future 不会确认消息。Redis 会把记录留在消费组的 pending entries list；当前 consumer 后续可以再次读取，其他 consumer 则可在 idle threshold 到期后通过 `XAUTOCLAIM` 接管。
+
+
+## 关闭自动发现后手动注册
+
+以下为模块片段。使用对应片段替换同步或异步程序中的 registry import，并将 `...Registry::discover()?` 改为 `order_registry()?`；保留 codec 和其余 main。文档测试会关闭 provider 默认 feature，在不启用 `discovery` 的独立项目中编译并运行两种变体。
+
+<!-- doc-example: sync-manual -->
+```rust
+use qubit_event_bus::EventBusRegistry;
+use qubit_event_bus_redis::sync::RedisEventBusProvider;
+
+fn order_registry() -> Result<EventBusRegistry, Box<dyn std::error::Error>> {
+    let registry = EventBusRegistry::new();
+    registry.register(RedisEventBusProvider)?;
+    Ok(registry)
+}
+```
+
+<!-- doc-example: async-manual -->
+```rust
+use qubit_event_bus::AsyncEventBusRegistry;
+use qubit_event_bus_redis::r#async::AsyncRedisEventBusProvider;
+
+fn order_registry() -> Result<AsyncEventBusRegistry, Box<dyn std::error::Error>> {
+    let registry = AsyncEventBusRegistry::new();
+    registry.register(AsyncRedisEventBusProvider)?;
+    Ok(registry)
+}
+```
 
 ## 可运行示例
 
@@ -187,12 +295,12 @@ REDIS_SENTINEL_SERVICE_NAME=qeventbus \
 | `redis.stream_maxlen_approx` | 未设置 | 可选的近似 stream 条目上限，通过 `XADD MAXLEN ~` 应用；可能裁剪未读或 pending 记录。 |
 | `redis.username_env` | 未设置 | 保存 Redis ACL username 的环境变量名称。 |
 | `redis.password_env` | 未设置 | 保存 Redis ACL password 的环境变量名称。 |
-| `redis.sentinel.nodes` | 未设置 | Sentinel 的逗号分隔 `host:port` 地址。 |
+| `redis.sentinel.nodes` | 未设置 | 最多 16 个逗号分隔的 Sentinel `host:port` 地址；拒绝空 host 和非法或零端口。 |
 | `redis.sentinel.service_name` | 未设置 | Sentinel master 服务名；与 `nodes` 一起配置。 |
 | `redis.sentinel.username_env` | 未设置 | 保存 Sentinel ACL username 的环境变量名称。 |
 | `redis.sentinel.password_env` | 未设置 | 保存 Sentinel ACL password 的环境变量名称。 |
 
-启用 Sentinel 时，`redis.sentinel.nodes` 和 `redis.sentinel.service_name` 必须同时设置。此时 Redis URL 仍须是合法 URL，但不会用于查找 master。Sentinel 连接不进入 standalone 空闲池，故障转移后的命令仍会经 Sentinel 解析新 master。同步 standalone 短命令最多复用 `redis.max_idle_connections` 条空闲连接；异步 standalone 发布与结算共享 multiplexed 命令连接。接收器使用独立连接，阻塞读取不会占用短命令通道。
+启用 Sentinel 时，`redis.sentinel.nodes` 和 `redis.sentinel.service_name` 必须同时设置。此时 Redis URL 仍须是合法 URL，但不会用于查找 master。Sentinel 连接不进入 standalone 空闲池；解析通过有等待预算的 `SENTINEL get-master-addr-by-name` 和候选节点 `ROLE` 探测完成。每次解析对最多 16 个节点各尝试一次，优先使用上次成功的节点。同步 standalone 短命令最多复用 `redis.max_idle_connections` 条空闲连接；异步 standalone 发布与结算共享 multiplexed 命令连接。并发冷启动共用一次初始化；代际检查防止旧连接的失败清除新连接。Sentinel 路径不缓存 master socket；ROLE 验证后仍可能发生切换并拒绝命令，provider 不会透明重放 XADD。接收器使用独立连接，阻塞读取不会占用短命令通道。
 
 凭据应放在服务运行环境中。provider options 保存环境变量名称；`RedisEventBusConfig` 的 `Debug` 会隐藏 URL 和凭据。不要把明文密钥放入 provider options、URL、命令行参数或日志。此版本没有启用 `redis-rs` 的 TLS 参数；增加 TLS 支持前，应将 Redis 流量限制在可信网络内。
 
@@ -216,7 +324,7 @@ Redis 提供至少一次投递，因此 handler 应具备幂等性。如果 hand
 
 `StartPosition::New` 会在当前 stream 尾部创建 group；`Earliest` 会从 `0-0` 开始创建新 group；`At("milliseconds-sequence")` 使用 Redis Stream ID。group 一旦创建，读取游标由 Redis 保留；之后更改请求的 start position 不会重置现有 group。
 
-provider 不会裁剪 stream 或删除 group。应监控 Redis 内存和 stream 增长。删除 stream 或 group 前，先停止 consumer 并决定如何处理 pending 消息；删除 pending record 可能导致 `ReceiveOutcome::Gap`。Redis persistence 和 replication 配置需符合业务恢复目标：`Accepted` 不代表已 fsync，Sentinel 切换也可能丢失尚未复制的写入。
+未设置 `redis.stream_maxlen_approx` 时，provider 不会裁剪 stream，也不会自动删除 group。应监控 Redis 内存和 stream 增长。删除 stream 或 group 前，先停止 consumer 并决定如何处理 pending 消息；删除 pending record 可能导致 `ReceiveOutcome::Gap`。Redis persistence 和 replication 配置需符合业务恢复目标：`Accepted` 不代表已 fsync，Sentinel 切换也可能丢失尚未复制的写入。
 
 ### 限制单条记录并恢复不兼容的 consumer
 
@@ -243,15 +351,67 @@ provider 和 Redis Streams 都不按 EventId 自动去重，消费者应保证�
 - **Provider 拒绝配置：** 检查 `redis.url`、`redis.namespace`、成对配置的 Sentinel 参数，以及环境变量名称引用的凭据是否存在。URL 中的明文凭据会被拒绝，以免出现在诊断信息中。
 - **Consumer 没收到旧事件：** 使用新 group 并设置 `StartPosition::Earliest`；已有 group 会沿用 Redis 中保存的游标。
 - **消息接管太早或太晚：** 根据 handler 的正常和最坏执行时长调整 `redis.claim_min_idle_ms`。系统仍可能重复投递。
-- **Stream 维护后出现 gap：** 检查运维侧的 `XDEL`/`XTRIM` 操作及 pending entries，再决定后续清理策略。gap 表示 Redis 中已找不到至少一条 pending record。
+- **出现 gap：** 检查运维侧的 `XDEL`/`XTRIM` 操作及 pending entries，并查看隔离流的 `reason` 和 `source_id`，再决定后续清理策略。Gap 既可能表示 pending 源记录缺失（tombstone），也可能表示隔离成功；隔离会复制并确认条目，源记录仍可能保留在 stream 中。
 - **Sentinel 无法连接：** 检查 Sentinel 地址、master 服务名、ACL 环境变量引用、quorum，以及应用主机能否访问 Sentinel 返回的 Redis master 地址。
 
-此版本没有内建 PEL 或重连指标。运维时可以使用 Redis `XPENDING`、`XINFO STREAM` 和 `XINFO GROUPS`，并在应用 telemetry 中记录 provider 错误和 publish receipt ID。
+此版本没有内建 PEL 或重连指标。运维时可以使用 Redis `XPENDING`、`XINFO STREAM`、`XINFO GROUPS` 和 `XINFO CONSUMERS`，并在应用 telemetry 中记录 provider 错误和 publish receipt ID。
 
 ## 8. 正常关闭
 
-同步总线优雅关闭前，先取消订阅。异步总线关闭前，停止或关闭 `AsyncSubscription`，然后等待 `AsyncEventBus::shutdown`。立即关闭会让未结算消息留在 Redis；关闭本身不代表消息已接受。
+同步总线由关闭模块调用 `subscription.cancel()` 等待 worker 结束，再关闭总线。异步总线可以像上方程序一样，继续轮询 runner，并同时执行优雅关闭以等待已准入 handler 及结算完成，最后关闭句柄。关闭 receiver 或选择立即关闭时，未结算消息可能留在 Redis；关闭本身不代表消息已接受。
+
+## 9. 失败后怎样决定是否重试
+
+应用通过 `SpiError::Operation` 的 `operation`、`kind` 和 `retryable` 判断失败类别。错误只提供稳定、脱敏的诊断，不暴露 Redis 原始文本。重试提示限定允许重试的上下文，不会触发透明重放，也不保证处理无重复。
+
+| 失败 | kind / retryable | 应用处理 |
+| --- | --- | --- |
+| 发布已发送，但回复丢失、超时或畸形 | `outcome_unknown` / `Some(false)` | Redis 可能已保存事件。按业务 ID 核对；只有明确接受重复风险时才重新发布。provider 不透明重放 XADD。 |
+| 接收/claim 已发送，结果未知 | `outcome_unknown` / `Some(true)` | 本次不会虚构投递。继续 receive，通过本 consumer PEL 或 claim 恢复。 |
+| XACK 已发送，结果未知 | `outcome_unknown` / `Some(true)` | 对同一 token 重试原来的 `Accept` 或 `Reject`；不能改为 `Retry` 或另一终结决定。 |
+| 隔离脚本结果未知或可能部分执行 | `outcome_unknown` / `Some(false)` | 检查源记录、PEL、owner 及隔离副本，不盲目重放脚本。 |
+| I/O 前准入名额耗尽 | `resource_limit` / `Some(true)` | 退避、降低并发或关闭闲置 receiver；被拒绝的操作没有发送业务命令。 |
+| 发布超过 payload / wire 限额 | `payload_too_large` / `wire_too_large`，`Some(false)` | 缩小编码 payload/元数据，或有意提高配置；不会发送 XADD。 |
+| wire 限额内的未知版本 | `unsupported_wire_version` / `Some(false)` | 升级 reader，保留 PEL，直到兼容 reader 完成结算。 |
+
+SPI 的结算状态只约束当前 receiver/token：
+
+| 状态 | 允许的请求 | 结果 |
+| --- | --- | --- |
+| Open | `Retry` | 释放本地活跃名额，保留 Redis PEL，在本地提交 Retry。 |
+| Open | `Accept` / `Reject` | 先取得连接与命令名额，在 XACK 可能发送前固定意图。 |
+| AckPending(原意图) | 仅原来的终结意图 | 重发 XACK；合法整数回复 0 或 1 后完成本地结算。 |
+| Applied(原意图) | 仅原意图 | 幂等成功，不执行 Redis I/O。 |
+| AckPending / Applied | 冲突意图 | 返回无效结算 token，不发送 Redis 命令。 |
+
+尚未 poll 的 settle future，以及连接获取失败或取消，都保留 Open。首个 XACK 尝试若收到完整的 **Redis 顶层拒绝回复**，可以恢复 Open，因为该命令未执行。断线、超时、畸形回复、嵌套 RESP 错误或取消会保留 AckPending；只要此前已有结果未知的尝试，后续明确拒绝也不能重新开放 token。未知 ACK 保留活跃名额，直到相同意图完成或 receiver 关闭。意图没有跨进程持久化，重启后不能据此推断历史，也不提供跨 consumer fencing。
+
+## 10. 怎样限制资源和消息尺寸
+
+同一个已创建 SPI 实例及其共享 Arc clone 共用预算。每次新的 `create_configured` 调用都会建立独立 client 预算；不同 registry 选出的实例不会共用整个进程或 Redis server 的全局准入限制。`max_concurrent_commands` 约束已准入的短操作；`max_active_receivers` 在 setup 前取得名额并约束活跃 receiver。失败、取消会释放本地命令名额；close/drop 释放 receiver 名额，token 继续存活也不会占用该名额。取消**不保证** multiplexed driver 停止请求，也不保证 Redis server 上已无在途命令。provider 不维护无界准入等待队列；专用阻塞读取与共享短命令通道分开。
+
+活跃 receiver 上限不保证并发 poll 的每轮恢复工作都能准入；claim 等短恢复命令也共用命令预算。高并发 poll 应处理可重试的 `resource_limit`，可限制 poll 并发或调整预算；提高预算不保证消除拒绝，也不是服务端连接硬总上限。
+
+`max_idle_connections` 默认为 8，且不得超过 `max_concurrent_commands`。短操作上限设为 8 以下时，应同时降低空闲保留数，例如同时设置 `redis.max_concurrent_commands=4` 和 `redis.max_idle_connections=4`；只降低前者会被配置校验拒绝。新增字节、时间、数量配置均为有限范围内的正十进制数，不能用 0 关闭限制。
+
+默认 1MiB payload 限额按编码字节计量，8MiB wire 限额计入完整 JSON，包括 byte-array 膨胀和元数据。payload 合法不代表任意 headers 都能装入 wire。发布先检查 payload，再通过有界 sink 写出 JSON；中间 headers JSON 也受限。provider 编码借用调用方元数据和 payload，分配的 headers/wire String 都有界；直接调用 `WireFields::from_outbound` 转换不会应用这些 provider 配置限额。接收先检查借用的原始 wire，再解析 UTF-8/JSON 和版本 1 payload。历史超限记录以 `oversized_wire`/`oversized_payload` 隔离并返回 Gap；wire 限额优先于未知版本处理。版本 1 拒绝第 128 层 JSON 容器，包括被忽略的字段；未知版本在 v1 字段形状和深度校验前返回。
+
+限制约束 provider 后续序列化、解析的追加分配。RESP 字节已由 Redis client 库接收，因此它不是抵御恶意超大 RESP bulk 的硬隔离边界，也不是整个进程的绝对内存上限。应结合可信 Redis/网络、server `maxmemory`、应用并发及源 stream/隔离流保留策略管理资源。隔离流没有自动保留上限。
+
+## 11. 怎样维护消费组和处理下游通知
+
+通过 `XINFO CONSUMERS`、`XPENDING`、`XINFO GROUPS`、源 stream/隔离流 `XLEN` 和隔离流 `XRANGE` 检查处理停滞。随机 consumer 名称会随重启积累，provider 不自动执行 `DELCONSUMER`。清理旧 consumer 前须停止对应实例，确认其 PEL 已清空并满足业务保留要求。close 不确认消息、不删除 group 或 stream。未读历史被裁剪时可能静默丢失；pending 历史被裁剪可能产生 Gap，且无法重建 payload。
+
+Redis 持久化和复制由部署负责。`Accepted` 只证明 XADD 被接受，不证明 fsync、副本持久化、handler 成功或账单提交。在新 observer 连接执行 `WAIT`，不能为另一条 provider 连接的写入提供 fencing 保证。Sentinel 提升可能丢失尚未复制的写入或消费组状态；恢复验收须检查实际游标、pending ID 和 owner。
+
+对 `qubit-task` 通知，consumer 应按 `TaskId` 去重并保留最高 `state_version`，忽略重复、旧版本通知，并查询任务服务取得权威状态。通知失败不回滚已提交的任务或业务状态，通知可能丢失、迟到或重复。provider 和任务通知集成都不提供事务性 outbox。业务事务必须与持久通知一起提交时，应用须实现 outbox 及其发布器。
+
+## 12. 如何迁移到当前未发布工作树
+
+Cargo 仍报告 `0.4.0`，尚未将这些变更发布为 `0.5.0`。升级前检查新增默认超时、64 个短操作/256 个 receiver 的准入上限，以及 1MiB/8MiB 的 payload/wire 限额。同步调整相关的 idle/concurrency 配置，处理新的 provider 错误变体和 SPI kind，并去掉“所有传输错误都能安全重发 publish”或“未知 ACK 后可换决定”的假设。receive timeout 仍是调度预算，不是同步硬截止时间。wire 保持版本 1，已存储的 v1 格式不变；历史超限记录按配置隔离。手动注册与自动发现使用上文所示的不同 feature 集。
+
+参阅[设计说明](design.zh_CN.md)、[覆盖率证据](coverage-review.zh_CN.md)和[工作负载基准](connection-reuse-benchmark.zh_CN.md)。性能、覆盖率须以各自测量为证；本指南没有宣称新的吞吐量或最终覆盖率结果。
 
 ## 支持范围
 
-支持 Redis 单实例和 Sentinel、Redis 6.2+、编码 payload、消费组、accept/retry/reject 结算，以及从 Redis stream position 重放。暂不支持 Cluster、native payload、顺序保证、延迟投递、自动裁剪/删除、死信路由和 TLS 配置。provider 不承诺恰好一次处理。
+支持 Redis 单实例和 Sentinel、Redis 6.2+、编码 payload、消费组、accept/retry/reject 结算，以及从 Redis stream position 重放。暂不支持 Cluster、native payload、顺序保证、延迟投递、自动生命周期清理、死信路由和 TLS 配置。provider 不承诺恰好一次处理。

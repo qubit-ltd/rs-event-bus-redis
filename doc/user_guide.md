@@ -15,7 +15,9 @@ qubit-event-bus-redis = "0.5"
 qubit-spi = "0.13"
 ```
 
-Use `default-features = false` and choose `features = ["sync"]` or `features = ["async"]` if the application only uses one SPI. `async` supports the Redis client's Smol adapter and Tokio host detection. The crate does not start a Tokio runtime or spawn a subscription worker; the facade's async runner is polled by the application's executor.
+The version dependency form shows the package relationships. To use the unreleased changes described here, replace the provider dependency with a `path` to this checkout; use the verified local facade path for an unpublished upstream snapshot too. Repository example commands run current sources and do not establish registry availability.
+
+For discovery, disable defaults and select `features = ["sync", "discovery"]` or `["async", "discovery"]` on the provider, and enable facade `discovery`. For manual registration, provider `features = ["sync"]` or `["async"]` suffice; facade discovery is unnecessary. `async` enables the Redis client's Smol adapter; its futures can be polled by a Smol or Tokio host. The crate does not start a Tokio runtime or spawn a subscription worker; the facade's async runner is polled by the application's executor.
 
 Redis 6.2 or newer is required. The integration tests use Docker to start isolated Redis 6.2, Redis 7, and Sentinel processes.
 
@@ -27,8 +29,10 @@ Redis stores encoded bytes, so every payload type used by the facade needs an `E
 ```rust
 use std::sync::Arc;
 
+use qubit_event_bus::codec::CodecRegistry;
 use qubit_event_bus::codec::EventCodec;
 use qubit_event_bus::error::CodecError;
+use qubit_event_bus::facade::EventBusFacadeConfig;
 use qubit_event_bus::model::ContentType;
 use qubit_event_bus::model::SchemaId;
 use qubit_event_bus::spi::EncodedPayload;
@@ -57,59 +61,81 @@ impl EventCodec<String> for Utf8Codec {
         })
     }
 }
+
+fn facade_config() -> Result<EventBusFacadeConfig, Box<dyn std::error::Error>> {
+    let mut codecs = CodecRegistry::new();
+    codecs.register::<String>(Arc::new(Utf8Codec(ContentType::new("text/plain")?)));
+    Ok(EventBusFacadeConfig::new().with_codec_registry(Arc::new(codecs)))
+}
 ```
 <!-- END DOC UTF8 CODEC -->
 
-Create a `CodecRegistry`, register `Utf8Codec`, and place it in `EventBusFacadeConfig`. If the codec is missing, the facade rejects a typed publish or subscription before calling Redis.
+This is a reusable module fragment. Paste it above either `main` below in `src/main.rs`; the complete programs call `facade_config()` and need no hidden objects. Create a `CodecRegistry`, register `Utf8Codec`, and place it in `EventBusFacadeConfig`. If the codec is missing, the facade rejects a typed publish or subscription before calling Redis.
 
 ## 3. Publish and consume synchronously
 
 The service config contains only a Redis URL and a namespace. Select `redis-streams` explicitly so registry fallback cannot silently choose another backend.
 
-```rust,no_run
-use std::sync::Arc;
+<!-- doc-example: sync-discovery -->
+```rust
+use std::time::Duration;
 
-use qubit_event_bus::codec::CodecRegistry;
-use qubit_event_bus::facade::EventBusFacadeConfig;
-use qubit_event_bus::model::{ContentType, ConsumerGroup, PublishRequest, StartPosition, SubscribeRequest, SubscriptionDurability, Topic};
-use qubit_event_bus::registry::{EventBusConfig, EventBusRegistry};
+use qubit_event_bus::SubscriberId;
+use qubit_event_bus::model::ConsumerGroup;
 use qubit_event_bus::model::ProviderOptions;
+use qubit_event_bus::model::PublishRequest;
+use qubit_event_bus::model::StartPosition;
+use qubit_event_bus::model::SubscribeRequest;
+use qubit_event_bus::model::SubscriptionDurability;
+use qubit_event_bus::model::Topic;
+use qubit_event_bus::registry::EventBusConfig;
+use qubit_event_bus::spi::ShutdownMode;
+use qubit_event_bus::spi::ShutdownOutcome;
+use qubit_event_bus_redis as _;
 use qubit_spi::ProviderSelection;
+use qubit_event_bus::EventBusRegistry;
 
-fn start_service() -> Result<(), Box<dyn std::error::Error>> {
-    let mut codecs = CodecRegistry::new();
-    codecs.register::<String>(Arc::new(Utf8Codec(ContentType::new("text/plain")?)));
-    let facade = EventBusFacadeConfig::new().with_codec_registry(Arc::new(codecs));
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1/".into());
+    let namespace = std::env::var("REDIS_NAMESPACE").unwrap_or_else(|_| "orders-guide-sync".into());
     let options: ProviderOptions = [
-        ("redis.url".into(), "redis://127.0.0.1/".into()),
-        ("redis.namespace".into(), "orders".into()),
+        ("redis.url".into(), url),
+        ("redis.namespace".into(), namespace),
     ].into();
     let config = EventBusConfig::default()
         .with_selection(ProviderSelection::named("redis-streams")?)
         .with_provider_options(options)
-        .with_facade_config(facade);
+        .with_facade_config(facade_config()?);
     let registry = EventBusRegistry::discover()?;
     let bus = registry.create(&config)?;
     let topic = Topic::<String>::new("orders.created")?;
-    bus.publish(PublishRequest::new(topic.clone(), "order-42".to_owned())?)?;
-
-    let request = SubscribeRequest::builder()
-        .subscriber_id(qubit_event_bus::SubscriberId::new("billing-worker")?)
-        .topic(topic)
-        .consumer_group(ConsumerGroup::new("billing")?)
-        .durability(SubscriptionDurability::Durable)
-        .start_position(StartPosition::Earliest)
-        .build()?;
-    let subscription = bus.subscribe(request, |delivery| {
-        println!("process order event: {}", delivery.payload());
-    })?;
-    // A long-running service retains `subscription` and cancels it during shutdown.
-    drop(subscription);
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let subscription = bus.subscribe(
+        SubscribeRequest::builder()
+            .subscriber_id(SubscriberId::new("billing-worker")?)
+            .topic(topic.clone())
+            .consumer_group(ConsumerGroup::new("billing")?)
+            .durability(SubscriptionDurability::Durable)
+            .start_position(StartPosition::Earliest)
+            .build()?,
+        move |delivery| {
+            sender.send(delivery.payload().clone())
+                .map_err(|source| qubit_event_bus::DeliveryError::Handler { source: Box::new(source) })
+        },
+    )?;
+    bus.publish(PublishRequest::new(topic, "order-42".to_owned())?)?;
+    let received = receiver.recv_timeout(Duration::from_secs(5))?;
+    println!("consumed order event: {received}");
+    subscription.cancel()?;
+    let report = bus.shutdown(ShutdownMode::Graceful { timeout: Duration::from_secs(5) })?;
+    if report.outcome != ShutdownOutcome::Complete {
+        return Err("graceful shutdown did not complete".into());
+    }
     Ok(())
 }
 ```
 
-The example writes before it creates the `Earliest` group, so that group can read the retained event. In production, register the consumer before relying on `New`, which starts after the group is created. Redis Streams accepts only `Durable` subscriptions; `Ephemeral` is rejected before Redis I/O. Groups remain when a service disconnects, and closing a subscription leaves unsettled records pending. Redis applies the start position only when it first creates a group.
+This entry exercise installs the billing handler, publishes `order-42`, waits for its notification, and prints `consumed order event: order-42` before cancelling and shutting down. A production handler must commit the application’s billing change before returning `Ok(())`; printing or notifying a channel is only the exercise’s observable result. Keep the bus and subscription in the application startup/shutdown owner. A new `Earliest` group can also read retained events. In production, register the consumer before relying on `New`, which starts after the group is created. Redis Streams accepts only `Durable` subscriptions; `Ephemeral` is rejected before Redis I/O. Groups remain when a service disconnects, and closing a subscription leaves unsettled records pending. Redis applies the start position only when it first creates a group.
 
 Malformed in-limit version 1 wire records are copied atomically to a group-specific quarantine stream (`qubit:poison:*`) and acknowledged from the source group. The quarantine record stores `source_stream`, `source_id`, `group`, a stable `reason`, the original `wire` bytes, and `wire_missing`. A successful quarantine is returned as a `Gap` without exposing payload bytes. Inspect entries with `XRANGE <quarantine-key> - +`; monitor quarantine length, source stream length, and pending entries with `XLEN` and `XPENDING`. The provider never trims these streams automatically, so operators should archive or remove quarantine records under their retention policy.
 
@@ -125,39 +151,121 @@ With a `ConsumerGroup` set, instances using the same namespace, topic, and group
 
 Each Redis subscription receives a random `qubit:consumer:<uuid>` consumer name. The facade's local subscription ID is not globally unique and is not used as the Redis consumer identity. A process restart creates a new consumer; pending records belonging to the old name remain in the group and can be recovered by `XAUTOCLAIM` after `redis.claim_min_idle_ms`.
 
-The wire format currently supports version 1. A valid numeric version other than 1 returns a non-retryable `SpiError::Operation` with kind `unsupported_wire_version`; the source entry stays pending and is not quarantined or acknowledged. Stop old consumers, deploy a provider that understands the new version, then restart consumers in the same group. Verify recovery with `XPENDING` until the old entry is settled. Do not clear the pending entry to silence the error. Invalid JSON, missing or non-numeric versions, and malformed version 1 records continue to use quarantine.
+The wire format currently supports version 1. Within `redis.max_wire_bytes`, a valid unsigned 64-bit integer version other than 1 returns a non-retryable `SpiError::Operation` with kind `unsupported_wire_version`; the source entry stays pending and is not quarantined or acknowledged. Stop old consumers, deploy a provider that understands the new version, then restart consumers in the same group. Verify recovery with `XPENDING` until the old entry is settled. Do not clear the pending entry to silence the error. Invalid JSON, missing or non-numeric versions, and malformed version 1 records continue to use quarantine.
 
-Recovery work is bounded per interval: claim and own-pending scans have separate eight-command limits, while tombstone repair is capped at one `XPENDING`, four `XRANGE`, and four total quarantine `EVAL` commands. Scan cursors continue across intervals and calls. `Duration::ZERO` performs bounded non-blocking recovery (at most one claim, one own-pending read, and one new-message read), skips tombstone scans, and may quarantine one malformed entry. `Duration::MAX` waits indefinitely by issuing finite one-second Redis blocking reads. A finite timeout limits extra recovery round trips and the Redis `BLOCK` duration; it cannot forcibly cancel a single network command already in progress.
+Recovery work is bounded per interval: claim and own-pending scans have separate eight-command limits, while tombstone repair is capped at one `XPENDING`, four `XRANGE`, and four total quarantine `EVAL` commands. Scan cursors continue across intervals and calls. `Duration::ZERO` performs bounded non-blocking recovery (at most one claim, one own-pending read, and one new-message read), skips tombstone scans, and may quarantine one malformed entry. `Duration::MAX` waits indefinitely by issuing finite one-second Redis blocking reads. A finite timeout is a scheduling deadline: it limits new recovery work and actual Redis `BLOCK` duration. Zero means no server-side waiting for new records, not a zero-millisecond network deadline. Blocking response waits use actual `BLOCK` plus `redis.command_timeout_ms`. Sync socket waits are soft per-I/O limits: DNS, multiple addresses, setup stages and sustained small packets can exceed the whole-call budget. An in-flight command is not forcibly stopped.
 
 ## 4. Run the asynchronous SPI
 
 Async bus creation, publish, subscribe, and receive return runtime-neutral futures. The example uses `futures_lite::future::block_on` for a small application. A long-running service usually polls these futures on its existing executor and runs the subscription concurrently with other service work.
 
-```rust,no_run
-use futures_lite::future::block_on;
-use qubit_event_bus::registry::{AsyncEventBusRegistry, EventBusConfig};
-use qubit_event_bus::model::{ProviderOptions, PublishRequest, Topic};
-use qubit_spi::ProviderSelection;
+<!-- doc-example: async-discovery -->
+```rust
+use std::time::Duration;
 
-fn publish_async() -> Result<(), Box<dyn std::error::Error>> {
-    block_on(async {
+use qubit_event_bus::SubscriberId;
+use qubit_event_bus::model::ConsumerGroup;
+use qubit_event_bus::model::ProviderOptions;
+use qubit_event_bus::model::PublishRequest;
+use qubit_event_bus::model::StartPosition;
+use qubit_event_bus::model::SubscribeRequest;
+use qubit_event_bus::model::SubscriptionDurability;
+use qubit_event_bus::model::Topic;
+use qubit_event_bus::registry::EventBusConfig;
+use qubit_event_bus::spi::ShutdownMode;
+use qubit_event_bus::spi::ShutdownOutcome;
+use qubit_event_bus_redis as _;
+use qubit_spi::ProviderSelection;
+use futures_channel::oneshot;
+use futures_lite::future;
+use qubit_event_bus::AsyncEventBusRegistry;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    future::block_on(async {
+        let url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1/".into());
+        let namespace = std::env::var("REDIS_NAMESPACE").unwrap_or_else(|_| "orders-guide-async".into());
         let options: ProviderOptions = [
-            ("redis.url".into(), "redis://127.0.0.1/".into()),
-            ("redis.namespace".into(), "orders".into()),
+            ("redis.url".into(), url),
+            ("redis.namespace".into(), namespace),
         ].into();
         let config = EventBusConfig::default()
             .with_selection(ProviderSelection::named("redis-streams")?)
-            .with_provider_options(options);
+            .with_provider_options(options)
+            .with_facade_config(facade_config()?);
         let registry = AsyncEventBusRegistry::discover()?;
         let bus = registry.create(&config).await?;
         let topic = Topic::<String>::new("orders.created")?;
+        let mut subscription = bus.subscribe(
+            SubscribeRequest::builder()
+                .subscriber_id(SubscriberId::new("billing-worker")?)
+                .topic(topic.clone())
+                .consumer_group(ConsumerGroup::new("billing")?)
+                .durability(SubscriptionDurability::Durable)
+                .start_position(StartPosition::Earliest)
+                .build()?,
+        ).await?;
         bus.publish(PublishRequest::new(topic, "order-43".to_owned())?).await?;
+        let (sender, received) = oneshot::channel();
+        let sender = Arc::new(std::sync::Mutex::new(Some(sender)));
+        let run = subscription.run(move |delivery| {
+            let sender = Arc::clone(&sender);
+            let value = delivery.payload().clone();
+            async move {
+                println!("consumed order event: {value}");
+                if let Some(sender) = sender.lock().expect("notification lock").take() {
+                    let _ = sender.send(());
+                }
+                Ok::<(), qubit_event_bus::DeliveryError>(())
+            }
+        });
+        let stop = async {
+            received.await?;
+            // Keep polling the runner while shutdown drains the handler and settlement.
+            let report = bus.shutdown(ShutdownMode::Graceful { timeout: Duration::from_secs(5) }).await?;
+            if report.outcome != ShutdownOutcome::Complete {
+                return Err("graceful shutdown did not complete".into());
+            }
+            Ok::<(), Box<dyn std::error::Error>>(())
+        };
+        let (run_result, stop_result) = future::zip(run, stop).await;
+        run_result?;
+        stop_result?;
+        subscription.close().await?;
         Ok(())
     })
 }
 ```
 
-The async facade also requires the same codec registry as the sync example. `AsyncSubscription::run` is caller driven; its future belongs on the application's executor. Dropping a pending `receive` future does not acknowledge the record. Redis keeps it in the consumer group's pending entries list, and a later receive by that consumer or `XAUTOCLAIM` by another consumer can recover it.
+Paste the codec fragment above this `main`; add `futures-lite = "2"` and `futures-channel = "0.3"` to the dependencies. This program prints `consumed order event: order-43`, signals shutdown after the handler finishes, and polls the runner alongside graceful shutdown until both complete. The async facade uses the same codec registry as the sync example. `AsyncSubscription::run` is caller driven; its future belongs on the application's executor. Dropping a pending `receive` future does not acknowledge the record. Redis keeps it in the consumer group's pending entries list, and a later receive by that consumer or `XAUTOCLAIM` by another consumer can recover it.
+
+
+## Manual registration without discovery
+
+The following are module fragments. In the sync or async program, replace the registry import and `...Registry::discover()?` with the matching fragment and `order_registry()?`; retain the codec and the rest of the main. The documentation tests compile and run each variant with provider defaults disabled and without `discovery`.
+
+<!-- doc-example: sync-manual -->
+```rust
+use qubit_event_bus::EventBusRegistry;
+use qubit_event_bus_redis::sync::RedisEventBusProvider;
+
+fn order_registry() -> Result<EventBusRegistry, Box<dyn std::error::Error>> {
+    let registry = EventBusRegistry::new();
+    registry.register(RedisEventBusProvider)?;
+    Ok(registry)
+}
+```
+
+<!-- doc-example: async-manual -->
+```rust
+use qubit_event_bus::AsyncEventBusRegistry;
+use qubit_event_bus_redis::r#async::AsyncRedisEventBusProvider;
+
+fn order_registry() -> Result<AsyncEventBusRegistry, Box<dyn std::error::Error>> {
+    let registry = AsyncEventBusRegistry::new();
+    registry.register(AsyncRedisEventBusProvider)?;
+    Ok(registry)
+}
+```
 
 ## Runnable examples
 
@@ -189,12 +297,12 @@ The async example runs until it consumes the event, then waits for Enter before 
 | `redis.stream_maxlen_approx` | unset | Optional approximate stream entry limit applied with `XADD MAXLEN ~`; may trim unread or pending records. |
 | `redis.username_env` | unset | Environment variable name containing the Redis ACL username. |
 | `redis.password_env` | unset | Environment variable name containing the Redis ACL password. |
-| `redis.sentinel.nodes` | unset | Comma-separated Sentinel `host:port` endpoints. |
+| `redis.sentinel.nodes` | unset | At most sixteen comma-separated Sentinel `host:port` endpoints; empty hosts and invalid/zero ports are rejected. |
 | `redis.sentinel.service_name` | unset | Sentinel master service name; required with `nodes`. |
 | `redis.sentinel.username_env` | unset | Environment variable name containing the Sentinel ACL username. |
 | `redis.sentinel.password_env` | unset | Environment variable name containing the Sentinel ACL password. |
 
-When Sentinel is configured, both `redis.sentinel.nodes` and `redis.sentinel.service_name` are required. The URL remains syntactically valid but is not used to locate the master. Sentinel connections are resolved through the Sentinel client instead of entering the standalone idle pool, so commands after failover can resolve the promoted master. Standalone synchronous short commands reuse up to `redis.max_idle_connections` idle connections; async standalone publish and settlement share a multiplexed command connection. Receiver reads use their own connection so blocking reads do not occupy the short-command path.
+When Sentinel is configured, both `redis.sentinel.nodes` and `redis.sentinel.service_name` are required. The URL remains syntactically valid but is not used to locate the master. Sentinel connections use bounded `SENTINEL get-master-addr-by-name` and candidate `ROLE` probes instead of entering the standalone idle pool, so commands after failover can resolve the promoted master. Standalone synchronous short commands reuse up to `redis.max_idle_connections` idle connections; async standalone publish and settlement share a multiplexed command connection. Concurrent cold initialization is single-flight; generation checks prevent an old failed lease from invalidating its replacement. Sentinel paths do not cache those master sockets, try each of at most sixteen nodes once per resolution, and prefer the last successful node. A failover after ROLE can still reject a command; XADD is never transparently replayed. Receiver reads use their own connection so blocking reads do not occupy the short-command path.
 
 Credentials belong in the service environment. Provider options contain environment variable names, and `RedisEventBusConfig` redacts its URL and credentials from `Debug`. Do not put raw secrets in provider options, URLs, command-line arguments, or logs. This release does not enable TLS options in `redis-rs`; keep Redis traffic on a trusted network until TLS support is added.
 
@@ -216,7 +324,7 @@ Each subscription stops receiving new entries while its unsettled count reaches 
 
 `StartPosition::New` creates a group at the current stream tail. `Earliest` starts a new group at `0-0`. `At("milliseconds-sequence")` supplies a Redis Stream ID. Once a group exists, Redis retains its cursor, so changing the requested start position does not rewind that existing group.
 
-The provider does not trim streams or delete groups. Monitor Redis memory and stream growth. Before deleting a stream or group, stop consumers and decide how to handle every pending event; deleting pending records can produce `ReceiveOutcome::Gap`. Configure Redis persistence and replication to match the application's recovery objectives: `Accepted` does not mean fsynced, and Sentinel replication can lose writes that were not replicated before promotion.
+Without `redis.stream_maxlen_approx`, the provider does not trim streams; it never deletes groups automatically. Monitor Redis memory and stream growth. Before deleting a stream or group, stop consumers and decide how to handle every pending event; deleting pending records can produce `ReceiveOutcome::Gap`. Configure Redis persistence and replication to match the application's recovery objectives: `Accepted` does not mean fsynced, and Sentinel replication can lose writes that were not replicated before promotion.
 
 ### Bound one record and recover an incompatible consumer
 
@@ -243,15 +351,67 @@ Neither the Redis provider nor Redis Streams deduplicates publication by EventId
 - **Provider rejects configuration:** check `redis.url`, `redis.namespace`, paired Sentinel settings, and whether referenced credential environment variables exist. Inline URL credentials are rejected to avoid leaking them in diagnostics.
 - **Consumer does not receive old events:** use a new group with `StartPosition::Earliest`; an existing group keeps its stored Redis cursor.
 - **A consumer takes over too soon or too late:** adjust `redis.claim_min_idle_ms` to the handler's normal and worst-case duration. Re-delivery remains possible.
-- **A gap appears after stream maintenance:** inspect operator `XDEL`/`XTRIM` activity and pending entries before further cleanup. A gap means Redis no longer has one or more pending records.
+- **A gap appears:** inspect operator `XDEL`/`XTRIM` activity and pending entries, and check the quarantine stream's `reason` and `source_id` before further cleanup. Gap can report a missing pending source record (tombstone) or successful quarantine; quarantine copies and acknowledges the entry, so the source record may still remain in the stream.
 - **Sentinel cannot connect:** verify each endpoint, master service name, ACL environment references, quorum, and that the Redis master addresses returned by Sentinel are reachable from the application host.
 
-There are no built-in PEL or reconnect metrics in this release. Use Redis `XPENDING`, `XINFO STREAM`, and `XINFO GROUPS` during operations, and record provider errors and publish receipt IDs in application telemetry.
+There are no built-in PEL or reconnect metrics in this provider. Use Redis `XPENDING`, `XINFO STREAM`, `XINFO GROUPS`, and `XINFO CONSUMERS` during operations, and record provider errors and publish receipt IDs in application telemetry.
 
 ## 8. Stop cleanly
 
-Cancel synchronous subscriptions before graceful bus shutdown. For async buses, close or stop the `AsyncSubscription`, then await `AsyncEventBus::shutdown`. Immediate close leaves unsettled stream entries in Redis; it never implies acceptance.
+For synchronous buses, call `subscription.cancel()` from the shutdown owner to wait for the worker, then shut down the bus. For asynchronous buses, keep the runner polled while graceful bus shutdown drains admitted handlers and their settlement, as in the program above, and then close the handle. Closing a receiver or choosing immediate shutdown can leave unsettled entries in Redis; close itself never implies acceptance.
+
+## 9. Decide whether a failed operation can be retried
+
+Inspect `SpiError::Operation` fields (`operation`, `kind`, `retryable`) in your application error handling. Errors use stable, secret-safe categories rather than raw Redis diagnostics. Retry hints describe the permitted context; they do not cause transport replay or guarantee duplicate-free processing.
+
+| Failure | Kind / retryable | Application response |
+| --- | --- | --- |
+| Publish sent, but reply lost, timeout or malformed | `outcome_unknown` / `Some(false)` | Redis may have stored the event. Reconcile by business ID; republish only when the application explicitly accepts duplicate risk. No transparent XADD replay. |
+| Receive/claim sent, but outcome unknown | `outcome_unknown` / `Some(true)` | No invented delivery is returned. Resume receive and recover through own PEL or claim. |
+| XACK sent, but outcome unknown | `outcome_unknown` / `Some(true)` | Retry the same token with its original `Accept` or `Reject` intent; never switch to `Retry` or the other terminal intent. |
+| Quarantine script unknown/possibly partial | `outcome_unknown` / `Some(false)` | Inspect source/PEL/owner and existing copies; do not blindly replay the script. |
+| Admission exhausted before I/O | `resource_limit` / `Some(true)` | Back off, lower concurrency or close unused receivers; no business command was sent by this rejected operation. |
+| Publish exceeds raw payload / full wire limit | `payload_too_large` / `wire_too_large`, `Some(false)` | Reduce the encoded payload/metadata or deliberately raise limits. No XADD is sent. |
+| Unknown version within wire limit | `unsupported_wire_version` / `Some(false)` | Upgrade the reader; keep the PEL entry until a compatible reader settles it. |
+
+At the SPI boundary, settlement follows this receiver/token-local state machine:
+
+| Progress | Allowed request | Result |
+| --- | --- | --- |
+| Open | `Retry` | Release the local active slot; leave Redis PEL intact; commit Retry locally. |
+| Open | `Accept` / `Reject` | Acquire connection and command admission first, then fix intent immediately before XACK can be sent. |
+| AckPending(original) | Original terminal intent only | Repeat XACK; a valid integer reply 0 or 1 completes local settlement. |
+| Applied(original) | Original intent only | Idempotent success without Redis I/O. |
+| AckPending / Applied | Any conflicting intent | Invalid settlement token; no Redis command. |
+
+An unpolled settle future or failed/cancelled connection acquisition leaves Open. A first XACK attempt receiving a complete **top-level Redis rejection** can return to Open because that command was not applied. Socket failure, timeout, malformed replies, nested RESP errors, or cancellation preserve AckPending; once any earlier attempt was unknown, a later explicit rejection cannot reopen the token. Unknown ACK keeps its active slot until the same intent completes or the receiver closes. This constraint does not survive a process restart as persisted intent, and it provides no cross-consumer fencing.
+
+## 10. Bound resources and message sizes
+
+Limits apply to the same created SPI instance and its shared Arc clones. Each new `create_configured` call creates an independent client budget; instances selected through different registries do not share a Redis-global or process-global budget. `max_concurrent_commands` bounds admitted short operations; `max_active_receivers` bounds live receivers and is acquired before setup. Failure/cancellation releases local command admission; close/drop releases receiver admission even if tokens remain alive. Cancellation does **not** guarantee that a Redis multiplexed driver stops or that the server command is no longer in flight. There is no unbounded provider admission queue. Dedicated blocking reads remain separate from the shared short-command channel.
+
+The active-receiver cap does not guarantee that every concurrent recovery poll is admitted: claim and other short recovery commands share the command budget. Handle retryable `resource_limit` during concurrent polling by limiting poll concurrency or tuning the budgets; larger budgets do not guarantee admission or impose a hard server connection cap.
+
+`max_idle_connections` defaults to 8 and cannot exceed `max_concurrent_commands`. When configuring fewer than eight short operations, lower idle retention too, for example `redis.max_concurrent_commands=4` with `redis.max_idle_connections=4`; setting only the former rejects configuration. New byte/time/count options are positive decimal values with finite ranges; zero does not disable their limits.
+
+The default 1MiB payload limit measures encoded bytes, while the 8MiB wire limit measures all JSON, including byte-array expansion and metadata. Large headers can exceed wire even when the payload is legal. Publish checks payload first and writes JSON through a bounded sink, including intermediate headers JSON. Provider encoding borrows caller-owned metadata and payload; its allocated headers/wire strings are bounded. Direct `WireFields::from_outbound` conversion does not apply these configured provider limits. Receive checks borrowed raw wire before UTF-8/JSON, then typed version-1 payload size. Historical oversized wire/payload becomes quarantine reason `oversized_wire`/`oversized_payload` and a Gap; the wire limit takes precedence even over an otherwise unknown version. Version 1 rejects the 128th nested JSON container, including ignored fields, while unknown versions return before v1 shape/depth validation.
+
+These checks bound the provider’s additional serialization/parsing allocations. Redis RESP bytes have already been received by the client library: this is not a hard isolation boundary against maliciously large RESP bulk values, nor an absolute process memory cap. Combine a trusted Redis/network boundary with server `maxmemory`, application concurrency, and source/quarantine retention. Quarantine has no automatic retention limit.
+
+## 11. Operate groups and downstream notifications
+
+Use `XINFO CONSUMERS`, `XPENDING`, `XINFO GROUPS`, stream/quarantine `XLEN`, and quarantine `XRANGE` to inspect stalled processing. Random consumer names accumulate across restarts; the provider does not automatically run `DELCONSUMER`. Remove an obsolete consumer only after stopping it, checking its PEL is empty and satisfying business retention requirements. Close does not ACK work, delete groups, or delete streams. Trimmed unread history can be silently lost; trimmed pending history may produce Gap and cannot reconstruct payloads.
+
+Redis persistence and replication are deployment responsibilities. `Accepted` proves acceptance of XADD, not fsync, replica durability, handler success, or billing commit. A `WAIT` issued on a new observer connection does not fence writes sent through a different provider connection. Sentinel promotion may lose unreplicated writes or group state; inspect actual cursor, pending IDs and owners when validating recovery.
+
+With `qubit-task` notifications, consumers should deduplicate by `TaskId` and retain the highest `state_version`, ignoring duplicate/older notifications and querying the task service for authoritative state. Notification failure does not roll back committed task/business state; notifications can be lost, delayed or repeated. The provider and task notification integration do not supply a transactional outbox. If a business transaction must commit together with a durable notification, implement that outbox and its publisher in the application.
+
+## 12. Migrate to this unreleased tree
+
+Cargo still reports `0.4.0`; these changes have not been published as `0.5.0`. Review the new default timeouts, 64-operation/256-receiver caps, and 1MiB/8MiB payload/wire limits before upgrading. Tune both related idle/concurrency settings, handle new provider error variants and stable SPI kinds, and remove assumptions that every transport error permits safe publish replay or that unknown ACK permits a new disposition. Receive timeouts remain scheduling budgets rather than hard synchronous deadlines. Wire stays at version 1, so stored v1 records keep their format; old oversized records follow the configured quarantine policy. Manual registration and discovery use different feature sets as shown above.
+
+See [design](design.md), [coverage evidence](coverage-review.md), and [workload benchmark](connection-reuse-benchmark.md). Performance/coverage results require their own measured evidence; this guide makes no new throughput or final coverage claim.
 
 ## Support boundary
 
-Supported: Redis standalone and Sentinel, Redis 6.2+, encoded payloads, consumer groups, accepted/retry/reject settlement, and replay from Redis stream positions. Not supported: Cluster, native payloads, ordering guarantees, delayed delivery, automatic trimming/deletion, dead-letter routing, and TLS configuration. The provider does not claim exactly-once processing.
+Supported: Redis standalone and Sentinel, Redis 6.2+, encoded payloads, consumer groups, accepted/retry/reject settlement, and replay from Redis stream positions. Not supported: Cluster, native payloads, ordering guarantees, delayed delivery, automatic lifecycle cleanup, dead-letter routing, and TLS configuration. The provider does not claim exactly-once processing.
