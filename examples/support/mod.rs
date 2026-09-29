@@ -5,9 +5,10 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-//! Redis proxy that can hold a reply after the upstream command has completed.
+//! Shared setup for the runnable provider examples.
 
-#[path = "controlled_redis/gate.rs"]
-mod gate;
-#[path = "controlled_redis/proxy.rs"]
-pub mod proxy;
+mod internal;
+mod utf8_codec;
+
+pub(crate) use internal::facade_config;
+pub(crate) use internal::provider_options;

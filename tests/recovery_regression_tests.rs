@@ -635,7 +635,7 @@ fn sync_quarantine_failure_keeps_source_pending() -> Result<(), Box<dyn std::err
     assert!(matches!(
         error,
         qubit_event_bus::error::SpiError::Operation {
-            retryable: Some(true),
+            retryable: Some(false),
             ..
         }
     ));
@@ -695,7 +695,7 @@ fn async_quarantine_failure_keeps_source_pending() -> Result<(), Box<dyn std::er
         assert!(matches!(
             error,
             qubit_event_bus::error::SpiError::Operation {
-                retryable: Some(true),
+                retryable: Some(false),
                 ..
             }
         ));
@@ -1314,7 +1314,7 @@ fn async_xack_failure_keeps_token_retryable_and_slot_occupied() -> Result<(), Bo
 
 #[cfg(feature = "sync")]
 #[test]
-fn sync_claim_command_failure_is_reported_as_retryable() -> Result<(), Box<dyn std::error::Error>> {
+fn sync_removed_group_error_has_unknown_retryability() -> Result<(), Box<dyn std::error::Error>> {
     let server = RedisServer::start()?;
     let bus = sync_bus(&server, "claim-error-sync", 2)?;
     let key = stream_key("claim-error-sync", "events");
@@ -1337,17 +1337,14 @@ fn sync_claim_command_failure_is_reported_as_retryable() -> Result<(), Box<dyn s
     };
     assert!(matches!(
         error,
-        qubit_event_bus::error::SpiError::Operation {
-            retryable: Some(true),
-            ..
-        }
+        qubit_event_bus::error::SpiError::Operation { retryable: None, .. }
     ));
     Ok(())
 }
 
 #[cfg(feature = "async")]
 #[test]
-fn async_claim_command_failure_is_reported_as_retryable() -> Result<(), Box<dyn std::error::Error>> {
+fn async_removed_group_error_has_unknown_retryability() -> Result<(), Box<dyn std::error::Error>> {
     futures_lite::future::block_on(async {
         let server = RedisServer::start()?;
         let bus = async_bus(&server, "claim-error-async", 2).await?;
@@ -1373,10 +1370,7 @@ fn async_claim_command_failure_is_reported_as_retryable() -> Result<(), Box<dyn 
         };
         assert!(matches!(
             error,
-            qubit_event_bus::error::SpiError::Operation {
-                retryable: Some(true),
-                ..
-            }
+            qubit_event_bus::error::SpiError::Operation { retryable: None, .. }
         ));
         Ok::<(), Box<dyn std::error::Error>>(())
     })
@@ -1403,7 +1397,7 @@ fn sync_drops_reader_connection_after_redis_receive_error() -> Result<(), Box<dy
     assert!(matches!(
         error,
         qubit_event_bus::error::SpiError::Operation {
-            retryable: Some(true),
+            retryable: Some(false),
             ..
         }
     ));
@@ -1465,7 +1459,7 @@ fn async_drops_reader_connection_after_redis_receive_error() -> Result<(), Box<d
         assert!(matches!(
             error,
             qubit_event_bus::error::SpiError::Operation {
-                retryable: Some(true),
+                retryable: Some(false),
                 ..
             }
         ));

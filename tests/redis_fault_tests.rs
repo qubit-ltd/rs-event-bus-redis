@@ -39,7 +39,6 @@ const FAULT: &[u8] = b"-ERR password=fault-secret\r\n";
 
 struct ReceiveFault {
     name: &'static str,
-    category: &'static str,
     timeout: Duration,
     steps: Vec<Step>,
 }
@@ -49,14 +48,12 @@ fn receive_faults() -> Vec<ReceiveFault> {
     vec![
         ReceiveFault {
             name: "malformed XAUTOCLAIM",
-            category: "XAUTOCLAIM",
-            timeout: Duration::from_millis(50),
+            timeout: Duration::MAX,
             steps: vec![Step::reply("XAUTOCLAIM", b":1\r\n")],
         },
         ReceiveFault {
             name: "XPENDING command failure",
-            category: "XPENDING",
-            timeout: Duration::from_millis(50),
+            timeout: Duration::MAX,
             steps: vec![
                 Step::reply("XAUTOCLAIM", TOMBSTONE_CLAIM),
                 Step::reply("XPENDING", FAULT),
@@ -64,8 +61,7 @@ fn receive_faults() -> Vec<ReceiveFault> {
         },
         ReceiveFault {
             name: "malformed XPENDING",
-            category: "XPENDING",
-            timeout: Duration::from_millis(50),
+            timeout: Duration::MAX,
             steps: vec![
                 Step::reply("XAUTOCLAIM", TOMBSTONE_CLAIM),
                 Step::reply("XPENDING", b":1\r\n"),
@@ -73,8 +69,7 @@ fn receive_faults() -> Vec<ReceiveFault> {
         },
         ReceiveFault {
             name: "XRANGE command failure",
-            category: "XRANGE",
-            timeout: Duration::from_millis(50),
+            timeout: Duration::MAX,
             steps: vec![
                 Step::reply("XAUTOCLAIM", TOMBSTONE_CLAIM),
                 Step::reply("XPENDING", PENDING_ROW),
@@ -83,8 +78,7 @@ fn receive_faults() -> Vec<ReceiveFault> {
         },
         ReceiveFault {
             name: "tombstone acknowledgement failure",
-            category: "XACK tombstone",
-            timeout: Duration::from_millis(50),
+            timeout: Duration::MAX,
             steps: vec![
                 Step::reply("XAUTOCLAIM", TOMBSTONE_CLAIM),
                 Step::reply("XPENDING", PENDING_ROW),
@@ -94,13 +88,11 @@ fn receive_faults() -> Vec<ReceiveFault> {
         },
         ReceiveFault {
             name: "pending XREADGROUP failure",
-            category: "XREADGROUP",
             timeout: Duration::ZERO,
             steps: vec![Step::reply("XAUTOCLAIM", EMPTY_CLAIM), Step::reply("XREADGROUP", FAULT)],
         },
         ReceiveFault {
             name: "nonblocking XREADGROUP failure",
-            category: "XREADGROUP",
             timeout: Duration::ZERO,
             steps: vec![
                 Step::reply("XAUTOCLAIM", EMPTY_CLAIM),
@@ -110,8 +102,7 @@ fn receive_faults() -> Vec<ReceiveFault> {
         },
         ReceiveFault {
             name: "blocking XREADGROUP failure",
-            category: "XREADGROUP",
-            timeout: Duration::from_secs(1),
+            timeout: Duration::MAX,
             steps: vec![
                 Step::reply("XAUTOCLAIM", EMPTY_CLAIM),
                 Step::reply("XREADGROUP", b"*0\r\n"),
@@ -139,7 +130,7 @@ fn config(server: &ScriptedRedis) -> EventBusConfig {
         ("redis.url".into(), server.url().into()),
         ("redis.namespace".into(), "fault-tests".into()),
         ("redis.claim_min_idle_ms".into(), "0".into()),
-        ("redis.recovery_interval_ms".into(), "50".into()),
+        ("redis.recovery_interval_ms".into(), "60000".into()),
     ]
     .into();
     EventBusConfig::default().with_provider_options(options)
@@ -161,7 +152,7 @@ fn request() -> SpiSubscriptionRequest {
 
 /// Checks retry policy, exact provider category, and removal of raw
 /// diagnostics.
-fn assert_failure(error: SpiError, expected_operation: &str, category: &str) {
+fn assert_failure(error: SpiError, expected_operation: &str, expected_kind: &str, expected_retryable: Option<bool>) {
     let SpiError::Operation {
         provider_id,
         operation,
@@ -176,9 +167,8 @@ fn assert_failure(error: SpiError, expected_operation: &str, category: &str) {
     assert_eq!(provider_id.as_ref(), "redis-streams");
     assert_eq!(operation, expected_operation);
     assert_eq!(resource.as_deref(), Some("events"));
-    assert_eq!(kind, "redis_error");
-    assert_eq!(retryable, Some(true));
-    assert_eq!(source.to_string(), format!("Redis operation failed ({category})"));
+    assert_eq!(kind, expected_kind);
+    assert_eq!(retryable, expected_retryable);
     assert!(!source.to_string().contains("fault-secret"));
     assert!(
         source.source().is_none(),
@@ -222,7 +212,7 @@ fn test_sync_receive_protocol_faults_are_sanitized_and_retryable() {
             Err(error) => error,
             Ok(_) => panic!("{} should fail", fault.name),
         };
-        assert_failure(error, "receive", fault.category);
+        assert_failure(error, "receive", "redis_error", None);
         assert!(
             matches!(subscription.receive(Duration::ZERO), Ok(ReceiveOutcome::TimedOut)),
             "{} must permit retry",
@@ -247,7 +237,7 @@ fn test_async_receive_protocol_faults_are_sanitized_and_retryable() {
                 Err(error) => error,
                 Ok(_) => panic!("{} should fail", fault.name),
             };
-            assert_failure(error, "receive", fault.category);
+            assert_failure(error, "receive", "redis_error", None);
             assert!(
                 matches!(subscription.receive(Duration::ZERO).await, Ok(ReceiveOutcome::TimedOut)),
                 "{} must permit retry",
@@ -337,7 +327,7 @@ fn test_sync_subscribe_retries_transport_loss_and_reports_reconnection_failure()
         let bus = sync_bus(&server);
         match bus.subscribe(request()) {
             Ok(mut subscription) if !refuse => subscription.close().expect("close succeeds"),
-            Err(error) if refuse => assert_failure(error, "subscribe", "connect"),
+            Err(error) if refuse => assert_failure(error, "subscribe", "transport", Some(true)),
             _ => panic!("unexpected subscribe result for refuse={refuse}"),
         }
         let commands = server.finish();
@@ -364,7 +354,7 @@ fn test_async_subscribe_retries_transport_loss_and_reports_reconnection_failure(
             let bus = async_bus(&server).await;
             match bus.subscribe(request()).await {
                 Ok(mut subscription) if !refuse => subscription.close().await.expect("close succeeds"),
-                Err(error) if refuse => assert_failure(error, "subscribe", "connect"),
+                Err(error) if refuse => assert_failure(error, "subscribe", "transport", Some(true)),
                 _ => panic!("unexpected subscribe result for refuse={refuse}"),
             }
             let commands = server.finish();
@@ -494,14 +484,16 @@ fn test_sync_settlement_connection_failure_keeps_the_token_unapplied() {
             .settle(token, DeliveryDisposition::Accept)
             .expect_err("first XACK loses transport"),
         "settle",
-        "XACK",
+        "transport",
+        Some(true),
     );
     assert_failure(
         subscription
             .settle(token, DeliveryDisposition::Accept)
             .expect_err("second settle cannot reconnect"),
         "settle",
-        "connect",
+        "transport",
+        Some(true),
     );
     subscription
         .settle(token, DeliveryDisposition::Retry)
@@ -531,7 +523,8 @@ fn test_async_settlement_connection_failure_keeps_the_token_unapplied() {
                 .await
                 .expect_err("first XACK loses transport"),
             "settle",
-            "XACK",
+            "transport",
+            Some(true),
         );
         assert_failure(
             subscription
@@ -539,7 +532,8 @@ fn test_async_settlement_connection_failure_keeps_the_token_unapplied() {
                 .await
                 .expect_err("second settle cannot reconnect"),
             "settle",
-            "connect",
+            "transport",
+            Some(true),
         );
         subscription
             .settle(token, DeliveryDisposition::Retry)
