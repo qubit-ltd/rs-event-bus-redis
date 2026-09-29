@@ -299,6 +299,7 @@ fn test_async_spi_conformance() -> Result<(), Box<dyn std::error::Error>> {
         close_cancellation: Some(close_cancellation),
         shutdown_cancellation: Some(shutdown_cancellation),
         durable_recovery: Some(durable_recovery),
+        ephemeral_cleanup: None,
     };
     let report = block_on(run_async_with_profile(
         || {
