@@ -51,6 +51,8 @@ fn create_order_bus() -> Result<qubit_event_bus::EventBus, Box<dyn std::error::E
 
 使用 Redis 的 payload 类型时，需要在 facade 的 `CodecRegistry` 中注册对应的 `EventCodec<T>`。之后即可调用常规的类型化 `publish` 和 `subscribe`。完整 codec、consumer、异步及 Sentinel 示例见[用户指南](doc/user_guide.zh_CN.md)。
 
+仓库提供可运行的发布、消费和关闭示例：`sync_orders`、`async_orders` 与 `sentinel_orders`。可用 `cargo run --example <名称> -- <Redis URL> <namespace>` 启动；Sentinel 示例从环境变量读取 `REDIS_SENTINEL_NODES` 和 `REDIS_SENTINEL_SERVICE_NAME`。具体命令和生命周期说明见用户指南。
+
 ## 为什么需要这个项目
 
 event-bus SPI 允许应用更换传输实现，而不改业务 handler。Redis Streams 保留消息记录和消费组确认状态，帮助服务实例断连后继续消费。自动发现也省去了启动阶段手动注册 provider 的代码。
