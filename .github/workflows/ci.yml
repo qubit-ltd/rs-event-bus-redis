@@ -94,6 +94,25 @@ jobs:
         run: |
           ./ci-check.sh --only=feature-matrix
 
+  documentation-examples:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: 1.94
+      - name: Build all runnable provider examples
+        run: cargo +1.94.0 build --examples --all-features --locked
+      - name: Run examples against standalone Redis and Sentinel
+        run: cargo +1.94.0 test --test documentation_examples_tests --all-features --locked -- --test-threads=1
+      - name: Run applied-reply cancellation regressions
+        run: |
+          cargo +1.94.0 test --test controlled_redis_tests --all-features --locked -- --test-threads=1
+          cargo +1.94.0 test --test sync_standalone_tests test_sync_settlement_retry_after_applied_xack_reply_loss --all-features --locked -- --exact
+          cargo +1.94.0 test --test async_standalone_tests test_async_receive_cancellation_leaves_pending_message_recoverable --all-features --locked -- --exact
+          cargo +1.94.0 test --test async_standalone_tests test_async_claim_cancellation_after_owner_transfer_recovers_message --all-features --locked -- --exact
+          cargo +1.94.0 test --test async_standalone_tests test_async_settlement_cancellation_after_xack_is_idempotent --all-features --locked -- --exact
+
   coverage:
     needs: [verify]
     permissions:
