@@ -13,6 +13,8 @@
 mod support;
 
 use std::any::TypeId;
+use std::error::Error;
+use std::io::Error as IoError;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::SystemTime;
@@ -39,14 +41,14 @@ use qubit_event_bus::spi::conformance::AsyncConformanceHooks;
 #[cfg(feature = "conformance")]
 use qubit_event_bus::spi::conformance::run_async;
 use qubit_event_bus_redis::r#async::AsyncRedisEventBusProvider;
+use qubit_event_bus_redis::naming::group_name;
+use qubit_event_bus_redis::naming::stream_key;
 use qubit_id::Id;
 use qubit_spi::AsyncServiceProvider;
-use redis::Client;
-use redis::cmd;
 use support::sentinel::SentinelServer;
 
 #[test]
-fn test_async_sentinel_reconnects_after_master_failover() -> Result<(), Box<dyn std::error::Error>> {
+fn test_async_sentinel_reconnects_after_master_failover() -> Result<(), Box<dyn Error>> {
     let mut sentinel = SentinelServer::start()?;
     let options: ProviderOptions = [
         ("redis.namespace".into(), "sentinel-async".into()),
@@ -77,7 +79,7 @@ fn test_async_sentinel_reconnects_after_master_failover() -> Result<(), Box<dyn 
         let mut receiver = bus
             .subscribe(request)
             .await
-            .map_err(|error| std::io::Error::other(format!("subscribe before promotion: {error}")))?;
+            .map_err(|error| IoError::other(format!("subscribe before promotion: {error}")))?;
         let ReceiveOutcome::Message(received) = receiver.receive(Duration::from_secs(10)).await? else {
             return Err("post-promotion event was not received".into());
         };
@@ -88,7 +90,7 @@ fn test_async_sentinel_reconnects_after_master_failover() -> Result<(), Box<dyn 
                 DeliveryDisposition::Accept,
             )
             .await?;
-        Ok::<(), Box<dyn std::error::Error>>(())
+        Ok::<(), Box<dyn Error>>(())
     })?;
     #[cfg(feature = "conformance")]
     {
@@ -110,7 +112,7 @@ fn test_async_sentinel_reconnects_after_master_failover() -> Result<(), Box<dyn 
 }
 
 #[test]
-fn test_async_sentinel_claims_unsettled_record_after_promotion() -> Result<(), Box<dyn std::error::Error>> {
+fn test_async_sentinel_claims_unsettled_record_after_promotion() -> Result<(), Box<dyn Error>> {
     let mut sentinel = SentinelServer::start()?;
     let options: ProviderOptions = [
         ("redis.namespace".into(), "sentinel-async-recovery".into()),
@@ -125,11 +127,7 @@ fn test_async_sentinel_claims_unsettled_record_after_promotion() -> Result<(), B
     let original_port = sentinel.master_port()?;
     let pending_message = message("events", "pending-before-async-promotion", b"pending")?;
     block_on(async { bus.publish(pending_message).await })?;
-    let client = Client::open(format!("redis://127.0.0.1:{original_port}/"))?;
-    let mut connection = client.get_connection()?;
-    let replicas: usize = cmd("WAIT").arg(1).arg(5_000).query(&mut connection)?;
-    assert_eq!(replicas, 1);
-    block_on(async {
+    let mut first = block_on(async {
         let request = SpiSubscriptionRequest::new(
             Id::new(2101),
             TopicAddress::new("events")?,
@@ -143,15 +141,26 @@ fn test_async_sentinel_claims_unsettled_record_after_promotion() -> Result<(), B
         let mut receiver = bus
             .subscribe(request)
             .await
-            .map_err(|error| std::io::Error::other(format!("subscribe after promotion: {error}")))?;
+            .map_err(|error| IoError::other(format!("subscribe after promotion: {error}")))?;
         let ReceiveOutcome::Message(received) = receiver.receive(Duration::from_secs(2)).await? else {
             return Err("initial consumer did not receive the pending record".into());
         };
         assert_eq!(received.id().as_str(), "pending-before-async-promotion");
-        receiver.close().await?;
-        Ok::<(), Box<dyn std::error::Error>>(())
+        Ok::<_, Box<dyn Error>>(receiver)
     })?;
+    let stream = stream_key("sentinel-async-recovery", "events");
+    let group = group_name(
+        "sentinel-async-recovery",
+        "events",
+        "worker-one",
+        Some("sentinel-workers"),
+    );
+    let (pending_id, old_owner) = sentinel.pending_identity(original_port, &stream, &group)?;
+    sentinel.wait_for_pending(sentinel.replica_port(), &stream, &group, &pending_id, &old_owner)?;
+    block_on(first.close())?;
     sentinel.stop_original_master()?;
+    let promoted_port = sentinel.master_port()?;
+    sentinel.wait_for_pending(promoted_port, &stream, &group, &pending_id, &old_owner)?;
     block_on(async {
         let request = SpiSubscriptionRequest::new(
             Id::new(2102),
@@ -168,17 +177,24 @@ fn test_async_sentinel_claims_unsettled_record_after_promotion() -> Result<(), B
             return Err("new consumer did not claim the pending record".into());
         };
         assert_eq!(pending.id().as_str(), "pending-before-async-promotion");
+        let (claimed_id, new_owner) = sentinel.pending_identity(promoted_port, &stream, &group)?;
+        assert_eq!(claimed_id, pending_id, "claim must preserve the stream ID");
+        assert_ne!(new_owner, old_owner, "claim must transfer the pending owner");
         receiver
             .settle(
                 pending.settlement().ok_or("missing settlement token")?,
                 DeliveryDisposition::Accept,
             )
             .await?;
+        sentinel.assert_pending_empty(promoted_port, &stream, &group)?;
+        receiver.close().await?;
         Ok(())
     })
 }
 
-fn message(topic: &str, id: &str, bytes: &[u8]) -> Result<OutboundMessage, Box<dyn std::error::Error>> {
+/// Builds an encoded event for `topic` and `id` with `bytes`; returns metadata
+/// validation errors without network I/O.
+fn message(topic: &str, id: &str, bytes: &[u8]) -> Result<OutboundMessage, Box<dyn Error>> {
     Ok(OutboundMessage::new(
         TopicAddress::new(topic)?,
         EventId::new(id)?,

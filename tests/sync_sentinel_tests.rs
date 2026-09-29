@@ -13,6 +13,7 @@
 mod support;
 
 use std::any::TypeId;
+use std::error::Error;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::SystemTime;
@@ -37,6 +38,7 @@ use qubit_event_bus::spi::TransportPayload;
 use qubit_event_bus::spi::conformance::ConformanceHooks;
 #[cfg(feature = "conformance")]
 use qubit_event_bus::spi::conformance::run_sync;
+use qubit_event_bus_redis::naming::group_name;
 use qubit_event_bus_redis::naming::stream_key;
 use qubit_event_bus_redis::sync::RedisEventBusProvider;
 use qubit_id::Id;
@@ -46,7 +48,7 @@ use redis::cmd;
 use support::sentinel::SentinelServer;
 
 #[test]
-fn test_sync_sentinel_reconnects_after_master_failover() -> Result<(), Box<dyn std::error::Error>> {
+fn test_sync_sentinel_reconnects_after_master_failover() -> Result<(), Box<dyn Error>> {
     let mut sentinel = SentinelServer::start()?;
     let options: ProviderOptions = [
         ("redis.namespace".into(), "sentinel-sync".into()),
@@ -62,17 +64,19 @@ fn test_sync_sentinel_reconnects_after_master_failover() -> Result<(), Box<dyn s
         .map_err(|failure| failure.into_error())?;
     let original_master_port = sentinel.master_port()?;
     bus.publish(message("events", "pending-before-failover", b"pending")?)?;
-    let direct_client = Client::open(format!("redis://127.0.0.1:{original_master_port}/"))?;
-    let mut direct_connection = direct_client.get_connection()?;
-    let replicas: usize = cmd("WAIT").arg(1).arg(5_000).query(&mut direct_connection)?;
-    assert_eq!(replicas, 1, "replica must contain the pending record before promotion");
     let mut first = bus.subscribe(subscription_request(1001, "worker-one")?)?;
     let ReceiveOutcome::Message(received) = first.receive(Duration::from_secs(2))? else {
         return Err("initial consumer did not receive the event".into());
     };
     assert_eq!(received.id().as_str(), "pending-before-failover");
+    let stream = stream_key("sentinel-sync", "events");
+    let group = group_name("sentinel-sync", "events", "worker-one", Some("sentinel-group"));
+    let (pending_id, old_owner) = sentinel.pending_identity(original_master_port, &stream, &group)?;
+    sentinel.wait_for_pending(sentinel.replica_port(), &stream, &group, &pending_id, &old_owner)?;
     first.close()?;
     sentinel.stop_original_master()?;
+    let promoted_port = sentinel.master_port()?;
+    sentinel.wait_for_pending(promoted_port, &stream, &group, &pending_id, &old_owner)?;
     bus.publish(message("events", "after-failover", b"after")?)?;
     let promoted_client = Client::open(format!("redis://127.0.0.1:{}/", sentinel.master_port()?))?;
     let mut promoted_connection = promoted_client.get_connection()?;
@@ -85,10 +89,14 @@ fn test_sync_sentinel_reconnects_after_master_failover() -> Result<(), Box<dyn s
         return Err("new consumer did not claim the pre-failover pending record".into());
     };
     assert_eq!(pending.id().as_str(), "pending-before-failover");
+    let (claimed_id, new_owner) = sentinel.pending_identity(promoted_port, &stream, &group)?;
+    assert_eq!(claimed_id, pending_id, "claim must preserve the stream ID");
+    assert_ne!(new_owner, old_owner, "claim must transfer the pending owner");
     let token = pending
         .take_settlement()
         .ok_or("pending record has no settlement token")?;
     second.settle(&token, DeliveryDisposition::Accept)?;
+    sentinel.assert_pending_empty(promoted_port, &stream, &group)?;
     let ReceiveOutcome::Message(after) = second.receive(Duration::from_secs(10))? else {
         return Err("post-promotion message was not readable".into());
     };
@@ -106,7 +114,9 @@ fn test_sync_sentinel_reconnects_after_master_failover() -> Result<(), Box<dyn s
     Ok(())
 }
 
-fn subscription_request(id: u64, subscriber: &str) -> Result<SpiSubscriptionRequest, Box<dyn std::error::Error>> {
+/// Builds a durable fixed-group request with `id` and `subscriber`; returns
+/// metadata validation errors without I/O.
+fn subscription_request(id: u64, subscriber: &str) -> Result<SpiSubscriptionRequest, Box<dyn Error>> {
     Ok(SpiSubscriptionRequest::new(
         Id::new(id),
         TopicAddress::new("events")?,
@@ -119,7 +129,9 @@ fn subscription_request(id: u64, subscriber: &str) -> Result<SpiSubscriptionRequ
     ))
 }
 
-fn message(topic: &str, id: &str, bytes: &[u8]) -> Result<OutboundMessage, Box<dyn std::error::Error>> {
+/// Builds an encoded event for `topic` and `id` with `bytes`; returns metadata
+/// validation errors without network I/O.
+fn message(topic: &str, id: &str, bytes: &[u8]) -> Result<OutboundMessage, Box<dyn Error>> {
     Ok(OutboundMessage::new(
         TopicAddress::new(topic)?,
         EventId::new(id)?,

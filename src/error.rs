@@ -19,6 +19,18 @@ pub use crate::redis_provider_error::RedisProviderError;
 use crate::redis_provider_error::from_redis_error as classify_redis_error;
 
 /// Converts a sanitized provider failure into the facade's stable SPI shape.
+///
+/// # Parameters
+///
+/// `operation` identifies the caller; `topic` is `Some` for topic-scoped
+/// failures and `None` for client-wide failures; `source` is the secret-safe
+/// cause.
+///
+/// # Returns
+///
+/// A stable error category and retryability hint. Unknown settlement and
+/// receive results permit retry in their recovery context; unknown publish
+/// and quarantine results do not imply safe replay.
 #[cfg(any(feature = "sync", feature = "async"))]
 pub(crate) fn to_spi_error(
     operation: &'static str,
@@ -37,6 +49,12 @@ pub(crate) fn to_spi_error(
             Some(false),
         ),
         RedisProviderError::Transport { kind, retryable, .. } => (*kind, *retryable),
+        RedisProviderError::OutcomeUnknown { operation } => {
+            ("outcome_unknown", Some(matches!(*operation, "settle" | "receive")))
+        }
+        RedisProviderError::ResourceLimit { .. } => ("resource_limit", Some(true)),
+        RedisProviderError::PayloadTooLarge => ("payload_too_large", Some(false)),
+        RedisProviderError::WireTooLarge => ("wire_too_large", Some(false)),
         RedisProviderError::Operation(_) => ("redis_error", None),
     };
     SpiError::Operation {
@@ -119,39 +137,19 @@ pub(crate) fn invalid_publish_reply(topic: &TopicAddress) -> SpiError {
 }
 
 /// Converts a Redis client failure using stable kind and retryability rules.
+///
+/// # Parameters
+///
+/// - `operation`: Static operation category used by the facade.
+/// - `topic`: `Some` identifies the topic; `None` describes a client-wide
+///   failure.
+/// - `source`: Borrowed Redis diagnostic classified without preserving raw
+///   text.
+///
+/// # Returns
+///
+/// A sanitized SPI failure carrying the known category and retryability hint.
 #[cfg(any(feature = "sync", feature = "async"))]
 pub(crate) fn from_redis_error(operation: &'static str, topic: Option<&TopicAddress>, source: &RedisError) -> SpiError {
     to_spi_error(operation, topic, classify_redis_error(operation, source))
-}
-
-#[cfg(all(test, any(feature = "sync", feature = "async")))]
-mod tests {
-    use redis::ErrorKind;
-    use redis::RedisError;
-
-    use crate::redis_provider_error::from_redis_error;
-
-    #[test]
-    fn redis_error_categories_are_stable_and_secret_safe() {
-        for (error_kind, expected_kind, expected_retryable) in [
-            (ErrorKind::AuthenticationFailed, "authentication", Some(false)),
-            (ErrorKind::TypeError, "wrong_type", Some(false)),
-            (ErrorKind::IoError, "transport", Some(true)),
-            (ErrorKind::Moved, "unsupported_topology", Some(false)),
-            (ErrorKind::ExtensionError, "redis_error", None),
-        ] {
-            let error = RedisError::from((error_kind, "password=secret"));
-            let provider = from_redis_error("publish", &error);
-            let rendered = provider.to_string();
-            assert!(!rendered.contains("secret"));
-            assert!(matches!(
-                provider,
-                super::RedisProviderError::Transport {
-                    kind,
-                    retryable,
-                    ..
-                } if kind == expected_kind && retryable == expected_retryable
-            ));
-        }
-    }
 }

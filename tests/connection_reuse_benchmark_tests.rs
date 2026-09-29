@@ -5,20 +5,29 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-//! Manual Redis connection-churn and end-to-end latency benchmark.
+//! Historical manual connection-churn and end-to-end latency workload.
+//!
+//! This 50ms receive polling workload retains the original before/after
+//! evidence. The sampled 1ms workloads in `benches/redis_workloads.rs` use
+//! different traffic and sampling parameters, so their measurements are not
+//! equivalent.
 
 #![cfg(feature = "sync")]
 
 mod support;
 
 use std::any::TypeId;
+use std::env::var;
+use std::error::Error;
+use std::process::id;
 use std::sync::Arc;
-use std::thread;
+use std::thread::spawn;
 use std::time::Duration;
 use std::time::Instant;
 use std::time::SystemTime;
 
 use qubit_event_bus::EventBusConfig;
+use qubit_event_bus::model::ConsumerGroup;
 use qubit_event_bus::model::ContentType;
 use qubit_event_bus::model::EventId;
 use qubit_event_bus::model::Headers;
@@ -34,8 +43,10 @@ use qubit_event_bus::spi::SpiSubscriptionRequest;
 use qubit_event_bus::spi::TopicAddress;
 use qubit_event_bus::spi::TransportPayload;
 use qubit_event_bus_redis::sync::RedisEventBusProvider;
+use qubit_id::Id;
 use qubit_spi::ServiceProvider;
 use redis::Client;
+use redis::Connection;
 use redis::cmd;
 use support::redis_server::RedisServer;
 
@@ -46,9 +57,9 @@ const MESSAGES: usize = 1_000;
 /// synchronous publish/receive/settle round trips.
 #[test]
 #[ignore = "manual before/after connection benchmark; run with --ignored --nocapture"]
-fn redis_connection_reuse_benchmark() -> Result<(), Box<dyn std::error::Error>> {
+fn test_redis_connection_reuse_benchmark() -> Result<(), Box<dyn Error>> {
     let server = RedisServer::start()?;
-    let namespace = format!("connection-benchmark-{}", std::process::id());
+    let namespace = format!("connection-benchmark-{}", id());
     let options: ProviderOptions = [
         ("redis.url".into(), server.url().into()),
         ("redis.namespace".into(), namespace.as_str().into()),
@@ -67,7 +78,7 @@ fn redis_connection_reuse_benchmark() -> Result<(), Box<dyn std::error::Error>> 
     }
     let mut observer = Client::open(server.url())?.get_connection()?;
     let idle_connections_before = total_connections(&mut observer)?;
-    let idle_seconds = std::env::var("REDIS_BENCH_IDLE_SECONDS")
+    let idle_seconds = var("REDIS_BENCH_IDLE_SECONDS")
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(30);
@@ -76,7 +87,7 @@ fn redis_connection_reuse_benchmark() -> Result<(), Box<dyn std::error::Error>> 
     let workers = idle_receivers
         .into_iter()
         .map(|mut receiver| {
-            thread::spawn(move || -> Result<(), String> {
+            spawn(move || -> Result<(), String> {
                 while Instant::now() < stop_at {
                     match receiver.receive(Duration::from_millis(50)) {
                         Ok(ReceiveOutcome::TimedOut | ReceiveOutcome::Gap(_)) => {}
@@ -131,12 +142,13 @@ fn redis_connection_reuse_benchmark() -> Result<(), Box<dyn std::error::Error>> 
     Ok(())
 }
 
-fn request(topic: &str, subscriber: &str, group: &str) -> Result<SpiSubscriptionRequest, Box<dyn std::error::Error>> {
+/// Builds a durable new-position receiver for one historical workload identity.
+fn request(topic: &str, subscriber: &str, group: &str) -> Result<SpiSubscriptionRequest, Box<dyn Error>> {
     Ok(SpiSubscriptionRequest::new(
-        qubit_id::Id::new(u64::from(subscriber.as_bytes()[0])),
+        Id::new(u64::from(subscriber.as_bytes()[0])),
         TopicAddress::new(topic)?,
         SubscriberId::new(subscriber)?,
-        Some(qubit_event_bus::model::ConsumerGroup::new(group)?),
+        Some(ConsumerGroup::new(group)?),
         SubscriptionDurability::Durable,
         StartPosition::New,
         ProviderOptions::new(),
@@ -144,7 +156,8 @@ fn request(topic: &str, subscriber: &str, group: &str) -> Result<SpiSubscription
     ))
 }
 
-fn message(id: &str) -> Result<OutboundMessage, Box<dyn std::error::Error>> {
+/// Builds the small encoded payload used by the historical round-trip loop.
+fn message(id: &str) -> Result<OutboundMessage, Box<dyn Error>> {
     Ok(OutboundMessage::new(
         TopicAddress::new("message-events")?,
         EventId::new(id)?,
@@ -160,7 +173,8 @@ fn message(id: &str) -> Result<OutboundMessage, Box<dyn std::error::Error>> {
     ))
 }
 
-fn total_connections(connection: &mut redis::Connection) -> Result<u64, Box<dyn std::error::Error>> {
+/// Reads the cumulative connection counter from Redis INFO stats.
+fn total_connections(connection: &mut Connection) -> Result<u64, Box<dyn Error>> {
     let info: String = cmd("INFO").arg("stats").query(connection)?;
     let value = info
         .lines()
@@ -169,6 +183,7 @@ fn total_connections(connection: &mut redis::Connection) -> Result<u64, Box<dyn 
     Ok(value.parse()?)
 }
 
+/// Selects the nearest-rank percentile from the nonempty sorted durations.
 fn percentile(values: &[Duration], percent: usize) -> Duration {
     let rank = values.len().saturating_mul(percent).div_ceil(100).max(1);
     values[rank - 1]

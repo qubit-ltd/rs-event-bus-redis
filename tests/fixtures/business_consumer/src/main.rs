@@ -5,10 +5,17 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
+//! Exercises discovery and a typed business facade in a standalone consumer.
+
+use std::env::args;
+use std::error::Error;
 use std::sync::Arc;
+use std::sync::mpsc::channel;
+use std::time::Duration;
 
 use qubit_event_bus::EventBusConfig;
 use qubit_event_bus::EventBusRegistry;
+use qubit_event_bus::SubscriberId;
 use qubit_event_bus::codec::CodecRegistry;
 use qubit_event_bus::codec::EventCodec;
 use qubit_event_bus::error::CodecError;
@@ -17,19 +24,23 @@ use qubit_event_bus::model::ContentType;
 use qubit_event_bus::model::ProviderOptions;
 use qubit_event_bus::model::PublishRequest;
 use qubit_event_bus::model::SchemaId;
+use qubit_event_bus::spi::EncodedPayload;
 use qubit_event_bus::model::StartPosition;
 use qubit_event_bus::model::SubscribeRequest;
 use qubit_event_bus::model::SubscriptionDurability;
 use qubit_event_bus::model::Topic;
-use qubit_event_bus::spi::EncodedPayload;
 use qubit_event_bus::spi::ShutdownMode;
 use qubit_event_bus::spi::ShutdownOutcome;
-use qubit_event_bus::SubscriberId;
 use qubit_event_bus_redis as _;
 use qubit_spi::ProviderSelection;
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let redis_url = std::env::args()
+/// Runs discovered-provider business facade delivery against the CLI Redis URL.
+///
+/// Performs blocking Redis/channel IO. Returns argument/configuration/codec/
+/// provider/channel errors, and panics if delivered bytes or shutdown are
+/// incorrect.
+fn main() -> Result<(), Box<dyn Error>> {
+    let redis_url = args()
         .nth(1)
         .ok_or("usage: redis-event-bus-business-consumer REDIS_URL")?;
     let options: ProviderOptions = [
@@ -47,7 +58,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let registry = EventBusRegistry::discover()?;
     let bus = registry.create(&config)?;
     let topic = Topic::<String>::new("business.events")?;
-    let (sender, receiver) = std::sync::mpsc::channel();
+    let (sender, receiver) = channel();
     let subscription = bus.subscribe(
         SubscribeRequest::builder()
             .subscriber_id(SubscriberId::new("business-consumer")?)
@@ -60,19 +71,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     )?;
     bus.publish(PublishRequest::new(topic, "business facade works".to_owned())?)?;
-    assert_eq!(
-        receiver.recv_timeout(std::time::Duration::from_secs(3))?,
-        "business facade works"
-    );
+    assert_eq!(receiver.recv_timeout(Duration::from_secs(3))?, "business facade works");
     subscription.cancel()?;
     let shutdown = bus.shutdown(ShutdownMode::Graceful {
-        timeout: std::time::Duration::from_secs(3),
+        timeout: Duration::from_secs(3),
     })?;
     assert!(matches!(shutdown.outcome, ShutdownOutcome::Complete));
     Ok(())
 }
 
-/// Preserves the schema-free UTF-8 wire format with strict default metadata validation.
+/// Supplies the application string codec used by the discovered provider.
 struct Utf8Codec(ContentType);
 
 impl EventCodec<String> for Utf8Codec {

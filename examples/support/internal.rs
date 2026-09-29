@@ -17,14 +17,18 @@ use qubit_event_bus::model::ProviderOptions;
 
 use super::utf8_codec::Utf8Codec;
 
-/// Builds a facade configuration with the UTF-8 string codec registered.
+/// Returns a facade configured with the UTF-8 string codec without I/O;
+/// returns the content-type validation error if the fixed MIME type is
+/// rejected.
 pub(crate) fn facade_config() -> Result<EventBusFacadeConfig, Box<dyn Error>> {
     let mut codecs = CodecRegistry::new();
     codecs.register::<String>(Arc::new(Utf8Codec(ContentType::new("text/plain")?)));
     Ok(EventBusFacadeConfig::new().with_codec_registry(Arc::new(codecs)))
 }
 
-/// Builds Redis options, optionally adding Sentinel discovery settings.
+/// Returns options for `redis_url` and `namespace` without I/O.
+/// `sentinel` adds nodes/service for `Some`, and uses standalone mode for
+/// `None`.
 pub(crate) fn provider_options(redis_url: &str, namespace: &str, sentinel: Option<(&str, &str)>) -> ProviderOptions {
     let mut entries = vec![
         ("redis.url".into(), redis_url.into()),

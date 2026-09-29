@@ -12,7 +12,11 @@ use super::poison_reason::PoisonReason;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DecodeFailure {
     /// The record is malformed and can be transferred to quarantine.
-    Poison(PoisonReason),
+    Poison(
+        /// Stable deterministic decode category, safe to store without raw
+        /// message data.
+        PoisonReason,
+    ),
     /// The record uses a valid wire version this provider cannot decode.
     UnsupportedVersion,
     /// The original record must remain pending for recovery with larger limits.

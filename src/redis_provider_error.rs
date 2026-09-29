@@ -7,6 +7,12 @@
 // =============================================================================
 //! Redis provider errors with secret-safe formatting.
 
+#[cfg(any(feature = "sync", feature = "async"))]
+use redis::ErrorKind;
+#[cfg(any(feature = "sync", feature = "async"))]
+use redis::RedisError;
+use thiserror::Error;
+
 /// Redis provider errors with secret-safe formatting.
 ///
 /// Redis client diagnostics can contain connection details, so this type
@@ -21,14 +27,22 @@
 /// assert_eq!(error.to_string(), "invalid Redis provider configuration: invalid redis.url");
 /// ```
 #[must_use]
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Error)]
 pub enum RedisProviderError {
     /// A required option is missing or a supplied setting violates validation.
     #[error("invalid Redis provider configuration: {0}")]
-    Configuration(&'static str),
+    Configuration(
+        /// Static validation label that never contains endpoint or credential
+        /// values.
+        &'static str,
+    ),
     /// A Redis operation failed and its raw client diagnostic was omitted.
     #[error("Redis operation failed ({0})")]
-    Operation(&'static str),
+    Operation(
+        /// Static operation label without raw Redis diagnostics or message
+        /// bytes.
+        &'static str,
+    ),
     /// A Redis client operation failed with a stable, secret-safe category.
     #[error("Redis operation {operation} failed ({kind})")]
     Transport {
@@ -39,6 +53,24 @@ pub enum RedisProviderError {
         /// Retry policy when the Redis error kind is known.
         retryable: Option<bool>,
     },
+    /// A command may have executed but no valid reply confirmed its result.
+    #[error("Redis operation outcome unknown ({operation})")]
+    OutcomeUnknown {
+        /// Stable operation name, without connection or message data.
+        operation: &'static str,
+    },
+    /// A bounded resource admission limit was reached before sending a command.
+    #[error("Redis resource limit reached ({resource})")]
+    ResourceLimit {
+        /// Stable resource category, without user-supplied data.
+        resource: &'static str,
+    },
+    /// Encoded payload exceeds the configured raw byte limit.
+    #[error("Redis encoded payload exceeds the configured byte limit")]
+    PayloadTooLarge,
+    /// Serialized wire exceeds the configured JSON byte limit.
+    #[error("Redis wire exceeds the configured byte limit")]
+    WireTooLarge,
     /// A stream record uses a wire version this implementation does not decode.
     #[error("unsupported Redis event wire version")]
     UnsupportedWireVersion,
@@ -49,10 +81,18 @@ pub enum RedisProviderError {
 }
 
 /// Classifies a Redis error without retaining its diagnostic details.
+///
+/// # Parameters
+///
+/// - `operation`: Static operation category attached to the sanitized failure.
+/// - `error`: Redis client error inspected by stable code and kind only.
+///
+/// # Returns
+///
+/// A transport category and retryability hint without raw endpoint, ACL, or
+/// wire data.
 #[cfg(any(feature = "sync", feature = "async"))]
-pub(crate) fn from_redis_error(operation: &'static str, error: &redis::RedisError) -> RedisProviderError {
-    use redis::ErrorKind;
-
+pub(crate) fn from_redis_error(operation: &'static str, error: &RedisError) -> RedisProviderError {
     let code_class = match error.code().unwrap_or_default() {
         "NOAUTH" | "WRONGPASS" | "NOPERM" => Some(("authentication", Some(false))),
         "WRONGTYPE" => Some(("wrong_type", Some(false))),

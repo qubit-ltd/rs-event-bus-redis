@@ -1,0 +1,14 @@
+[package]
+name = "redis-event-bus-async-smol-consumer"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+qubit-event-bus-redis = { path = "../../..", default-features = false, features = ["async"] }
+qubit-event-bus = { path = "../../../../rs-event-bus", default-features = false }
+qubit-spi = "0.13"
+qubit-id = { version = "0.6", default-features = false, features = ["uuid"] }
+futures-lite = "2"

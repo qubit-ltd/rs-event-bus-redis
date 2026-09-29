@@ -7,14 +7,19 @@
 // =============================================================================
 //! Docker-backed isolated Redis master, replica, and three Sentinel nodes.
 
+use std::error::Error;
 use std::fs;
 use std::net::TcpListener;
 use std::process::Command;
-use std::thread;
+use std::process::Stdio;
+use std::thread::sleep;
 use std::time::Duration;
+use std::time::Instant;
 
 use redis::Client;
 use redis::cmd;
+use redis::streams::StreamInfoGroupsReply;
+use redis::streams::StreamPendingCountReply;
 use tempfile::TempDir;
 
 /// Owns the Redis and Sentinel containers used by a failover test.
@@ -23,19 +28,26 @@ pub struct SentinelServer {
     directories: Vec<TempDir>,
     sentinel_ports: Vec<u16>,
     master_port: u16,
+    replica_port: u16,
 }
 
 impl SentinelServer {
-    /// Starts a master, replica, and three Sentinel containers on host
+    /// Starts owned master, replica, and three Sentinel containers on host
     /// networking.
-    pub fn start() -> Result<Self, Box<dyn std::error::Error>> {
+    ///
+    /// Returns the ready isolated fixture. Performs blocking
+    /// Docker/Redis/filesystem IO; returns port, temporary-directory,
+    /// configuration-write, container-start, output-decoding, or readiness
+    /// errors. Owned partial state is cleaned on failure.
+    pub fn start() -> Result<Self, Box<dyn Error>> {
         let mut server = Self {
             container_ids: Vec::new(),
             directories: Vec::new(),
             sentinel_ports: Vec::new(),
             master_port: free_port()?,
+            replica_port: free_port()?,
         };
-        let replica_port = free_port()?;
+        let replica_port = server.replica_port;
         let data_dir = TempDir::new()?;
         let master_id = start_container([
             "run",
@@ -113,7 +125,8 @@ impl SentinelServer {
         Ok(server)
     }
 
-    /// Returns the comma-separated Sentinel endpoints for provider options.
+    /// Returns allocated comma-separated local Sentinel endpoints for provider
+    /// options.
     pub fn endpoints(&self) -> String {
         self.sentinel_ports
             .iter()
@@ -122,17 +135,109 @@ impl SentinelServer {
             .join(",")
     }
 
-    /// Returns the current master port after querying the first Sentinel.
-    pub fn master_port(&self) -> Result<u16, Box<dyn std::error::Error>> {
+    /// Queries the first Sentinel and returns its reported master TCP port.
+    ///
+    /// Performs blocking Redis IO and returns client, connection, or
+    /// reply-decoding errors.
+    pub fn master_port(&self) -> Result<u16, Box<dyn Error>> {
         master_port_from(self.sentinel_ports[0])
     }
 
-    /// Returns the master port reported by one Sentinel endpoint.
-    fn master_port_at(&self, sentinel_port: u16) -> Result<u16, Box<dyn std::error::Error>> {
+    /// Returns the original replica's local TCP port without performing IO.
+    pub fn replica_port(&self) -> u16 {
+        self.replica_port
+    }
+
+    /// Reads the group cursor and sole pending ID/owner on node `port`.
+    ///
+    /// `stream` and `group` are actual Redis names. Returns the stream ID and
+    /// owner. Performs blocking Redis IO; returns connection, command, or
+    /// missing-group errors. Panics unless the sole pending ID exactly
+    /// equals the group delivery cursor.
+    pub fn pending_identity(&self, port: u16, stream: &str, group: &str) -> Result<(String, String), Box<dyn Error>> {
+        let (cursor, pending) = group_state(port, stream, group)?;
+        assert_eq!(
+            pending.ids.len(),
+            1,
+            "the delivered record must be the sole pending entry"
+        );
+        let entry = pending.ids.into_iter().next().ok_or("missing pending entry")?;
+        assert_eq!(cursor, entry.id, "group cursor must identify the pending delivery");
+        eprintln!(
+            "R13 node={port} cursor={cursor} pending={} owner={}",
+            entry.id, entry.consumer
+        );
+        Ok((entry.id, entry.consumer))
+    }
+
+    /// Polls node `port` until `stream`/`group` has the exact expected
+    /// delivery.
+    ///
+    /// Success requires cursor/PEL ID `expected_id` and owner `expected_owner`.
+    /// Performs blocking Redis reads and brief sleeps; returns an error with
+    /// the last observed state when the 15-second polling deadline is
+    /// reached. Direct replica reads prove provider writes that WAIT on a
+    /// new observer connection cannot fence.
+    pub fn wait_for_pending(
+        &self,
+        port: u16,
+        stream: &str,
+        group: &str,
+        expected_id: &str,
+        expected_owner: &str,
+    ) -> Result<(), Box<dyn Error>> {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            let state = group_state(port, stream, group);
+            if let Ok((cursor, pending)) = &state
+                && cursor == expected_id
+                && let [entry] = pending.ids.as_slice()
+                && entry.id == expected_id
+                && entry.consumer == expected_owner
+            {
+                eprintln!(
+                    "R13 replicated node={port} cursor={cursor} pending={} owner={}",
+                    entry.id, entry.consumer
+                );
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "node {port} did not replicate cursor={expected_id}, pending owner={expected_owner}: {state:?}"
+                )
+                .into());
+            }
+            sleep(Duration::from_millis(25));
+        }
+    }
+
+    /// Confirms group `group` in `stream` has no pending IDs on node `port`.
+    ///
+    /// Returns success after blocking Redis reads, or
+    /// connection/command/missing-group errors. Panics if ACK has left any
+    /// entry in the observed PEL.
+    pub fn assert_pending_empty(&self, port: u16, stream: &str, group: &str) -> Result<(), Box<dyn Error>> {
+        let (_, pending) = group_state(port, stream, group)?;
+        assert!(pending.ids.is_empty(), "ACK must empty the PEL: {pending:?}");
+        eprintln!("R13 ACK node={port} PEL=[]");
+        Ok(())
+    }
+
+    /// Queries Sentinel `sentinel_port` and returns its reported master TCP
+    /// port.
+    ///
+    /// Performs blocking Redis IO and returns client, connection, or
+    /// reply-decoding errors.
+    fn master_port_at(&self, sentinel_port: u16) -> Result<u16, Box<dyn Error>> {
         master_port_from(sentinel_port)
     }
 
-    /// Waits for a majority of Sentinel nodes to report the promoted master.
+    /// Returns Some(promoted port) once at least two Sentinels agree on a new
+    /// master.
+    ///
+    /// Returns None without that majority, including when available replies are
+    /// insufficient. Performs blocking Sentinel IO and ignores individual query
+    /// errors.
     fn promoted_master_port(&self) -> Option<u16> {
         let mut reports = self
             .sentinel_ports
@@ -143,22 +248,27 @@ impl SentinelServer {
         (first != self.master_port && votes >= 2).then_some(first)
     }
 
-    /// Stops the original master to make Sentinel promote the replica.
-    pub fn stop_original_master(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    /// Stops the original master and waits for a majority to report promotion.
+    ///
+    /// This is the fixture's one-time failover transition. Returns success
+    /// after blocking Docker/Redis IO, or process/stop/promotion-deadline
+    /// failure errors.
+    pub fn stop_original_master(&mut self) -> Result<(), Box<dyn Error>> {
         let master = self.container_ids.remove(0);
         let status = Command::new("docker")
             .args(["stop", &master])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .status()?;
         if !status.success() {
             return Err("could not stop the isolated Redis master".into());
         }
-        for _ in 0..150 {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while Instant::now() < deadline {
             if self.promoted_master_port().is_some() {
                 return Ok(());
             }
-            thread::sleep(Duration::from_millis(200));
+            sleep(Duration::from_millis(200));
         }
         let logs = self
             .container_ids
@@ -175,9 +285,15 @@ impl SentinelServer {
         Err(format!("Sentinel did not promote the isolated replica; logs:\n{logs}").into())
     }
 
-    /// Waits until all Sentinel nodes report the master service.
-    fn wait_for_quorum(&self) -> Result<(), Box<dyn std::error::Error>> {
-        for _ in 0..100 {
+    /// Waits for all Sentinels to report the original master and a connected
+    /// replica.
+    ///
+    /// Performs blocking Redis reads and brief sleeps. Returns success on
+    /// readiness or a readiness error at the polling deadline; individual
+    /// query errors are retried.
+    fn wait_for_quorum(&self) -> Result<(), Box<dyn Error>> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
             let all_sentinels_ready = self.sentinel_ports.iter().all(|port| {
                 self.master_port_at(*port)
                     .is_ok_and(|master_port| master_port == self.master_port)
@@ -198,14 +314,17 @@ impl SentinelServer {
             if all_sentinels_ready && replica_ready {
                 return Ok(());
             }
-            thread::sleep(Duration::from_millis(100));
+            sleep(Duration::from_millis(100));
         }
         Err("Redis Sentinel quorum did not become ready".into())
     }
 }
 
-/// Queries one Sentinel for the configured service's current master port.
-fn master_port_from(sentinel_port: u16) -> Result<u16, Box<dyn std::error::Error>> {
+/// Queries Sentinel `sentinel_port` for the qeventbus master TCP port.
+///
+/// Returns that port after blocking Redis IO, or
+/// client/connection/reply-decoding errors.
+fn master_port_from(sentinel_port: u16) -> Result<u16, Box<dyn Error>> {
     let client = Client::open(format!("redis://127.0.0.1:{sentinel_port}/"))?;
     let mut connection = client.get_connection()?;
     let (_, port): (String, u16) = cmd("SENTINEL")
@@ -216,21 +335,28 @@ fn master_port_from(sentinel_port: u16) -> Result<u16, Box<dyn std::error::Error
 }
 
 impl Drop for SentinelServer {
-    /// Removes only containers and temporary data owned by this fixture.
+    /// Removes only containers and temporary state owned by this fixture.
+    ///
+    /// Blocks on Docker process IO; container cleanup errors are deliberately
+    /// ignored.
     fn drop(&mut self) {
         for id in &self.container_ids {
             let _ = Command::new("docker")
                 .args(["rm", "-f", id])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
                 .status();
         }
         let _ = &self.directories;
     }
 }
 
-/// Starts one disposable Redis container and returns its container ID.
-fn start_container<const N: usize>(args: [&str; N]) -> Result<String, Box<dyn std::error::Error>> {
+/// Starts Docker with the `N` supplied process arguments `args`.
+///
+/// Returns the trimmed container ID. Performs blocking process IO; returns
+/// spawn, unsuccessful-exit, or invalid stdout UTF-8 errors, including Docker
+/// stderr context.
+fn start_container<const N: usize>(args: [&str; N]) -> Result<String, Box<dyn Error>> {
     let output = Command::new("docker").args(args).output()?;
     if !output.status.success() {
         return Err(format!(
@@ -242,7 +368,39 @@ fn start_container<const N: usize>(args: [&str; N]) -> Result<String, Box<dyn st
     Ok(String::from_utf8(output.stdout)?.trim().to_owned())
 }
 
-/// Reserves an available loopback TCP port for a test service.
-fn free_port() -> Result<u16, Box<dyn std::error::Error>> {
+/// Returns a currently available loopback TCP port using a temporary listener.
+///
+/// Performs socket IO and releases the listener before returning. Returns bind
+/// or local-address lookup errors; it does not retain a reservation for the
+/// caller.
+fn free_port() -> Result<u16, Box<dyn Error>> {
     Ok(TcpListener::bind("127.0.0.1:0")?.local_addr()?.port())
+}
+
+/// Reads group `group` from Redis `stream` on local node `port`.
+///
+/// Returns its delivery cursor and extended pending reply with up to ten IDs.
+/// Performs blocking Redis IO with one-second connection/read/write timeouts.
+/// Returns client, connection, timeout-setting, command, or missing-group
+/// errors.
+fn group_state(port: u16, stream: &str, group: &str) -> Result<(String, StreamPendingCountReply), Box<dyn Error>> {
+    let client = Client::open(format!("redis://127.0.0.1:{port}/"))?;
+    let mut connection = client.get_connection_with_timeout(Duration::from_secs(1))?;
+    connection.set_read_timeout(Some(Duration::from_secs(1)))?;
+    connection.set_write_timeout(Some(Duration::from_secs(1)))?;
+    let groups: StreamInfoGroupsReply = cmd("XINFO").arg("GROUPS").arg(stream).query(&mut connection)?;
+    let cursor = groups
+        .groups
+        .into_iter()
+        .find(|entry| entry.name == group)
+        .ok_or("expected consumer group is absent")?
+        .last_delivered_id;
+    let pending = cmd("XPENDING")
+        .arg(stream)
+        .arg(group)
+        .arg("-")
+        .arg("+")
+        .arg(10)
+        .query(&mut connection)?;
+    Ok((cursor, pending))
 }

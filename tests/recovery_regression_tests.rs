@@ -12,14 +12,19 @@
 mod support;
 
 use std::any::TypeId;
+use std::error::Error;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
+use std::thread::sleep;
+use std::thread::spawn;
 use std::time::Duration;
 use std::time::SystemTime;
 
 #[cfg(feature = "async")]
+use futures_lite::future::block_on;
 use qubit_event_bus::EventBusConfig;
+use qubit_event_bus::error::SpiError;
 use qubit_event_bus::model::ConsumerGroup;
 use qubit_event_bus::model::ContentType;
 use qubit_event_bus::model::EventId;
@@ -28,23 +33,42 @@ use qubit_event_bus::model::ProviderOptions;
 use qubit_event_bus::model::StartPosition;
 use qubit_event_bus::model::SubscriberId;
 use qubit_event_bus::model::SubscriptionDurability;
+#[cfg(feature = "async")]
+use qubit_event_bus::spi::AsyncEventBusSpi;
+use qubit_event_bus::spi::DeliveryDisposition;
 use qubit_event_bus::spi::EncodedPayload;
+#[cfg(feature = "sync")]
+use qubit_event_bus::spi::EventBusSpi;
 use qubit_event_bus::spi::OutboundMessage;
 use qubit_event_bus::spi::ReceiveOutcome;
 use qubit_event_bus::spi::SpiSubscriptionRequest;
 use qubit_event_bus::spi::TopicAddress;
 use qubit_event_bus::spi::TransportPayload;
+#[cfg(feature = "async")]
+use qubit_event_bus_redis::r#async::AsyncRedisEventBusProvider;
 use qubit_event_bus_redis::naming::group_name;
 use qubit_event_bus_redis::naming::poison_key;
 use qubit_event_bus_redis::naming::stream_key;
+#[cfg(feature = "sync")]
+use qubit_event_bus_redis::sync::RedisEventBusProvider;
 use qubit_id::Id;
+#[cfg(feature = "async")]
+use qubit_spi::AsyncServiceProvider;
+#[cfg(feature = "sync")]
+use qubit_spi::ServiceProvider;
 use redis::Client;
+use redis::Connection;
 use redis::FromRedisValue;
+use redis::RedisResult;
+use redis::Value;
 use redis::cmd;
+use redis::streams::StreamRangeReply;
 use support::redis_server::RedisServer;
 
 static SUBSCRIPTION_IDS: AtomicU64 = AtomicU64::new(10_000);
 
+/// Builds settings for `server`, `topic_namespace`, and `max_unsettled`;
+/// returns options without I/O and uses immediate pending reclaim.
 fn provider_options(server: &RedisServer, topic_namespace: &str, max_unsettled: usize) -> ProviderOptions {
     [
         ("redis.url".into(), server.url().into()),
@@ -56,7 +80,9 @@ fn provider_options(server: &RedisServer, topic_namespace: &str, max_unsettled: 
     .into()
 }
 
-fn event(topic: &str, id: &str, bytes: &[u8]) -> Result<OutboundMessage, Box<dyn std::error::Error>> {
+/// Builds an encoded event for `topic` and `id` containing `bytes`; returns
+/// identifier/content-type validation errors without network I/O.
+fn event(topic: &str, id: &str, bytes: &[u8]) -> Result<OutboundMessage, Box<dyn Error>> {
     Ok(OutboundMessage::new(
         TopicAddress::new(topic)?,
         EventId::new(id)?,
@@ -72,12 +98,14 @@ fn event(topic: &str, id: &str, bytes: &[u8]) -> Result<OutboundMessage, Box<dyn
     ))
 }
 
+/// Builds a request for `topic`, `subscriber`, `group`, and `durability`;
+/// returns identifier validation errors without network I/O.
 fn request(
     topic: &str,
     subscriber: &str,
     group: &str,
     durability: SubscriptionDurability,
-) -> Result<SpiSubscriptionRequest, Box<dyn std::error::Error>> {
+) -> Result<SpiSubscriptionRequest, Box<dyn Error>> {
     Ok(SpiSubscriptionRequest::new(
         Id::new(SUBSCRIPTION_IDS.fetch_add(1, Ordering::Relaxed)),
         TopicAddress::new(topic)?,
@@ -90,26 +118,26 @@ fn request(
     ))
 }
 
+/// Returns a lazy sync bus for `server`, `namespace`, and `max_unsettled`;
+/// configuration/provider validation errors propagate without connecting.
 #[cfg(feature = "sync")]
 fn sync_bus(
     server: &RedisServer,
     namespace: &str,
     max_unsettled: usize,
-) -> Result<Arc<dyn qubit_event_bus::spi::EventBusSpi>, Box<dyn std::error::Error>> {
+) -> Result<Arc<dyn EventBusSpi>, Box<dyn Error>> {
     sync_bus_with_claim(server, namespace, max_unsettled, 0)
 }
 
+/// Returns a lazy sync bus for the endpoint and supplied namespace/active
+/// bound, using `claim_min_idle_ms`; returns validation errors without I/O.
 #[cfg(feature = "sync")]
 fn sync_bus_with_claim(
     server: &RedisServer,
     namespace: &str,
     max_unsettled: usize,
     claim_min_idle_ms: usize,
-) -> Result<Arc<dyn qubit_event_bus::spi::EventBusSpi>, Box<dyn std::error::Error>> {
-    use qubit_event_bus::EventBusConfig;
-    use qubit_event_bus_redis::sync::RedisEventBusProvider;
-    use qubit_spi::ServiceProvider;
-
+) -> Result<Arc<dyn EventBusSpi>, Box<dyn Error>> {
     let mut options = provider_options(server, namespace, max_unsettled);
     options.insert("redis.claim_min_idle_ms".into(), claim_min_idle_ms.to_string());
     RedisEventBusProvider
@@ -118,25 +146,26 @@ fn sync_bus_with_claim(
         .map_err(Into::into)
 }
 
+/// Returns a lazy async bus for `server`, `namespace`, and `max_unsettled`;
+/// configuration/provider validation errors propagate without connecting.
 #[cfg(feature = "async")]
 async fn async_bus(
     server: &RedisServer,
     namespace: &str,
     max_unsettled: usize,
-) -> Result<Arc<dyn qubit_event_bus::spi::AsyncEventBusSpi>, Box<dyn std::error::Error>> {
+) -> Result<Arc<dyn AsyncEventBusSpi>, Box<dyn Error>> {
     async_bus_with_claim(server, namespace, max_unsettled, 0).await
 }
 
+/// Returns a lazy async bus for the endpoint and supplied namespace/active
+/// bound, using `claim_min_idle_ms`; returns validation errors without I/O.
 #[cfg(feature = "async")]
 async fn async_bus_with_claim(
     server: &RedisServer,
     namespace: &str,
     max_unsettled: usize,
     claim_min_idle_ms: usize,
-) -> Result<Arc<dyn qubit_event_bus::spi::AsyncEventBusSpi>, Box<dyn std::error::Error>> {
-    use qubit_event_bus_redis::r#async::AsyncRedisEventBusProvider;
-    use qubit_spi::AsyncServiceProvider;
-
+) -> Result<Arc<dyn AsyncEventBusSpi>, Box<dyn Error>> {
     let mut options = provider_options(server, namespace, max_unsettled);
     options.insert("redis.claim_min_idle_ms".into(), claim_min_idle_ms.to_string());
     AsyncRedisEventBusProvider
@@ -148,7 +177,7 @@ async fn async_bus_with_claim(
 
 #[cfg(feature = "sync")]
 #[test]
-fn sync_skips_unsettled_id_and_delivers_next() -> Result<(), Box<dyn std::error::Error>> {
+fn test_sync_skips_unsettled_id_and_delivers_next() -> Result<(), Box<dyn Error>> {
     let server = RedisServer::start()?;
     let bus = sync_bus(&server, "recovery-sync", 2)?;
     bus.publish(event("events", "sync-first", b"first")?)?;
@@ -176,8 +205,7 @@ fn sync_skips_unsettled_id_and_delivers_next() -> Result<(), Box<dyn std::error:
 
 #[cfg(feature = "sync")]
 #[test]
-fn sync_retry_releases_active_id_for_redelivery() -> Result<(), Box<dyn std::error::Error>> {
-    use qubit_event_bus::spi::DeliveryDisposition;
+fn test_sync_retry_releases_active_id_for_redelivery() -> Result<(), Box<dyn Error>> {
     let server = RedisServer::start()?;
     let bus = sync_bus(&server, "retry-sync", 2)?;
     bus.publish(event("events", "retry-first", b"first")?)?;
@@ -201,8 +229,7 @@ fn sync_retry_releases_active_id_for_redelivery() -> Result<(), Box<dyn std::err
 
 #[cfg(feature = "sync")]
 #[test]
-fn sync_rejects_foreign_settlement_and_is_idempotent_after_close() -> Result<(), Box<dyn std::error::Error>> {
-    use qubit_event_bus::spi::DeliveryDisposition;
+fn test_sync_rejects_foreign_settlement_and_is_idempotent_after_close() -> Result<(), Box<dyn Error>> {
     let server = RedisServer::start()?;
     let bus = sync_bus(&server, "token-sync", 2)?;
     bus.publish(event("events", "token-event", b"payload")?)?;
@@ -232,9 +259,8 @@ fn sync_rejects_foreign_settlement_and_is_idempotent_after_close() -> Result<(),
 
 #[cfg(feature = "async")]
 #[test]
-fn async_retry_releases_active_id_for_redelivery() -> Result<(), Box<dyn std::error::Error>> {
-    use qubit_event_bus::spi::DeliveryDisposition;
-    futures_lite::future::block_on(async {
+fn test_async_retry_releases_active_id_for_redelivery() -> Result<(), Box<dyn Error>> {
+    block_on(async {
         let server = RedisServer::start()?;
         let bus = async_bus(&server, "retry-async", 2).await?;
         bus.publish(event("events", "retry-first-async", b"first")?).await?;
@@ -255,15 +281,14 @@ fn async_retry_releases_active_id_for_redelivery() -> Result<(), Box<dyn std::er
             return Err("retried message missing".into());
         };
         assert_eq!(retried.id().as_str(), "retry-first-async");
-        Ok::<(), Box<dyn std::error::Error>>(())
+        Ok::<(), Box<dyn Error>>(())
     })
 }
 
 #[cfg(feature = "async")]
 #[test]
-fn async_rejects_foreign_settlement_and_is_idempotent_after_close() -> Result<(), Box<dyn std::error::Error>> {
-    use qubit_event_bus::spi::DeliveryDisposition;
-    futures_lite::future::block_on(async {
+fn test_async_rejects_foreign_settlement_and_is_idempotent_after_close() -> Result<(), Box<dyn Error>> {
+    block_on(async {
         let server = RedisServer::start()?;
         let bus = async_bus(&server, "token-async", 2).await?;
         bus.publish(event("events", "token-event-async", b"payload")?).await?;
@@ -292,14 +317,14 @@ fn async_rejects_foreign_settlement_and_is_idempotent_after_close() -> Result<()
         owner.settle(token, DeliveryDisposition::Accept).await?;
         owner.close().await?;
         assert!(matches!(owner.receive(Duration::ZERO).await?, ReceiveOutcome::Closed));
-        Ok::<(), Box<dyn std::error::Error>>(())
+        Ok::<(), Box<dyn Error>>(())
     })
 }
 
 #[cfg(feature = "async")]
 #[test]
-fn async_reuses_standalone_short_command_connection() -> Result<(), Box<dyn std::error::Error>> {
-    futures_lite::future::block_on(async {
+fn test_async_reuses_standalone_short_command_connection() -> Result<(), Box<dyn Error>> {
+    block_on(async {
         let server = RedisServer::start()?;
         let bus = async_bus(&server, "connection-reuse", 2).await?;
         let mut observer = Client::open(server.url())?.get_connection()?;
@@ -325,13 +350,13 @@ fn async_reuses_standalone_short_command_connection() -> Result<(), Box<dyn std:
             10,
             "fresh-connection control should create one connection per command"
         );
-        Ok::<(), Box<dyn std::error::Error>>(())
+        Ok::<(), Box<dyn Error>>(())
     })
 }
 
 #[cfg(feature = "sync")]
 #[test]
-fn sync_reuses_standalone_short_command_connection() -> Result<(), Box<dyn std::error::Error>> {
+fn test_sync_reuses_standalone_short_command_connection() -> Result<(), Box<dyn Error>> {
     let server = RedisServer::start()?;
     let bus = sync_bus(&server, "connection-reuse-sync", 2)?;
     let mut observer = Client::open(server.url())?.get_connection()?;
@@ -350,17 +375,24 @@ fn sync_reuses_standalone_short_command_connection() -> Result<(), Box<dyn std::
 
 #[cfg(feature = "sync")]
 #[test]
-fn sync_reuses_subscription_read_connection_across_timeouts() -> Result<(), Box<dyn std::error::Error>> {
+fn test_sync_reuses_subscription_read_connection_across_timeouts() -> Result<(), Box<dyn Error>> {
     let server = RedisServer::start()?;
     let bus = sync_bus(&server, "read-connection-sync", 2)?;
+    bus.publish(event("warmup", "pool-warmup", b"payload")?)?;
+    let mut observer = Client::open(server.url())?.get_connection()?;
+    let before = total_connections(&mut observer)?;
     let mut receiver = bus.subscribe(request(
         "events",
         "read-worker",
         "read-group",
         SubscriptionDurability::Durable,
     )?)?;
-    let mut observer = Client::open(server.url())?.get_connection()?;
-    let before = total_connections(&mut observer)?;
+    let after_subscribe = total_connections(&mut observer)?;
+    assert_eq!(
+        after_subscribe - before,
+        1,
+        "subscribe should open one dedicated connection"
+    );
     assert!(matches!(
         receiver.receive(Duration::from_millis(5))?,
         ReceiveOutcome::TimedOut
@@ -371,19 +403,22 @@ fn sync_reuses_subscription_read_connection_across_timeouts() -> Result<(), Box<
     ));
     let after = total_connections(&mut observer)?;
     assert_eq!(
-        after - before,
-        1,
-        "two completed receives should share one dedicated connection"
+        after - after_subscribe,
+        0,
+        "two completed receives should reuse the subscription's dedicated connection"
     );
     Ok(())
 }
 
 #[cfg(feature = "async")]
 #[test]
-fn async_reuses_subscription_read_connection_across_timeouts() -> Result<(), Box<dyn std::error::Error>> {
-    futures_lite::future::block_on(async {
+fn test_async_reuses_subscription_read_connection_across_timeouts() -> Result<(), Box<dyn Error>> {
+    block_on(async {
         let server = RedisServer::start()?;
         let bus = async_bus(&server, "read-connection-async", 2).await?;
+        bus.publish(event("warmup", "pool-warmup", b"payload")?).await?;
+        let mut observer = Client::open(server.url())?.get_connection()?;
+        let before = total_connections(&mut observer)?;
         let mut receiver = bus
             .subscribe(request(
                 "events",
@@ -392,8 +427,12 @@ fn async_reuses_subscription_read_connection_across_timeouts() -> Result<(), Box
                 SubscriptionDurability::Durable,
             )?)
             .await?;
-        let mut observer = Client::open(server.url())?.get_connection()?;
-        let before = total_connections(&mut observer)?;
+        let after_subscribe = total_connections(&mut observer)?;
+        assert_eq!(
+            after_subscribe - before,
+            1,
+            "subscribe should open one dedicated connection"
+        );
         assert!(matches!(
             receiver.receive(Duration::from_millis(5)).await?,
             ReceiveOutcome::TimedOut
@@ -404,15 +443,17 @@ fn async_reuses_subscription_read_connection_across_timeouts() -> Result<(), Box
         ));
         let after = total_connections(&mut observer)?;
         assert_eq!(
-            after - before,
-            1,
-            "two completed receives should share one dedicated connection"
+            after - after_subscribe,
+            0,
+            "two completed receives should reuse the subscription's dedicated connection"
         );
-        Ok::<(), Box<dyn std::error::Error>>(())
+        Ok::<(), Box<dyn Error>>(())
     })
 }
 
-fn total_connections(connection: &mut redis::Connection) -> Result<u64, Box<dyn std::error::Error>> {
+/// Reads the cumulative connection counter with blocking I/O on `connection`;
+/// returns Redis, missing-statistic, or malformed-counter errors.
+fn total_connections(connection: &mut Connection) -> Result<u64, Box<dyn Error>> {
     let info: String = cmd("INFO").arg("stats").query(connection)?;
     let value = info
         .lines()
@@ -421,7 +462,9 @@ fn total_connections(connection: &mut redis::Connection) -> Result<u64, Box<dyn 
     Ok(value.parse()?)
 }
 
-fn insert_poison_fixtures(connection: &mut redis::Connection, stream: &str) -> Result<(), Box<dyn std::error::Error>> {
+/// Writes four distinct malformed entries to `stream` on `connection`;
+/// returns Redis I/O/command errors and may leave an already-written prefix.
+fn insert_poison_fixtures(connection: &mut Connection, stream: &str) -> Result<(), Box<dyn Error>> {
     cmd("XADD")
         .arg(stream)
         .arg("*")
@@ -452,8 +495,8 @@ fn insert_poison_fixtures(connection: &mut redis::Connection, stream: &str) -> R
 
 #[cfg(feature = "async")]
 #[test]
-fn async_skips_unsettled_id_and_delivers_next() -> Result<(), Box<dyn std::error::Error>> {
-    futures_lite::future::block_on(async {
+fn test_async_skips_unsettled_id_and_delivers_next() -> Result<(), Box<dyn Error>> {
+    block_on(async {
         let server = RedisServer::start()?;
         let bus = async_bus(&server, "recovery-async", 2).await?;
         bus.publish(event("events", "async-first", b"first")?).await?;
@@ -481,13 +524,13 @@ fn async_skips_unsettled_id_and_delivers_next() -> Result<(), Box<dyn std::error
             receiver.receive(Duration::ZERO).await?,
             ReceiveOutcome::TimedOut
         ));
-        Ok::<(), Box<dyn std::error::Error>>(())
+        Ok::<(), Box<dyn Error>>(())
     })
 }
 
 #[cfg(feature = "sync")]
 #[test]
-fn sync_poison_does_not_block_next() -> Result<(), Box<dyn std::error::Error>> {
+fn test_sync_poison_does_not_block_next() -> Result<(), Box<dyn Error>> {
     let server = RedisServer::start()?;
     let bus = sync_bus(&server, "poison-sync", 2)?;
     let stream = stream_key("poison-sync", "events");
@@ -524,7 +567,7 @@ fn sync_poison_does_not_block_next() -> Result<(), Box<dyn std::error::Error>> {
     );
     let quarantined: usize = cmd("XLEN").arg(quarantine).query(&mut connection)?;
     assert_eq!(quarantined, 4);
-    let records: redis::streams::StreamRangeReply = cmd("XRANGE")
+    let records: StreamRangeReply = cmd("XRANGE")
         .arg(poison_key(
             "poison-sync",
             "events",
@@ -536,7 +579,7 @@ fn sync_poison_does_not_block_next() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(records.ids.len(), 4);
     let raw_wire = String::from_redis_value(records.ids[1].map.get("wire").ok_or("quarantine record omitted wire")?)?;
     assert_eq!(raw_wire, "not-json");
-    let pending: Vec<redis::Value> = cmd("XPENDING")
+    let pending: Vec<Value> = cmd("XPENDING")
         .arg(&stream)
         .arg(group_name(
             "poison-sync",
@@ -558,7 +601,7 @@ fn sync_poison_does_not_block_next() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(feature = "sync")]
 #[test]
-fn sync_unknown_wire_version_stays_pending() -> Result<(), Box<dyn std::error::Error>> {
+fn test_sync_unknown_wire_version_stays_pending() -> Result<(), Box<dyn Error>> {
     let server = RedisServer::start()?;
     let namespace = "unsupported-version-sync";
     let bus = sync_bus(&server, namespace, 2)?;
@@ -584,7 +627,7 @@ fn sync_unknown_wire_version_stays_pending() -> Result<(), Box<dyn std::error::E
     };
     assert_eq!(error.kind(), "unsupported_wire_version");
     assert_eq!(error.retryable(), Some(false));
-    let pending: Vec<redis::Value> = cmd("XPENDING")
+    let pending: Vec<Value> = cmd("XPENDING")
         .arg(&stream)
         .arg(group_name(namespace, "events", "version-worker", Some("version-group")))
         .arg(&message_id)
@@ -605,7 +648,7 @@ fn sync_unknown_wire_version_stays_pending() -> Result<(), Box<dyn std::error::E
 
 #[cfg(feature = "sync")]
 #[test]
-fn sync_quarantine_failure_keeps_source_pending() -> Result<(), Box<dyn std::error::Error>> {
+fn test_sync_quarantine_failure_keeps_source_pending() -> Result<(), Box<dyn Error>> {
     let server = RedisServer::start()?;
     let bus = sync_bus(&server, "poison-failure-sync", 2)?;
     let stream = stream_key("poison-failure-sync", "events");
@@ -634,12 +677,12 @@ fn sync_quarantine_failure_keeps_source_pending() -> Result<(), Box<dyn std::err
     };
     assert!(matches!(
         error,
-        qubit_event_bus::error::SpiError::Operation {
+        SpiError::Operation {
             retryable: Some(false),
             ..
         }
     ));
-    let pending: Vec<redis::Value> = cmd("XPENDING")
+    let pending: Vec<Value> = cmd("XPENDING")
         .arg(&stream)
         .arg(&group)
         .arg("-")
@@ -657,8 +700,8 @@ fn sync_quarantine_failure_keeps_source_pending() -> Result<(), Box<dyn std::err
 
 #[cfg(feature = "async")]
 #[test]
-fn async_quarantine_failure_keeps_source_pending() -> Result<(), Box<dyn std::error::Error>> {
-    futures_lite::future::block_on(async {
+fn test_async_quarantine_failure_keeps_source_pending() -> Result<(), Box<dyn Error>> {
+    block_on(async {
         let server = RedisServer::start()?;
         let bus = async_bus(&server, "poison-failure-async", 2).await?;
         let stream = stream_key("poison-failure-async", "events");
@@ -694,12 +737,12 @@ fn async_quarantine_failure_keeps_source_pending() -> Result<(), Box<dyn std::er
         };
         assert!(matches!(
             error,
-            qubit_event_bus::error::SpiError::Operation {
+            SpiError::Operation {
                 retryable: Some(false),
                 ..
             }
         ));
-        let pending: Vec<redis::Value> = cmd("XPENDING")
+        let pending: Vec<Value> = cmd("XPENDING")
             .arg(&stream)
             .arg(&group)
             .arg("-")
@@ -712,14 +755,14 @@ fn async_quarantine_failure_keeps_source_pending() -> Result<(), Box<dyn std::er
             receiver.receive(Duration::from_secs(2)).await?,
             ReceiveOutcome::Gap(_)
         ));
-        Ok::<(), Box<dyn std::error::Error>>(())
+        Ok::<(), Box<dyn Error>>(())
     })
 }
 
 #[cfg(feature = "async")]
 #[test]
-fn async_poison_does_not_block_next() -> Result<(), Box<dyn std::error::Error>> {
-    futures_lite::future::block_on(async {
+fn test_async_poison_does_not_block_next() -> Result<(), Box<dyn Error>> {
+    block_on(async {
         let server = RedisServer::start()?;
         let bus = async_bus(&server, "poison-async", 2).await?;
         let stream = stream_key("poison-async", "events");
@@ -751,7 +794,7 @@ fn async_poison_does_not_block_next() -> Result<(), Box<dyn std::error::Error>> 
         let quarantine = poison_key("poison-async", "events", &group);
         let quarantined: usize = cmd("XLEN").arg(quarantine).query(&mut verify)?;
         assert_eq!(quarantined, 4);
-        let records: redis::streams::StreamRangeReply = cmd("XRANGE")
+        let records: StreamRangeReply = cmd("XRANGE")
             .arg(poison_key(
                 "poison-async",
                 "events",
@@ -769,7 +812,7 @@ fn async_poison_does_not_block_next() -> Result<(), Box<dyn std::error::Error>> 
         let raw_wire =
             String::from_redis_value(records.ids[1].map.get("wire").ok_or("quarantine record omitted wire")?)?;
         assert_eq!(raw_wire, "not-json");
-        let pending: Vec<redis::Value> = cmd("XPENDING")
+        let pending: Vec<Value> = cmd("XPENDING")
             .arg(&stream)
             .arg(group)
             .arg("-")
@@ -781,14 +824,14 @@ fn async_poison_does_not_block_next() -> Result<(), Box<dyn std::error::Error>> 
             return Err("valid message after poison records was not received".into());
         };
         assert_eq!(valid.id().as_str(), "async-after-poison");
-        Ok::<(), Box<dyn std::error::Error>>(())
+        Ok::<(), Box<dyn Error>>(())
     })
 }
 
 #[cfg(feature = "async")]
 #[test]
-fn async_unknown_wire_version_stays_pending() -> Result<(), Box<dyn std::error::Error>> {
-    futures_lite::future::block_on(async {
+fn test_async_unknown_wire_version_stays_pending() -> Result<(), Box<dyn Error>> {
+    block_on(async {
         let server = RedisServer::start()?;
         let namespace = "unsupported-version-async";
         let bus = async_bus(&server, namespace, 2).await?;
@@ -816,7 +859,7 @@ fn async_unknown_wire_version_stays_pending() -> Result<(), Box<dyn std::error::
         };
         assert_eq!(error.kind(), "unsupported_wire_version");
         assert_eq!(error.retryable(), Some(false));
-        let pending: Vec<redis::Value> = cmd("XPENDING")
+        let pending: Vec<Value> = cmd("XPENDING")
             .arg(&stream)
             .arg(group_name(namespace, "events", "version-worker", Some("version-group")))
             .arg(&message_id)
@@ -832,13 +875,13 @@ fn async_unknown_wire_version_stays_pending() -> Result<(), Box<dyn std::error::
             ))
             .query(&mut connection)?;
         assert_eq!(quarantined, 0);
-        Ok::<(), Box<dyn std::error::Error>>(())
+        Ok::<(), Box<dyn Error>>(())
     })
 }
 
 #[cfg(feature = "sync")]
 #[test]
-fn sync_ephemeral_is_rejected_without_group() -> Result<(), Box<dyn std::error::Error>> {
+fn test_sync_ephemeral_is_rejected_without_group() -> Result<(), Box<dyn Error>> {
     let server = RedisServer::start()?;
     let bus = sync_bus(&server, "ephemeral-sync", 2)?;
     let key = stream_key("ephemeral-sync", "ephemeral-topic");
@@ -852,7 +895,7 @@ fn sync_ephemeral_is_rejected_without_group() -> Result<(), Box<dyn std::error::
     };
     assert!(matches!(
         error,
-        qubit_event_bus::error::SpiError::Operation {
+        SpiError::Operation {
             kind: "unsupported_subscription_durability",
             retryable: Some(false),
             ..
@@ -866,8 +909,8 @@ fn sync_ephemeral_is_rejected_without_group() -> Result<(), Box<dyn std::error::
 
 #[cfg(feature = "async")]
 #[test]
-fn async_ephemeral_is_rejected_without_group() -> Result<(), Box<dyn std::error::Error>> {
-    futures_lite::future::block_on(async {
+fn test_async_ephemeral_is_rejected_without_group() -> Result<(), Box<dyn Error>> {
+    block_on(async {
         let server = RedisServer::start()?;
         let bus = async_bus(&server, "ephemeral-async", 2).await?;
         let key = stream_key("ephemeral-async", "ephemeral-topic");
@@ -884,7 +927,7 @@ fn async_ephemeral_is_rejected_without_group() -> Result<(), Box<dyn std::error:
         };
         assert!(matches!(
             error,
-            qubit_event_bus::error::SpiError::Operation {
+            SpiError::Operation {
                 kind: "unsupported_subscription_durability",
                 retryable: Some(false),
                 ..
@@ -893,13 +936,13 @@ fn async_ephemeral_is_rejected_without_group() -> Result<(), Box<dyn std::error:
         let mut connection = Client::open(server.url())?.get_connection()?;
         let exists: bool = cmd("EXISTS").arg(key).query(&mut connection)?;
         assert!(!exists, "rejected ephemeral subscription created a stream");
-        Ok::<(), Box<dyn std::error::Error>>(())
+        Ok::<(), Box<dyn Error>>(())
     })
 }
 
 #[cfg(feature = "sync")]
 #[test]
-fn sync_empty_receive_observes_zero_and_bounded_timeouts() -> Result<(), Box<dyn std::error::Error>> {
+fn test_sync_empty_receive_observes_zero_and_bounded_timeouts() -> Result<(), Box<dyn Error>> {
     let server = RedisServer::start()?;
     let bus = sync_bus(&server, "timeout-sync", 2)?;
     let mut receiver = bus.subscribe(request(
@@ -918,8 +961,8 @@ fn sync_empty_receive_observes_zero_and_bounded_timeouts() -> Result<(), Box<dyn
 
 #[cfg(feature = "async")]
 #[test]
-fn async_empty_receive_observes_zero_and_bounded_timeouts() -> Result<(), Box<dyn std::error::Error>> {
-    futures_lite::future::block_on(async {
+fn test_async_empty_receive_observes_zero_and_bounded_timeouts() -> Result<(), Box<dyn Error>> {
+    block_on(async {
         let server = RedisServer::start()?;
         let bus = async_bus(&server, "timeout-async", 2).await?;
         let mut receiver = bus
@@ -938,13 +981,13 @@ fn async_empty_receive_observes_zero_and_bounded_timeouts() -> Result<(), Box<dy
             receiver.receive(Duration::from_millis(20)).await?,
             ReceiveOutcome::TimedOut
         ));
-        Ok::<(), Box<dyn std::error::Error>>(())
+        Ok::<(), Box<dyn Error>>(())
     })
 }
 
 #[cfg(feature = "sync")]
 #[test]
-fn sync_zero_timeout_progresses_past_active_pending_records() -> Result<(), Box<dyn std::error::Error>> {
+fn test_sync_zero_timeout_progresses_past_active_pending_records() -> Result<(), Box<dyn Error>> {
     let server = RedisServer::start()?;
     let bus = sync_bus(&server, "scan-budget-sync", 64)?;
     for index in 0..24 {
@@ -977,8 +1020,8 @@ fn sync_zero_timeout_progresses_past_active_pending_records() -> Result<(), Box<
 
 #[cfg(feature = "async")]
 #[test]
-fn async_zero_timeout_progresses_past_active_pending_records() -> Result<(), Box<dyn std::error::Error>> {
-    futures_lite::future::block_on(async {
+fn test_async_zero_timeout_progresses_past_active_pending_records() -> Result<(), Box<dyn Error>> {
+    block_on(async {
         let server = RedisServer::start()?;
         let bus = async_bus(&server, "scan-budget-async", 64).await?;
         for index in 0..24 {
@@ -1009,19 +1052,19 @@ fn async_zero_timeout_progresses_past_active_pending_records() -> Result<(), Box
             }
         }
         assert!(found, "zero-timeout scans did not progress to a new message");
-        Ok::<(), Box<dyn std::error::Error>>(())
+        Ok::<(), Box<dyn Error>>(())
     })
 }
 
 #[cfg(feature = "sync")]
 #[test]
-fn sync_duration_max_waits_for_a_message() -> Result<(), Box<dyn std::error::Error>> {
+fn test_sync_duration_max_waits_for_a_message() -> Result<(), Box<dyn Error>> {
     let server = RedisServer::start()?;
     let bus = sync_bus(&server, "timeout-max-sync", 2)?;
     let publisher = Arc::clone(&bus);
     let message = event("events", "max-timeout-event", b"payload")?;
-    let thread = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(50));
+    let thread = spawn(move || {
+        sleep(Duration::from_millis(50));
         publisher.publish(message)
     });
     let mut receiver = bus.subscribe(request(
@@ -1040,7 +1083,7 @@ fn sync_duration_max_waits_for_a_message() -> Result<(), Box<dyn std::error::Err
 
 #[cfg(feature = "sync")]
 #[test]
-fn sync_long_receive_reclaims_after_idle_threshold_without_new_messages() -> Result<(), Box<dyn std::error::Error>> {
+fn test_sync_long_receive_reclaims_after_idle_threshold_without_new_messages() -> Result<(), Box<dyn Error>> {
     let server = RedisServer::start()?;
     let bus = sync_bus_with_claim(&server, "late-claim-sync", 2, 100)?;
     bus.publish(event("events", "late-claim-sync", b"payload")?)?;
@@ -1071,8 +1114,8 @@ fn sync_long_receive_reclaims_after_idle_threshold_without_new_messages() -> Res
 
 #[cfg(feature = "async")]
 #[test]
-fn async_long_receive_reclaims_after_idle_threshold_without_new_messages() -> Result<(), Box<dyn std::error::Error>> {
-    futures_lite::future::block_on(async {
+fn test_async_long_receive_reclaims_after_idle_threshold_without_new_messages() -> Result<(), Box<dyn Error>> {
+    block_on(async {
         let server = RedisServer::start()?;
         let bus = async_bus_with_claim(&server, "late-claim-async", 2, 100).await?;
         bus.publish(event("events", "late-claim-async", b"payload")?).await?;
@@ -1102,15 +1145,13 @@ fn async_long_receive_reclaims_after_idle_threshold_without_new_messages() -> Re
             return Err("one long receive did not recover the idle pending message".into());
         };
         assert_eq!(recovered.id().as_str(), "late-claim-async");
-        Ok::<(), Box<dyn std::error::Error>>(())
+        Ok::<(), Box<dyn Error>>(())
     })
 }
 
 #[cfg(feature = "sync")]
 #[test]
-fn sync_deleted_pending_entry_is_cleared_on_redis_6_2_and_7() -> Result<(), Box<dyn std::error::Error>> {
-    use qubit_event_bus::spi::DeliveryDisposition;
-
+fn test_sync_deleted_pending_entry_is_cleared_on_redis_6_2_and_7() -> Result<(), Box<dyn Error>> {
     for image in ["6.2-alpine", "7-alpine"] {
         let server = RedisServer::start_version(image)?;
         let namespace = format!("deleted-sync-{image}");
@@ -1119,7 +1160,7 @@ fn sync_deleted_pending_entry_is_cleared_on_redis_6_2_and_7() -> Result<(), Box<
         let group = group_name(&namespace, "events", "deleted-worker", Some("deleted-group"));
         let mut connection = Client::open(server.url())?.get_connection()?;
         bus.publish(event("events", "deleted-sync", b"payload")?)?;
-        let entries: redis::streams::StreamRangeReply = cmd("XRANGE")
+        let entries: StreamRangeReply = cmd("XRANGE")
             .arg(&key)
             .arg("-")
             .arg("+")
@@ -1148,7 +1189,7 @@ fn sync_deleted_pending_entry_is_cleared_on_redis_6_2_and_7() -> Result<(), Box<
         assert_eq!(deleted, 1);
         assert!(matches!(receiver.receive(Duration::ZERO)?, ReceiveOutcome::Gap(_)));
         assert!(matches!(receiver.receive(Duration::ZERO)?, ReceiveOutcome::TimedOut));
-        let pending: Vec<redis::Value> = cmd("XPENDING")
+        let pending: Vec<Value> = cmd("XPENDING")
             .arg(&key)
             .arg(&group)
             .arg("-")
@@ -1162,10 +1203,8 @@ fn sync_deleted_pending_entry_is_cleared_on_redis_6_2_and_7() -> Result<(), Box<
 
 #[cfg(feature = "async")]
 #[test]
-fn async_deleted_pending_entry_is_cleared_on_redis_6_2_and_7() -> Result<(), Box<dyn std::error::Error>> {
-    futures_lite::future::block_on(async {
-        use qubit_event_bus::spi::DeliveryDisposition;
-
+fn test_async_deleted_pending_entry_is_cleared_on_redis_6_2_and_7() -> Result<(), Box<dyn Error>> {
+    block_on(async {
         for image in ["6.2-alpine", "7-alpine"] {
             let server = RedisServer::start_version(image)?;
             let namespace = format!("deleted-async-{image}");
@@ -1174,7 +1213,7 @@ fn async_deleted_pending_entry_is_cleared_on_redis_6_2_and_7() -> Result<(), Box
             let group = group_name(&namespace, "events", "deleted-worker", Some("deleted-group"));
             let mut connection = Client::open(server.url())?.get_connection()?;
             bus.publish(event("events", "deleted-async", b"payload")?).await?;
-            let entries: redis::streams::StreamRangeReply = cmd("XRANGE")
+            let entries: StreamRangeReply = cmd("XRANGE")
                 .arg(&key)
                 .arg("-")
                 .arg("+")
@@ -1211,7 +1250,7 @@ fn async_deleted_pending_entry_is_cleared_on_redis_6_2_and_7() -> Result<(), Box
                 receiver.receive(Duration::ZERO).await?,
                 ReceiveOutcome::TimedOut
             ));
-            let pending: Vec<redis::Value> = cmd("XPENDING")
+            let pending: Vec<Value> = cmd("XPENDING")
                 .arg(&key)
                 .arg(&group)
                 .arg("-")
@@ -1220,21 +1259,21 @@ fn async_deleted_pending_entry_is_cleared_on_redis_6_2_and_7() -> Result<(), Box
                 .query(&mut connection)?;
             assert!(pending.is_empty(), "{image} retained a tombstone in the PEL");
         }
-        Ok::<(), Box<dyn std::error::Error>>(())
+        Ok::<(), Box<dyn Error>>(())
     })
 }
 
 #[cfg(feature = "async")]
 #[test]
-fn async_duration_max_waits_for_a_message() -> Result<(), Box<dyn std::error::Error>> {
-    futures_lite::future::block_on(async {
+fn test_async_duration_max_waits_for_a_message() -> Result<(), Box<dyn Error>> {
+    block_on(async {
         let server = RedisServer::start()?;
         let bus = async_bus(&server, "timeout-max-async", 2).await?;
         let publisher = Arc::clone(&bus);
         let outbound = event("events", "max-timeout-event", b"payload")?;
-        let thread = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(50));
-            futures_lite::future::block_on(publisher.publish(outbound))
+        let thread = spawn(move || {
+            sleep(Duration::from_millis(50));
+            block_on(publisher.publish(outbound))
         });
         let mut receiver = bus
             .subscribe(request(
@@ -1249,14 +1288,13 @@ fn async_duration_max_waits_for_a_message() -> Result<(), Box<dyn std::error::Er
         };
         assert_eq!(message.id().as_str(), "max-timeout-event");
         thread.join().map_err(|_| "publisher thread panicked")??;
-        Ok::<(), Box<dyn std::error::Error>>(())
+        Ok::<(), Box<dyn Error>>(())
     })
 }
 
 #[cfg(feature = "sync")]
 #[test]
-fn sync_xack_failure_keeps_token_retryable_and_slot_occupied() -> Result<(), Box<dyn std::error::Error>> {
-    use qubit_event_bus::spi::DeliveryDisposition;
+fn test_sync_xack_failure_keeps_token_retryable_and_slot_occupied() -> Result<(), Box<dyn Error>> {
     let server = RedisServer::start()?;
     let bus = sync_bus(&server, "settle-error-sync", 1)?;
     let key = stream_key("settle-error-sync", "events");
@@ -1281,9 +1319,8 @@ fn sync_xack_failure_keeps_token_retryable_and_slot_occupied() -> Result<(), Box
 
 #[cfg(feature = "async")]
 #[test]
-fn async_xack_failure_keeps_token_retryable_and_slot_occupied() -> Result<(), Box<dyn std::error::Error>> {
-    use qubit_event_bus::spi::DeliveryDisposition;
-    futures_lite::future::block_on(async {
+fn test_async_xack_failure_keeps_token_retryable_and_slot_occupied() -> Result<(), Box<dyn Error>> {
+    block_on(async {
         let server = RedisServer::start()?;
         let bus = async_bus(&server, "settle-error-async", 1).await?;
         let key = stream_key("settle-error-async", "events");
@@ -1308,13 +1345,13 @@ fn async_xack_failure_keeps_token_retryable_and_slot_occupied() -> Result<(), Bo
             receiver.receive(Duration::ZERO).await?,
             ReceiveOutcome::TimedOut
         ));
-        Ok::<(), Box<dyn std::error::Error>>(())
+        Ok::<(), Box<dyn Error>>(())
     })
 }
 
 #[cfg(feature = "sync")]
 #[test]
-fn sync_removed_group_error_has_unknown_retryability() -> Result<(), Box<dyn std::error::Error>> {
+fn test_sync_removed_group_error_has_unknown_retryability() -> Result<(), Box<dyn Error>> {
     let server = RedisServer::start()?;
     let bus = sync_bus(&server, "claim-error-sync", 2)?;
     let key = stream_key("claim-error-sync", "events");
@@ -1335,17 +1372,14 @@ fn sync_removed_group_error_has_unknown_retryability() -> Result<(), Box<dyn std
         Ok(_) => return Err("removed group should fail XAUTOCLAIM".into()),
         Err(error) => error,
     };
-    assert!(matches!(
-        error,
-        qubit_event_bus::error::SpiError::Operation { retryable: None, .. }
-    ));
+    assert!(matches!(error, SpiError::Operation { retryable: None, .. }));
     Ok(())
 }
 
 #[cfg(feature = "async")]
 #[test]
-fn async_removed_group_error_has_unknown_retryability() -> Result<(), Box<dyn std::error::Error>> {
-    futures_lite::future::block_on(async {
+fn test_async_removed_group_error_has_unknown_retryability() -> Result<(), Box<dyn Error>> {
+    block_on(async {
         let server = RedisServer::start()?;
         let bus = async_bus(&server, "claim-error-async", 2).await?;
         let key = stream_key("claim-error-async", "events");
@@ -1368,17 +1402,14 @@ fn async_removed_group_error_has_unknown_retryability() -> Result<(), Box<dyn st
             Ok(_) => return Err("removed group should fail XAUTOCLAIM".into()),
             Err(error) => error,
         };
-        assert!(matches!(
-            error,
-            qubit_event_bus::error::SpiError::Operation { retryable: None, .. }
-        ));
-        Ok::<(), Box<dyn std::error::Error>>(())
+        assert!(matches!(error, SpiError::Operation { retryable: None, .. }));
+        Ok::<(), Box<dyn Error>>(())
     })
 }
 
 #[cfg(feature = "sync")]
 #[test]
-fn sync_drops_reader_connection_after_redis_receive_error() -> Result<(), Box<dyn std::error::Error>> {
+fn test_sync_drops_reader_connection_after_redis_receive_error() -> Result<(), Box<dyn Error>> {
     let mut server = RedisServer::start()?;
     let bus = sync_bus(&server, "read-error-sync", 2)?;
     let mut receiver = bus.subscribe(request(
@@ -1396,20 +1427,20 @@ fn sync_drops_reader_connection_after_redis_receive_error() -> Result<(), Box<dy
     };
     assert!(matches!(
         error,
-        qubit_event_bus::error::SpiError::Operation {
+        SpiError::Operation {
             retryable: Some(false),
             ..
         }
     ));
     let mut shutdown_connection = Client::open(server.url())?.get_connection()?;
-    let _: redis::RedisResult<()> = cmd("SHUTDOWN").arg("NOSAVE").query(&mut shutdown_connection);
+    let _: RedisResult<()> = cmd("SHUTDOWN").arg("NOSAVE").query(&mut shutdown_connection);
     let error = match receiver.receive(Duration::ZERO) {
         Ok(_) => return Err("stopped Redis server should fail receive".into()),
         Err(error) => error,
     };
     assert!(matches!(
         error,
-        qubit_event_bus::error::SpiError::Operation {
+        SpiError::Operation {
             retryable: Some(true),
             ..
         }
@@ -1437,8 +1468,8 @@ fn sync_drops_reader_connection_after_redis_receive_error() -> Result<(), Box<dy
 
 #[cfg(feature = "async")]
 #[test]
-fn async_drops_reader_connection_after_redis_receive_error() -> Result<(), Box<dyn std::error::Error>> {
-    futures_lite::future::block_on(async {
+fn test_async_drops_reader_connection_after_redis_receive_error() -> Result<(), Box<dyn Error>> {
+    block_on(async {
         let mut server = RedisServer::start()?;
         let bus = async_bus(&server, "read-error-async", 2).await?;
         let mut receiver = bus
@@ -1458,20 +1489,20 @@ fn async_drops_reader_connection_after_redis_receive_error() -> Result<(), Box<d
         };
         assert!(matches!(
             error,
-            qubit_event_bus::error::SpiError::Operation {
+            SpiError::Operation {
                 retryable: Some(false),
                 ..
             }
         ));
         let mut shutdown_connection = Client::open(server.url())?.get_connection()?;
-        let _: redis::RedisResult<()> = cmd("SHUTDOWN").arg("NOSAVE").query(&mut shutdown_connection);
+        let _: RedisResult<()> = cmd("SHUTDOWN").arg("NOSAVE").query(&mut shutdown_connection);
         let error = match receiver.receive(Duration::ZERO).await {
             Ok(_) => return Err("stopped Redis server should fail receive".into()),
             Err(error) => error,
         };
         assert!(matches!(
             error,
-            qubit_event_bus::error::SpiError::Operation {
+            SpiError::Operation {
                 retryable: Some(true),
                 ..
             }
@@ -1497,6 +1528,6 @@ fn async_drops_reader_connection_after_redis_receive_error() -> Result<(), Box<d
             receiver.receive(Duration::ZERO).await?,
             ReceiveOutcome::TimedOut
         ));
-        Ok::<(), Box<dyn std::error::Error>>(())
+        Ok::<(), Box<dyn Error>>(())
     })
 }

@@ -11,6 +11,21 @@
 
 mod support;
 
+use std::any::type_name;
+use std::error::Error;
+#[cfg(feature = "sync")]
+use std::path::Path;
+#[cfg(feature = "sync")]
+use std::process::Command;
+#[cfg(feature = "sync")]
+use std::sync::Arc;
+#[cfg(feature = "sync")]
+use std::sync::mpsc::channel;
+#[cfg(feature = "sync")]
+use std::time::Duration;
+
+#[cfg(feature = "async")]
+use futures_lite::future::block_on;
 #[cfg(feature = "async")]
 use qubit_event_bus::AsyncEventBusRegistry;
 use qubit_event_bus::EventBusConfig;
@@ -41,7 +56,6 @@ use qubit_event_bus::model::SubscribeRequest;
 use qubit_event_bus::model::SubscriptionDurability;
 #[cfg(feature = "sync")]
 use qubit_event_bus::model::Topic;
-#[cfg(feature = "sync")]
 use qubit_event_bus::spi::EncodedPayload;
 #[cfg(all(feature = "async", feature = "conformance"))]
 use qubit_event_bus::spi::conformance::AsyncConformanceHooks;
@@ -64,20 +78,20 @@ use support::redis_server::RedisServer;
 
 #[test]
 #[cfg(feature = "sync")]
-fn test_sync_registry_discovers_and_creates_redis_provider() -> Result<(), Box<dyn std::error::Error>> {
-    let _ = std::any::type_name::<RedisEventBusProvider>();
+fn test_sync_registry_discovers_and_creates_redis_provider() -> Result<(), Box<dyn Error>> {
+    let _ = type_name::<RedisEventBusProvider>();
     let server = RedisServer::start()?;
     let registry = EventBusRegistry::discover()?;
     assert!(registry.provider_ids().iter().any(|id| id.as_str() == "redis-streams"));
     let mut codecs = CodecRegistry::new();
-    codecs.register::<String>(std::sync::Arc::new(Utf8Codec(ContentType::new("text/plain")?)));
-    let facade = EventBusFacadeConfig::new().with_codec_registry(std::sync::Arc::new(codecs));
+    codecs.register::<String>(Arc::new(Utf8Codec(ContentType::new("text/plain")?)));
+    let facade = EventBusFacadeConfig::new().with_codec_registry(Arc::new(codecs));
     let config = redis_config(server.url())
         .with_selection(ProviderSelection::named("redis-streams")?)
         .with_facade_config(facade);
     let bus = registry.create(&config)?;
     let topic = Topic::<String>::new("discovery.events")?;
-    let (sender, receiver) = std::sync::mpsc::channel();
+    let (sender, receiver) = channel();
     let subscription = bus.subscribe(
         SubscribeRequest::builder()
             .subscriber_id(SubscriberId::new("discovery-worker")?)
@@ -91,7 +105,7 @@ fn test_sync_registry_discovers_and_creates_redis_provider() -> Result<(), Box<d
     )?;
     bus.publish(PublishRequest::new(topic, "automatically discovered".to_owned())?)?;
     assert_eq!(
-        receiver.recv_timeout(std::time::Duration::from_secs(3))?,
+        receiver.recv_timeout(Duration::from_secs(3))?,
         "automatically discovered"
     );
     #[cfg(feature = "conformance")]
@@ -109,21 +123,23 @@ fn test_sync_registry_discovers_and_creates_redis_provider() -> Result<(), Box<d
 }
 
 #[cfg(feature = "sync")]
-/// Preserves the schema-free UTF-8 wire format with strict default metadata
-/// validation.
 struct Utf8Codec(ContentType);
 
 #[cfg(feature = "sync")]
 impl EventCodec<String> for Utf8Codec {
+    /// Returns the codec's configured content type without I/O.
     fn content_type(&self) -> &ContentType {
         &self.0
     }
+    /// Returns None because this UTF-8 fixture has no schema.
     fn schema_id(&self) -> Option<&SchemaId> {
         None
     }
-    fn encode(&self, value: &String) -> Result<std::sync::Arc<[u8]>, CodecError> {
-        Ok(std::sync::Arc::from(value.as_bytes()))
+    /// Copies `value` to owned UTF-8 bytes; returns success without I/O.
+    fn encode(&self, value: &String) -> Result<Arc<[u8]>, CodecError> {
+        Ok(Arc::from(value.as_bytes()))
     }
+    /// Decodes `bytes` as UTF-8, returning invalid UTF-8 as a codec error.
     fn decode(&self, payload: &EncodedPayload) -> Result<String, CodecError> {
         String::from_utf8(payload.bytes().to_vec()).map_err(|source| CodecError::Decode {
             source: Box::new(source),
@@ -133,17 +149,17 @@ impl EventCodec<String> for Utf8Codec {
 
 #[test]
 #[cfg(feature = "async")]
-fn test_async_registry_discovers_and_creates_redis_provider() -> Result<(), Box<dyn std::error::Error>> {
-    let _ = std::any::type_name::<AsyncRedisEventBusProvider>();
+fn test_async_registry_discovers_and_creates_redis_provider() -> Result<(), Box<dyn Error>> {
+    let _ = type_name::<AsyncRedisEventBusProvider>();
     let server = RedisServer::start()?;
     let registry = AsyncEventBusRegistry::discover()?;
     assert!(registry.provider_ids().iter().any(|id| id.as_str() == "redis-streams"));
     let config = redis_config(server.url()).with_selection(ProviderSelection::named("redis-streams")?);
-    let _bus = futures_lite::future::block_on(registry.create(&config))?;
+    let _bus = block_on(registry.create(&config))?;
     #[cfg(feature = "conformance")]
     {
         let server_url = server.url().to_owned();
-        let report = futures_lite::future::block_on(run_async(
+        let report = block_on(run_async(
             || {
                 let server_url = server_url.clone();
                 async move {
@@ -162,15 +178,15 @@ fn test_async_registry_discovers_and_creates_redis_provider() -> Result<(), Box<
 
 #[test]
 #[cfg(feature = "sync")]
-fn test_business_consumer_binary_links_provider_without_provider_type_imports() -> Result<(), Box<dyn std::error::Error>>
-{
+fn test_business_consumer_binary_links_provider_without_provider_type_imports() -> Result<(), Box<dyn Error>> {
     let server = RedisServer::start()?;
-    let mut command = std::process::Command::new("cargo");
+    let mut command = Command::new("cargo");
     command
         .arg("run")
+        .arg("--locked")
         .arg("--quiet")
         .arg("--manifest-path")
-        .arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/business_consumer/Cargo.toml"))
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/business_consumer/Cargo.toml"))
         .arg("--")
         .arg(server.url());
     #[cfg(coverage)]
@@ -187,6 +203,7 @@ fn test_business_consumer_binary_links_provider_without_provider_type_imports() 
     Ok(())
 }
 
+/// Returns provider settings for `url` in the discovery namespace without I/O.
 fn redis_config(url: &str) -> EventBusConfig {
     let options: ProviderOptions = [
         ("redis.url".into(), url.into()),

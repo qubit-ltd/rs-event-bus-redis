@@ -12,10 +12,13 @@
 mod support;
 
 use std::any::TypeId;
+use std::error::Error;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::SystemTime;
 
+#[cfg(feature = "async")]
+use futures_lite::future::block_on;
 use qubit_event_bus::EventBusConfig;
 use qubit_event_bus::model::ConsumerGroup;
 use qubit_event_bus::model::ContentType;
@@ -31,15 +34,24 @@ use qubit_event_bus::spi::ReceiveOutcome;
 use qubit_event_bus::spi::SpiSubscriptionRequest;
 use qubit_event_bus::spi::TopicAddress;
 use qubit_event_bus::spi::TransportPayload;
+#[cfg(feature = "async")]
+use qubit_event_bus_redis::r#async::AsyncRedisEventBusProvider;
+use qubit_event_bus_redis::naming::group_name;
+use qubit_event_bus_redis::naming::stream_key;
 #[cfg(feature = "sync")]
 use qubit_event_bus_redis::sync::RedisEventBusProvider;
 use qubit_id::Id;
+#[cfg(feature = "async")]
+use qubit_spi::AsyncServiceProvider;
 #[cfg(feature = "sync")]
 use qubit_spi::ServiceProvider;
 use redis::Client;
+use redis::Value;
 use redis::cmd;
 use support::redis_server::RedisServer;
 
+/// Builds options for `server` and `namespace`, preserving pending ownership
+/// by disabling immediate reclaim; returns settings without network I/O.
 fn bus_options(server: &RedisServer, namespace: &str) -> ProviderOptions {
     [
         ("redis.url".into(), server.url().into()),
@@ -49,7 +61,9 @@ fn bus_options(server: &RedisServer, namespace: &str) -> ProviderOptions {
     .into()
 }
 
-fn request() -> Result<SpiSubscriptionRequest, Box<dyn std::error::Error>> {
+/// Builds the fixed durable group request without I/O; returns metadata
+/// validation errors if any fixture identifier is rejected.
+fn request() -> Result<SpiSubscriptionRequest, Box<dyn Error>> {
     Ok(SpiSubscriptionRequest::new(
         Id::new(1),
         TopicAddress::new("events")?,
@@ -62,7 +76,9 @@ fn request() -> Result<SpiSubscriptionRequest, Box<dyn std::error::Error>> {
     ))
 }
 
-fn message() -> Result<OutboundMessage, Box<dyn std::error::Error>> {
+/// Builds the fixed encoded identity event without I/O; returns metadata
+/// validation errors if a fixture identifier or content type is rejected.
+fn message() -> Result<OutboundMessage, Box<dyn Error>> {
     Ok(OutboundMessage::new(
         TopicAddress::new("events")?,
         EventId::new("identity-test-event")?,
@@ -80,7 +96,7 @@ fn message() -> Result<OutboundMessage, Box<dyn std::error::Error>> {
 
 #[cfg(feature = "sync")]
 #[test]
-fn test_sync_separate_buses_do_not_share_consumer_identity() -> Result<(), Box<dyn std::error::Error>> {
+fn test_sync_separate_buses_do_not_share_consumer_identity() -> Result<(), Box<dyn Error>> {
     let server = RedisServer::start()?;
     let namespace = "unique-sync-consumer";
     let options = bus_options(&server, namespace);
@@ -101,11 +117,11 @@ fn test_sync_separate_buses_do_not_share_consumer_identity() -> Result<(), Box<d
     ));
     assert!(matches!(second.receive(Duration::ZERO)?, ReceiveOutcome::TimedOut));
 
-    let group = qubit_event_bus_redis::naming::group_name(namespace, "events", "worker", Some("workers"));
+    let group = group_name(namespace, "events", "worker", Some("workers"));
     let mut connection = Client::open(server.url())?.get_connection()?;
-    let consumers: Vec<redis::Value> = cmd("XINFO")
+    let consumers: Vec<Value> = cmd("XINFO")
         .arg("CONSUMERS")
-        .arg(qubit_event_bus_redis::naming::stream_key(namespace, "events"))
+        .arg(stream_key(namespace, "events"))
         .arg(group)
         .query(&mut connection)?;
     assert_eq!(consumers.len(), 2);
@@ -114,11 +130,8 @@ fn test_sync_separate_buses_do_not_share_consumer_identity() -> Result<(), Box<d
 
 #[cfg(feature = "async")]
 #[test]
-fn test_async_separate_buses_do_not_share_consumer_identity() -> Result<(), Box<dyn std::error::Error>> {
-    futures_lite::future::block_on(async {
-        use qubit_event_bus_redis::r#async::AsyncRedisEventBusProvider;
-        use qubit_spi::AsyncServiceProvider;
-
+fn test_async_separate_buses_do_not_share_consumer_identity() -> Result<(), Box<dyn Error>> {
+    block_on(async {
         let server = RedisServer::start()?;
         let namespace = "unique-async-consumer";
         let options = bus_options(&server, namespace);
@@ -144,14 +157,14 @@ fn test_async_separate_buses_do_not_share_consumer_identity() -> Result<(), Box<
             ReceiveOutcome::TimedOut
         ));
 
-        let group = qubit_event_bus_redis::naming::group_name(namespace, "events", "worker", Some("workers"));
+        let group = group_name(namespace, "events", "worker", Some("workers"));
         let mut connection = Client::open(server.url())?.get_connection()?;
-        let consumers: Vec<redis::Value> = cmd("XINFO")
+        let consumers: Vec<Value> = cmd("XINFO")
             .arg("CONSUMERS")
-            .arg(qubit_event_bus_redis::naming::stream_key(namespace, "events"))
+            .arg(stream_key(namespace, "events"))
             .arg(group)
             .query(&mut connection)?;
         assert_eq!(consumers.len(), 2);
-        Ok::<(), Box<dyn std::error::Error>>(())
+        Ok::<(), Box<dyn Error>>(())
     })
 }

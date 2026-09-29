@@ -9,6 +9,7 @@
 
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use qubit_event_bus::SpiError;
 use qubit_event_bus::model::PublishAcknowledgement;
@@ -32,6 +33,7 @@ use qubit_event_bus::spi::SpiFuture;
 use qubit_event_bus::spi::SpiSubscriptionRequest;
 use qubit_event_bus::spi::SubscriptionModes;
 use redis::RedisError;
+use redis::Value;
 use redis::cmd;
 
 use super::async_redis_event_bus_provider::spi_error;
@@ -41,11 +43,12 @@ use crate::config::RedisEventBusConfig;
 use crate::consumer_identity::new_consumer_name;
 use crate::error::RedisProviderError;
 use crate::internal::RecoveryState;
+use crate::internal::WireLimits;
 use crate::naming::group_name;
 use crate::naming::poison_key;
 use crate::naming::stream_key;
 use crate::redis_provider_error::from_redis_error;
-use crate::wire::WireFields;
+use crate::wire_fields::encode_bounded;
 
 /// Client and validated settings shared by asynchronous SPI operations.
 pub(super) struct AsyncRedisEventBus {
@@ -99,42 +102,52 @@ impl AsyncEventBusSpi for AsyncRedisEventBus {
     /// # Errors
     ///
     /// Returns an SPI error if the payload is not encoded, serialization fails,
-    /// a connection cannot be opened, or Redis rejects `XADD`.
+    /// admission is exhausted, a connection cannot be opened, or Redis rejects
+    /// `XADD`. A missing or malformed reply after send returns
+    /// outcome-unknown without replay.
     fn publish<'a>(&'a self, message: OutboundMessage) -> SpiFuture<'a, Result<PublishAcknowledgement, SpiError>> {
         Box::pin(async move {
-            use qubit_event_bus::model::PublishEffect;
             let topic = message.topic().clone();
-            let before_query = |error| crate::error::to_publish_error(&topic, error, PublishEffect::NotAccepted);
-            let limits = self.settings.wire_limits();
-            let fields = WireFields::from_outbound_with_limits(&message, limits).map_err(before_query)?;
+            let payload = encode_bounded(&message, WireLimits::from_config(&self.settings))
+                .map_err(|error| spi_error("publish", Some(&topic), error))?;
             let key = stream_key(self.settings.namespace(), topic.as_str());
-            let payload = crate::capped_writer::to_capped_json(&fields, limits.wire).map_err(before_query)?;
             let mut connection = self
                 .client
                 .get_async_connection()
                 .await
-                .map_err(|error| before_query(from_redis_error("publish", &error)))?;
+                .map_err(|error| spi_error("publish", Some(&topic), error))?;
             let mut command = cmd("XADD");
             command.arg(key);
             if let Some(maxlen) = self.settings.stream_maxlen_approx() {
                 command.arg("MAXLEN").arg("~").arg(maxlen.get());
             }
-            let result: Result<String, RedisError> = command
-                .arg("*")
-                .arg("wire")
-                .arg(payload)
-                .query_async(&mut connection)
-                .await;
+            command.arg("*").arg("wire").arg(payload);
+            let result = connection.send_packed_command(&command).await;
             let message_id = match result {
-                Ok(id) => id,
-                Err(error) => {
-                    self.client.invalidate_async_connection().await;
-                    return Err(crate::error::query_publish_error(&topic, &error));
+                Ok(Value::BulkString(bytes)) => match String::from_utf8(bytes) {
+                    Ok(id) if valid_stream_id(&id) && id != "0-0" => id,
+                    _ => {
+                        self.client.invalidate_async_connection(connection.generation).await;
+                        return Err(spi_error(
+                            "publish",
+                            Some(&topic),
+                            RedisProviderError::OutcomeUnknown { operation: "publish" },
+                        ));
+                    }
+                },
+                Ok(Value::ServerError(error)) => {
+                    let error: RedisError = error.into();
+                    return Err(spi_error("publish", Some(&topic), from_redis_error("publish", &error)));
+                }
+                Ok(_) | Err(_) => {
+                    self.client.invalidate_async_connection(connection.generation).await;
+                    return Err(spi_error(
+                        "publish",
+                        Some(&topic),
+                        RedisProviderError::OutcomeUnknown { operation: "publish" },
+                    ));
                 }
             };
-            if !valid_stream_id(&message_id) {
-                return Err(crate::error::invalid_publish_reply(&topic));
-            }
             Ok(PublishAcknowledgement::Accepted {
                 provider_message_id: Some(message_id),
                 metadata: Default::default(),
@@ -207,11 +220,20 @@ impl AsyncEventBusSpi for AsyncRedisEventBus {
                     source: Box::new(RedisProviderError::Configuration("invalid Redis stream ID")),
                 });
             }
+            let receiver_permit = self
+                .client
+                .try_receiver()
+                .map_err(|error| spi_error("subscribe", Some(&topic), error))?;
+            let receive_connection = self
+                .client
+                .get_async_dedicated_connection()
+                .await
+                .map_err(|error| spi_error("subscribe", Some(&topic), error))?;
             let mut connection = self
                 .client
                 .get_async_connection()
                 .await
-                .map_err(|error| spi_error("subscribe", Some(&topic), from_redis_error("subscribe", &error)))?;
+                .map_err(|error| spi_error("subscribe", Some(&topic), error))?;
             let result: Result<(), RedisError> = cmd("XGROUP")
                 .arg("CREATE")
                 .arg(&key)
@@ -224,12 +246,13 @@ impl AsyncEventBusSpi for AsyncRedisEventBus {
                 .as_ref()
                 .is_err_and(|error| error.is_io_error() || error.is_timeout())
             {
-                self.client.invalidate_async_connection().await;
+                self.client.invalidate_async_connection(connection.generation).await;
+                drop(connection);
                 let mut retry_connection = self
                     .client
                     .get_async_connection()
                     .await
-                    .map_err(|error| spi_error("subscribe", Some(&topic), from_redis_error("subscribe", &error)))?;
+                    .map_err(|error| spi_error("subscribe", Some(&topic), error))?;
                 cmd("XGROUP")
                     .arg("CREATE")
                     .arg(&key)
@@ -260,7 +283,9 @@ impl AsyncEventBusSpi for AsyncRedisEventBus {
             })?;
             Ok(Box::new(Subscription {
                 client: Arc::clone(&self.client),
-                receive_connection: None,
+                wire_limits: WireLimits::from_config(&self.settings),
+                receive_connection: Some(receive_connection),
+                receiver_permit: Some(receiver_permit),
                 key,
                 group,
                 quarantine,
@@ -269,9 +294,8 @@ impl AsyncEventBusSpi for AsyncRedisEventBus {
                 subscription_id: request.subscription_id(),
                 closed: false,
                 claim_min_idle_ms: self.settings.claim_min_idle_ms(),
-                recovery_interval: std::time::Duration::from_millis(self.settings.recovery_interval_ms() as u64),
+                recovery_interval: Duration::from_millis(self.settings.recovery_interval_ms() as u64),
                 max_unsettled: self.settings.max_unsettled_per_subscription(),
-                wire_limits: self.settings.wire_limits(),
                 recovery: Arc::new(Mutex::new(RecoveryState::new())),
             }) as Box<dyn AsyncEventSubscriptionSpi>)
         })
@@ -286,11 +310,32 @@ impl AsyncEventBusSpi for AsyncRedisEventBus {
     /// # Type Parameters
     ///
     /// - `'a`: Lifetime shared by the bus borrow and the returned future.
+    ///
+    /// # Parameters
+    ///
+    /// - `_mode`: Facade shutdown request; this implementation issues no Redis
+    ///   command.
+    ///
+    /// # Errors
+    ///
+    /// The returned future always resolves successfully; pending PEL state is
+    /// untouched.
     fn shutdown<'a>(&'a self, _mode: ShutdownMode) -> SpiFuture<'a, Result<ShutdownOutcome, SpiError>> {
         Box::pin(async { Ok(ShutdownOutcome::Complete) })
     }
 }
 
+/// Validates the two unsigned decimal components of a Redis stream ID.
+///
+/// # Parameters
+///
+/// - `value`: Milliseconds and sequence separated by exactly one dash.
+///
+/// # Returns
+///
+/// `true` only when both non-empty decimal components fit u64. No Redis I/O is
+/// issued.
+#[must_use]
 fn valid_stream_id(value: &str) -> bool {
     let Some((milliseconds, sequence)) = value.split_once('-') else {
         return false;
@@ -299,55 +344,26 @@ fn valid_stream_id(value: &str) -> bool {
         && !sequence.is_empty()
         && milliseconds.bytes().all(|byte| byte.is_ascii_digit())
         && sequence.bytes().all(|byte| byte.is_ascii_digit())
+        && milliseconds.parse::<u64>().is_ok()
+        && sequence.parse::<u64>().is_ok()
 }
 
 #[cfg(test)]
 mod tests {
-    use std::any::TypeId;
     use std::sync::Arc;
-    use std::time::SystemTime;
+    use std::sync::Mutex;
+    use std::time::Duration;
 
     use futures_lite::future::block_on;
-    use qubit_event_bus::model::ConsumerGroup;
-    use qubit_event_bus::model::ContentType;
-    use qubit_event_bus::model::EventId;
-    use qubit_event_bus::model::Headers;
-    use qubit_event_bus::model::ProviderOptions;
-    use qubit_event_bus::model::StartPosition;
-    use qubit_event_bus::model::SubscriberId;
-    use qubit_event_bus::model::SubscriptionDurability;
-    use qubit_event_bus::spi::AsyncEventBusSpi;
     use qubit_event_bus::spi::AsyncEventSubscriptionSpi;
-    use qubit_event_bus::spi::EncodedPayload;
-    use qubit_event_bus::spi::OutboundMessage;
-    use qubit_event_bus::spi::PayloadModes;
-    use qubit_event_bus::spi::ShutdownMode;
-    use qubit_event_bus::spi::ShutdownOutcome;
-    use qubit_event_bus::spi::SpiSubscriptionRequest;
-    use qubit_event_bus::spi::SubscriptionModes;
     use qubit_event_bus::spi::TopicAddress;
-    use qubit_event_bus::spi::TransportPayload;
     use qubit_id::Id;
 
     use super::AsyncRedisEventBus;
     use crate::client::Client;
     use crate::config::RedisEventBusConfig;
-
-    #[test]
-    fn test_capabilities_and_shutdown_are_available_without_redis() {
-        let settings = RedisEventBusConfig::default();
-        let bus = AsyncRedisEventBus {
-            client: std::sync::Arc::new(Client::new(&settings).expect("default Redis client is valid")),
-            settings,
-        };
-
-        assert_eq!(bus.capabilities().payload_modes(), PayloadModes::Encoded);
-        assert_eq!(bus.capabilities().subscription_modes(), SubscriptionModes::DURABLE);
-        assert_eq!(
-            block_on(bus.shutdown(ShutdownMode::Immediate)).expect("shutdown succeeds"),
-            ShutdownOutcome::Complete
-        );
-    }
+    use crate::internal::RecoveryState;
+    use crate::internal::WireLimits;
 
     #[test]
     fn test_stream_id_validation_rejects_malformed_components() {
@@ -358,7 +374,7 @@ mod tests {
     }
 
     #[test]
-    fn connection_failures_are_returned_for_publish_and_subscribe() {
+    fn test_receiver_connection_failure_is_returned_before_delivery() {
         block_on(async {
             let settings = RedisEventBusConfig::new("redis://127.0.0.1:1/", "connection-errors")
                 .expect("valid test configuration");
@@ -366,47 +382,11 @@ mod tests {
                 client: Arc::new(Client::new(&settings).expect("unreachable Redis URL is syntactically valid")),
                 settings,
             };
-            let native_message = OutboundMessage::new(
-                TopicAddress::new("native").expect("topic is valid"),
-                EventId::new("native-event").expect("event ID is valid"),
-                SystemTime::UNIX_EPOCH,
-                Headers::new(),
-                None,
-                None,
-                TransportPayload::Native(Arc::new(7_u8)),
-            );
-            assert!(AsyncEventBusSpi::publish(&bus, native_message).await.is_err());
-            let topic = TopicAddress::new("events").expect("topic is valid");
-            let message = OutboundMessage::new(
-                topic.clone(),
-                EventId::new("event-1").expect("event ID is valid"),
-                SystemTime::UNIX_EPOCH,
-                Headers::new(),
-                None,
-                None,
-                TransportPayload::Encoded(EncodedPayload::new(
-                    Arc::from(vec![1_u8]),
-                    ContentType::new("application/octet-stream").expect("content type is valid"),
-                    None,
-                )),
-            );
-            let request = SpiSubscriptionRequest::new(
-                Id::new(1),
-                topic,
-                SubscriberId::new("worker").expect("subscriber ID is valid"),
-                Some(ConsumerGroup::new("workers").expect("group name is valid")),
-                SubscriptionDurability::Durable,
-                StartPosition::Earliest,
-                ProviderOptions::new(),
-                TypeId::of::<Vec<u8>>(),
-            );
-
-            assert!(bus.publish(message).await.is_err());
-            assert!(bus.subscribe(request).await.is_err());
-
             let mut receiver = super::Subscription {
                 client: Arc::clone(&bus.client),
+                wire_limits: WireLimits::from_config(&bus.settings),
                 receive_connection: None,
+                receiver_permit: None,
                 key: "connection-errors:events".into(),
                 group: "workers".into(),
                 quarantine: "connection-errors:quarantine".into(),
@@ -415,12 +395,11 @@ mod tests {
                 subscription_id: Id::new(2),
                 closed: false,
                 claim_min_idle_ms: 0,
-                recovery_interval: std::time::Duration::from_secs(1),
+                recovery_interval: Duration::from_secs(1),
                 max_unsettled: 1,
-                wire_limits: crate::wire_limits::WireLimits::default(),
-                recovery: Arc::new(std::sync::Mutex::new(crate::internal::RecoveryState::new())),
+                recovery: Arc::new(Mutex::new(RecoveryState::new())),
             };
-            assert!(receiver.receive(std::time::Duration::ZERO).await.is_err());
+            assert!(receiver.receive(Duration::ZERO).await.is_err());
         });
     }
 }

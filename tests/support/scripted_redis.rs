@@ -10,7 +10,10 @@
 use std::collections::VecDeque;
 use std::io::BufRead;
 use std::io::BufReader;
+use std::io::Error;
+use std::io::ErrorKind;
 use std::io::Read;
+use std::io::Result as IoResult;
 use std::io::Write;
 use std::net::Shutdown;
 use std::net::TcpListener;
@@ -20,6 +23,8 @@ use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::thread::JoinHandle;
+use std::thread::sleep;
+use std::thread::spawn;
 use std::time::Duration;
 
 /// One command's response, including loss of the connection before a reply.
@@ -36,7 +41,8 @@ pub struct Step {
 }
 
 impl Step {
-    /// Expects `command` and writes the supplied raw RESP `reply`.
+    /// Constructs a step expecting `command` and returning a copy of raw RESP
+    /// `reply`.
     pub fn reply(command: &'static str, reply: &[u8]) -> Self {
         Self {
             command,
@@ -44,7 +50,10 @@ impl Step {
         }
     }
 
-    /// Expects `command`, then closes its connection without writing a reply.
+    /// Constructs a step expecting `command` and closing without a response.
+    ///
+    /// If `refuse_connections` is true, subsequent connections are also
+    /// refused.
     pub fn disconnect(command: &'static str, refuse_connections: bool) -> Self {
         Self {
             command,
@@ -78,8 +87,13 @@ pub struct ScriptedRedis {
 }
 
 impl ScriptedRedis {
-    /// Starts a local endpoint for `steps`; returns an error on socket failure.
-    pub fn start(steps: Vec<Step>) -> std::io::Result<Self> {
+    /// Starts a local scripted endpoint and takes ownership of `steps`.
+    ///
+    /// Returns the listener/worker fixture, or an IO error for bind/nonblocking
+    /// setup. Spawns threads that perform blocking socket IO; thread
+    /// creation may panic. Unexpected traffic is recorded for finish, and
+    /// worker panics surface on drop.
+    pub fn start(steps: Vec<Step>) -> IoResult<Self> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let address = listener.local_addr()?;
         listener.set_nonblocking(true)?;
@@ -92,7 +106,7 @@ impl ScriptedRedis {
             refusing: AtomicBool::new(false),
         });
         let shared = Arc::clone(&state);
-        let worker = std::thread::spawn(move || {
+        let worker = spawn(move || {
             let mut workers = Vec::new();
             while !shared.stopping.load(Ordering::SeqCst) {
                 match listener.accept() {
@@ -113,10 +127,10 @@ impl ScriptedRedis {
                             .expect("connections lock")
                             .push(stream.try_clone().expect("clone connection for shutdown"));
                         let state = Arc::clone(&shared);
-                        workers.push(std::thread::spawn(move || serve_connection(stream, &state)));
+                        workers.push(spawn(move || serve_connection(stream, &state)));
                     }
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(Duration::from_millis(1));
+                    Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                        sleep(Duration::from_millis(1));
                     }
                     Err(error) => {
                         shared.errors.lock().expect("errors lock").push(error.to_string());
@@ -135,12 +149,28 @@ impl ScriptedRedis {
         })
     }
 
-    /// Returns the endpoint URL for configuring the real Redis provider.
+    /// Returns the endpoint URL borrowed from this fixture without allocating.
     pub fn url(&self) -> &str {
         &self.url
     }
 
-    /// Asserts that every step matched and returns the observed command args.
+    /// Returns a snapshot of observed commands, leaving unused script steps
+    /// allowed.
+    ///
+    /// Locks shared state briefly and panics for recorded protocol errors or
+    /// poisoned mutexes. Each returned vector contains one command's arguments.
+    pub fn finish_allow_remaining(&self) -> Vec<Vec<String>> {
+        let errors = self.state.errors.lock().expect("errors lock").clone();
+        assert!(errors.is_empty(), "unexpected RESP traffic: {errors:?}");
+        self.state.commands.lock().expect("commands lock").clone()
+    }
+
+    /// Returns a snapshot of observed command arguments after checking all
+    /// steps.
+    ///
+    /// Locks shared state briefly and panics for recorded errors, poisoned
+    /// mutexes, or any unused scripted step. Does not consume the recorded
+    /// command history.
     pub fn finish(&self) -> Vec<Vec<String>> {
         let errors = self.state.errors.lock().expect("errors lock").clone();
         assert!(errors.is_empty(), "unexpected RESP traffic: {errors:?}");
@@ -153,7 +183,11 @@ impl ScriptedRedis {
 }
 
 impl Drop for ScriptedRedis {
-    /// Stops the listener, unblocks socket reads, and joins its worker threads.
+    /// Stops the listener, closes owned socket connections, and joins its
+    /// workers.
+    ///
+    /// Performs blocking socket/thread IO; panics for poisoned state or worker
+    /// failure.
     fn drop(&mut self) {
         self.state.stopping.store(true, Ordering::SeqCst);
         for stream in self.state.connections.lock().expect("connections lock").iter() {
@@ -165,7 +199,11 @@ impl Drop for ScriptedRedis {
     }
 }
 
-/// Reads requests and executes the shared script until the peer disconnects.
+/// Consumes owned `stream` requests against the script shared through `state`.
+///
+/// Performs blocking reads/writes, records invalid traffic, and returns on EOF
+/// or a scripted disconnect. Panics for poisoned state or failed response
+/// writes.
 fn serve_connection(stream: TcpStream, state: &State) {
     let mut reader = BufReader::new(stream);
     while !state.stopping.load(Ordering::SeqCst) {
@@ -213,15 +251,20 @@ fn serve_connection(stream: TcpStream, state: &State) {
     }
 }
 
-/// Parses one bounded RESP2 bulk-string command; EOF means a closed client.
-fn read_command(reader: &mut BufReader<TcpStream>) -> std::io::Result<Option<Vec<String>>> {
+/// Consumes one bounded RESP2 bulk-string command from `reader`.
+///
+/// Returns Some(argument strings), or None for clean initial EOF. Performs
+/// blocking socket reads. Returns IO errors for invalid headers/terminators,
+/// argument counts outside 1..=64, bulk lengths over 64 KiB, invalid UTF-8,
+/// or truncated/failed reads.
+fn read_command(reader: &mut BufReader<TcpStream>) -> IoResult<Option<Vec<String>>> {
     let mut line = String::new();
     if reader.read_line(&mut line)? == 0 {
         return Ok(None);
     }
     let count = parse_length(&line, '*')?;
     if count == 0 || count > 64 {
-        return Err(std::io::Error::other("unexpected command argument count"));
+        return Err(Error::other("unexpected command argument count"));
     }
     let mut command = Vec::with_capacity(count);
     for _ in 0..count {
@@ -229,24 +272,27 @@ fn read_command(reader: &mut BufReader<TcpStream>) -> std::io::Result<Option<Vec
         reader.read_line(&mut line)?;
         let length = parse_length(&line, '$')?;
         if length > 64 * 1024 {
-            return Err(std::io::Error::other("scripted command argument too long"));
+            return Err(Error::other("scripted command argument too long"));
         }
         let mut bytes = vec![0; length + 2];
         reader.read_exact(&mut bytes)?;
         if &bytes[length..] != b"\r\n" {
-            return Err(std::io::Error::other("invalid RESP argument terminator"));
+            return Err(Error::other("invalid RESP argument terminator"));
         }
         bytes.truncate(length);
-        command.push(String::from_utf8(bytes).map_err(std::io::Error::other)?);
+        command.push(String::from_utf8(bytes).map_err(Error::other)?);
     }
     Ok(Some(command))
 }
 
-/// Parses the length of an array or bulk string, rejecting invalid RESP input.
-fn parse_length(line: &str, prefix: char) -> std::io::Result<usize> {
+/// Parses an unsigned length from RESP line `line` with expected `prefix`.
+///
+/// Returns the length, or an IO error for a missing prefix/CRLF terminator
+/// or invalid unsigned integer text. Does not perform IO itself.
+fn parse_length(line: &str, prefix: char) -> IoResult<usize> {
     line.strip_prefix(prefix)
         .and_then(|value| value.strip_suffix("\r\n"))
-        .ok_or_else(|| std::io::Error::other("invalid RESP length header"))?
+        .ok_or_else(|| Error::other("invalid RESP length header"))?
         .parse()
-        .map_err(std::io::Error::other)
+        .map_err(Error::other)
 }

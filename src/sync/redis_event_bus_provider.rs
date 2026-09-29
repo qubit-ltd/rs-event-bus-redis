@@ -27,8 +27,10 @@ use crate::error::RedisProviderError;
 /// Factory registered for synchronous Redis Streams access.
 ///
 /// It validates provider options and creates the SPI implementation without
-/// opening a network connection. Each publish, subscribe, and settlement
-/// operation obtains its own blocking Redis connection.
+/// opening a network connection. Short commands acquire admission-owning
+/// leases and reuse the bounded standalone idle pool; each receiver owns a
+/// dedicated connection until close or drop. Sentinel leases resolve the master
+/// afresh.
 ///
 /// # Examples
 ///
@@ -90,36 +92,5 @@ impl ServiceProvider<EventBusSpec> for RedisEventBusProvider {
             client: Arc::new(client),
             settings,
         }))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use qubit_event_bus::EventBusConfig;
-    use qubit_event_bus::model::ProviderOptions;
-    use qubit_spi::ProviderMetadata;
-    use qubit_spi::ServiceProvider;
-
-    use super::RedisEventBusProvider;
-
-    #[test]
-    fn provider_metadata_has_the_expected_identifier() {
-        assert_eq!(
-            ProviderMetadata::descriptor(&RedisEventBusProvider).id().as_str(),
-            "redis-streams"
-        );
-    }
-
-    #[test]
-    fn configured_provider_validates_options_without_connecting() {
-        let provider = RedisEventBusProvider;
-        let bus = provider
-            .create_configured(&EventBusConfig::default())
-            .expect("default settings create a lazy Redis SPI");
-        let _capabilities = bus.capabilities();
-
-        let options: ProviderOptions = [("redis.max_idle_connections".into(), "0".into())].into();
-        let invalid = EventBusConfig::default().with_provider_options(options);
-        assert!(provider.create_configured(&invalid).is_err());
     }
 }

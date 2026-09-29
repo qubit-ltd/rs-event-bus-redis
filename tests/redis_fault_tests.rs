@@ -14,8 +14,14 @@ mod support;
 
 use std::any::TypeId;
 use std::sync::Arc;
+#[cfg(feature = "sync")]
+use std::sync::mpsc::channel;
+#[cfg(feature = "sync")]
+use std::thread::spawn;
 use std::time::Duration;
 
+#[cfg(feature = "async")]
+use futures_lite::future::block_on;
 use qubit_event_bus::EventBusConfig;
 use qubit_event_bus::SpiError;
 use qubit_event_bus::model::ConsumerGroup;
@@ -23,12 +29,25 @@ use qubit_event_bus::model::ProviderOptions;
 use qubit_event_bus::model::StartPosition;
 use qubit_event_bus::model::SubscriberId;
 use qubit_event_bus::model::SubscriptionDurability;
+#[cfg(feature = "async")]
+use qubit_event_bus::spi::AsyncEventBusSpi;
 use qubit_event_bus::spi::DeliveryDisposition;
+#[cfg(feature = "sync")]
+use qubit_event_bus::spi::EventBusSpi;
 use qubit_event_bus::spi::ReceiveOutcome;
 use qubit_event_bus::spi::SpiSubscriptionRequest;
 use qubit_event_bus::spi::TopicAddress;
+#[cfg(feature = "async")]
+use qubit_event_bus_redis::r#async::AsyncRedisEventBusProvider;
+#[cfg(feature = "sync")]
+use qubit_event_bus_redis::sync::RedisEventBusProvider;
 use qubit_event_bus_redis::wire::WireFields;
 use qubit_id::Id;
+#[cfg(feature = "async")]
+use qubit_spi::AsyncServiceProvider;
+#[cfg(feature = "sync")]
+use qubit_spi::ServiceProvider;
+use serde_json::to_string;
 use support::scripted_redis::ScriptedRedis;
 use support::scripted_redis::Step;
 
@@ -40,6 +59,8 @@ const FAULT: &[u8] = b"-ERR password=fault-secret\r\n";
 struct ReceiveFault {
     name: &'static str,
     timeout: Duration,
+    expected_kind: &'static str,
+    expected_retryable: Option<bool>,
     steps: Vec<Step>,
 }
 
@@ -49,11 +70,15 @@ fn receive_faults() -> Vec<ReceiveFault> {
         ReceiveFault {
             name: "malformed XAUTOCLAIM",
             timeout: Duration::MAX,
+            expected_kind: "outcome_unknown",
+            expected_retryable: Some(true),
             steps: vec![Step::reply("XAUTOCLAIM", b":1\r\n")],
         },
         ReceiveFault {
             name: "XPENDING command failure",
             timeout: Duration::MAX,
+            expected_kind: "redis_error",
+            expected_retryable: None,
             steps: vec![
                 Step::reply("XAUTOCLAIM", TOMBSTONE_CLAIM),
                 Step::reply("XPENDING", FAULT),
@@ -62,6 +87,8 @@ fn receive_faults() -> Vec<ReceiveFault> {
         ReceiveFault {
             name: "malformed XPENDING",
             timeout: Duration::MAX,
+            expected_kind: "outcome_unknown",
+            expected_retryable: Some(true),
             steps: vec![
                 Step::reply("XAUTOCLAIM", TOMBSTONE_CLAIM),
                 Step::reply("XPENDING", b":1\r\n"),
@@ -70,6 +97,8 @@ fn receive_faults() -> Vec<ReceiveFault> {
         ReceiveFault {
             name: "XRANGE command failure",
             timeout: Duration::MAX,
+            expected_kind: "redis_error",
+            expected_retryable: None,
             steps: vec![
                 Step::reply("XAUTOCLAIM", TOMBSTONE_CLAIM),
                 Step::reply("XPENDING", PENDING_ROW),
@@ -79,6 +108,8 @@ fn receive_faults() -> Vec<ReceiveFault> {
         ReceiveFault {
             name: "tombstone acknowledgement failure",
             timeout: Duration::MAX,
+            expected_kind: "outcome_unknown",
+            expected_retryable: Some(false),
             steps: vec![
                 Step::reply("XAUTOCLAIM", TOMBSTONE_CLAIM),
                 Step::reply("XPENDING", PENDING_ROW),
@@ -89,11 +120,15 @@ fn receive_faults() -> Vec<ReceiveFault> {
         ReceiveFault {
             name: "pending XREADGROUP failure",
             timeout: Duration::ZERO,
+            expected_kind: "redis_error",
+            expected_retryable: None,
             steps: vec![Step::reply("XAUTOCLAIM", EMPTY_CLAIM), Step::reply("XREADGROUP", FAULT)],
         },
         ReceiveFault {
             name: "nonblocking XREADGROUP failure",
             timeout: Duration::ZERO,
+            expected_kind: "redis_error",
+            expected_retryable: None,
             steps: vec![
                 Step::reply("XAUTOCLAIM", EMPTY_CLAIM),
                 Step::reply("XREADGROUP", b"*0\r\n"),
@@ -103,6 +138,8 @@ fn receive_faults() -> Vec<ReceiveFault> {
         ReceiveFault {
             name: "blocking XREADGROUP failure",
             timeout: Duration::MAX,
+            expected_kind: "redis_error",
+            expected_retryable: None,
             steps: vec![
                 Step::reply("XAUTOCLAIM", EMPTY_CLAIM),
                 Step::reply("XREADGROUP", b"*0\r\n"),
@@ -179,10 +216,7 @@ fn assert_failure(error: SpiError, expected_operation: &str, expected_kind: &str
 /// Creates a sync bus without making a connection; invalid setup fails the
 /// test.
 #[cfg(feature = "sync")]
-fn sync_bus(server: &ScriptedRedis) -> Arc<dyn qubit_event_bus::spi::EventBusSpi> {
-    use qubit_event_bus_redis::sync::RedisEventBusProvider;
-    use qubit_spi::ServiceProvider;
-
+fn sync_bus(server: &ScriptedRedis) -> Arc<dyn EventBusSpi> {
     RedisEventBusProvider
         .create_configured(&config(server))
         .expect("valid scripted Redis configuration")
@@ -191,10 +225,7 @@ fn sync_bus(server: &ScriptedRedis) -> Arc<dyn qubit_event_bus::spi::EventBusSpi
 /// Creates an async bus without making a connection; invalid setup fails the
 /// test.
 #[cfg(feature = "async")]
-async fn async_bus(server: &ScriptedRedis) -> Arc<dyn qubit_event_bus::spi::AsyncEventBusSpi> {
-    use qubit_event_bus_redis::r#async::AsyncRedisEventBusProvider;
-    use qubit_spi::AsyncServiceProvider;
-
+async fn async_bus(server: &ScriptedRedis) -> Arc<dyn AsyncEventBusSpi> {
     AsyncRedisEventBusProvider
         .create_configured(&config(server))
         .await
@@ -212,7 +243,7 @@ fn test_sync_receive_protocol_faults_are_sanitized_and_retryable() {
             Err(error) => error,
             Ok(_) => panic!("{} should fail", fault.name),
         };
-        assert_failure(error, "receive", "redis_error", None);
+        assert_failure(error, "receive", fault.expected_kind, fault.expected_retryable);
         assert!(
             matches!(subscription.receive(Duration::ZERO), Ok(ReceiveOutcome::TimedOut)),
             "{} must permit retry",
@@ -225,7 +256,7 @@ fn test_sync_receive_protocol_faults_are_sanitized_and_retryable() {
 #[cfg(feature = "async")]
 #[test]
 fn test_async_receive_protocol_faults_are_sanitized_and_retryable() {
-    futures_lite::future::block_on(async {
+    block_on(async {
         for fault in receive_faults() {
             let server = ScriptedRedis::start(receive_script(fault.steps)).expect("start RESP endpoint");
             let bus = async_bus(&server).await;
@@ -237,7 +268,7 @@ fn test_async_receive_protocol_faults_are_sanitized_and_retryable() {
                 Err(error) => error,
                 Ok(_) => panic!("{} should fail", fault.name),
             };
-            assert_failure(error, "receive", "redis_error", None);
+            assert_failure(error, "receive", fault.expected_kind, fault.expected_retryable);
             assert!(
                 matches!(subscription.receive(Duration::ZERO).await, Ok(ReceiveOutcome::TimedOut)),
                 "{} must permit retry",
@@ -276,7 +307,7 @@ fn test_sync_zero_timeout_skips_tombstone_maintenance() {
 #[cfg(feature = "async")]
 #[test]
 fn test_async_zero_timeout_skips_tombstone_maintenance() {
-    futures_lite::future::block_on(async {
+    block_on(async {
         let server = ScriptedRedis::start(vec![
             Step::reply("XGROUP", b"+OK\r\n"),
             Step::reply("XAUTOCLAIM", TOMBSTONE_CLAIM),
@@ -344,7 +375,7 @@ fn test_sync_subscribe_retries_transport_loss_and_reports_reconnection_failure()
 #[cfg(feature = "async")]
 #[test]
 fn test_async_subscribe_retries_transport_loss_and_reports_reconnection_failure() {
-    futures_lite::future::block_on(async {
+    block_on(async {
         for refuse in [false, true] {
             let mut script = vec![Step::disconnect("XGROUP", refuse)];
             if !refuse {
@@ -371,7 +402,7 @@ fn test_async_subscribe_retries_transport_loss_and_reports_reconnection_failure(
 
 /// Returns a valid claimed record with optional Redis 7 deleted-entry IDs.
 fn claimed_record(with_deleted_entry: bool) -> Vec<u8> {
-    let wire = serde_json::to_string(&WireFields {
+    let wire = to_string(&WireFields {
         version: 1,
         event_id: "claimed-event".into(),
         timestamp_ms: 0,
@@ -413,8 +444,8 @@ fn resp_bulk(value: &[u8]) -> Vec<u8> {
 #[cfg(feature = "sync")]
 #[test]
 fn test_sync_gap_preserves_a_claimed_record_without_another_redis_read() {
-    let (completed, received) = std::sync::mpsc::channel();
-    let worker = std::thread::spawn(move || {
+    let (completed, received) = channel();
+    let worker = spawn(move || {
         let server = ScriptedRedis::start(vec![
             Step::reply("XGROUP", b"+OK\r\n"),
             Step::reply("XAUTOCLAIM", &claimed_record(true)),
@@ -443,7 +474,7 @@ fn test_sync_gap_preserves_a_claimed_record_without_another_redis_read() {
 #[cfg(feature = "async")]
 #[test]
 fn test_async_gap_preserves_a_claimed_record_without_another_redis_read() {
-    futures_lite::future::block_on(async {
+    block_on(async {
         let server = ScriptedRedis::start(vec![
             Step::reply("XGROUP", b"+OK\r\n"),
             Step::reply("XAUTOCLAIM", &claimed_record(true)),
@@ -484,7 +515,7 @@ fn test_sync_settlement_connection_failure_keeps_the_token_unapplied() {
             .settle(token, DeliveryDisposition::Accept)
             .expect_err("first XACK loses transport"),
         "settle",
-        "transport",
+        "outcome_unknown",
         Some(true),
     );
     assert_failure(
@@ -495,16 +526,24 @@ fn test_sync_settlement_connection_failure_keeps_the_token_unapplied() {
         "transport",
         Some(true),
     );
-    subscription
-        .settle(token, DeliveryDisposition::Retry)
-        .expect("failed acknowledgement does not record a disposition");
+    assert!(
+        matches!(
+            subscription.settle(token, DeliveryDisposition::Retry),
+            Err(SpiError::InvalidSettlementToken {
+                operation: "settle",
+                retryable: Some(false),
+                ..
+            })
+        ),
+        "unknown acknowledgement retains the original terminal intent"
+    );
     server.finish();
 }
 
 #[cfg(feature = "async")]
 #[test]
 fn test_async_settlement_connection_failure_keeps_the_token_unapplied() {
-    futures_lite::future::block_on(async {
+    block_on(async {
         let server = ScriptedRedis::start(vec![
             Step::reply("XGROUP", b"+OK\r\n"),
             Step::reply("XAUTOCLAIM", &claimed_record(false)),
@@ -523,7 +562,7 @@ fn test_async_settlement_connection_failure_keeps_the_token_unapplied() {
                 .await
                 .expect_err("first XACK loses transport"),
             "settle",
-            "transport",
+            "outcome_unknown",
             Some(true),
         );
         assert_failure(
@@ -535,10 +574,17 @@ fn test_async_settlement_connection_failure_keeps_the_token_unapplied() {
             "transport",
             Some(true),
         );
-        subscription
-            .settle(token, DeliveryDisposition::Retry)
-            .await
-            .expect("failed acknowledgement does not record a disposition");
+        assert!(
+            matches!(
+                subscription.settle(token, DeliveryDisposition::Retry).await,
+                Err(SpiError::InvalidSettlementToken {
+                    operation: "settle",
+                    retryable: Some(false),
+                    ..
+                })
+            ),
+            "unknown acknowledgement retains the original terminal intent"
+        );
         server.finish();
     });
 }
@@ -571,7 +617,7 @@ fn test_sync_receive_rejects_timeout_overflow_before_recovery() {
 #[cfg(feature = "async")]
 #[test]
 fn test_async_receive_rejects_timeout_overflow_before_recovery() {
-    futures_lite::future::block_on(async {
+    block_on(async {
         let server = ScriptedRedis::start(vec![Step::reply("XGROUP", b"+OK\r\n")]).expect("start RESP endpoint");
         let bus = async_bus(&server).await;
         let mut subscription = bus.subscribe(request()).await.expect("group creation succeeds");

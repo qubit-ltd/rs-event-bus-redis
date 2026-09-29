@@ -12,9 +12,12 @@
 mod support;
 
 use std::any::TypeId;
+use std::error::Error;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
+use std::sync::mpsc::channel;
+use std::thread::spawn;
 use std::time::Duration;
 use std::time::SystemTime;
 
@@ -33,6 +36,10 @@ use qubit_event_bus::spi::EncodedPayload;
 use qubit_event_bus::spi::EventBusSpi;
 use qubit_event_bus::spi::OutboundMessage;
 use qubit_event_bus::spi::ReceiveOutcome;
+#[cfg(feature = "conformance")]
+use qubit_event_bus::spi::ShutdownMode;
+#[cfg(feature = "conformance")]
+use qubit_event_bus::spi::ShutdownOutcome;
 use qubit_event_bus::spi::SpiSubscriptionRequest;
 use qubit_event_bus::spi::TopicAddress;
 use qubit_event_bus::spi::TransportPayload;
@@ -49,6 +56,7 @@ use qubit_event_bus_redis::wire::WireFields;
 use qubit_id::Id;
 use qubit_spi::ServiceProvider;
 use redis::Client;
+use redis::Value;
 use redis::cmd;
 use support::controlled_redis::proxy::ControlledRedis;
 use support::redis_server::RedisServer;
@@ -56,7 +64,7 @@ use support::redis_server::RedisServer;
 static SUBSCRIPTION_IDS: AtomicU64 = AtomicU64::new(1);
 
 #[test]
-fn test_sync_close_makes_future_receives_return_closed() -> Result<(), Box<dyn std::error::Error>> {
+fn test_sync_close_makes_future_receives_return_closed() -> Result<(), Box<dyn Error>> {
     let server = RedisServer::start()?;
     let bus = create_bus(&server)?;
     let mut subscription = bus.subscribe(request(
@@ -72,9 +80,7 @@ fn test_sync_close_makes_future_receives_return_closed() -> Result<(), Box<dyn s
 }
 
 #[test]
-fn test_sync_approximate_stream_limit_trims_old_entries_when_enabled() -> Result<(), Box<dyn std::error::Error>> {
-    use qubit_spi::ServiceProvider;
-
+fn test_sync_approximate_stream_limit_trims_old_entries_when_enabled() -> Result<(), Box<dyn Error>> {
     let server = RedisServer::start()?;
     let options: ProviderOptions = [
         ("redis.url".into(), server.url().into()),
@@ -98,9 +104,7 @@ fn test_sync_approximate_stream_limit_trims_old_entries_when_enabled() -> Result
 }
 
 #[test]
-fn test_sync_stream_is_untrimmed_by_default() -> Result<(), Box<dyn std::error::Error>> {
-    use qubit_spi::ServiceProvider;
-
+fn test_sync_stream_is_untrimmed_by_default() -> Result<(), Box<dyn Error>> {
     let server = RedisServer::start()?;
     let options: ProviderOptions = [
         ("redis.url".into(), server.url().into()),
@@ -122,11 +126,15 @@ fn test_sync_stream_is_untrimmed_by_default() -> Result<(), Box<dyn std::error::
     Ok(())
 }
 
-fn create_bus(server: &RedisServer) -> Result<Arc<dyn EventBusSpi>, Box<dyn std::error::Error>> {
+/// Returns a lazy public bus for `server`; configuration/provider validation
+/// errors propagate, and no Redis connection is opened here.
+fn create_bus(server: &RedisServer) -> Result<Arc<dyn EventBusSpi>, Box<dyn Error>> {
     create_bus_url(server.url())
 }
 
-fn create_bus_url(url: &str) -> Result<Arc<dyn EventBusSpi>, Box<dyn std::error::Error>> {
+/// Returns a lazy single-slot bus for `url`; configuration/provider validation
+/// errors propagate before any Redis connection is opened.
+fn create_bus_url(url: &str) -> Result<Arc<dyn EventBusSpi>, Box<dyn Error>> {
     let options: ProviderOptions = [
         ("redis.url".into(), url.into()),
         ("redis.namespace".into(), "sync-tests".into()),
@@ -142,7 +150,7 @@ fn create_bus_url(url: &str) -> Result<Arc<dyn EventBusSpi>, Box<dyn std::error:
 }
 
 #[test]
-fn test_sync_settlement_retry_after_applied_xack_reply_loss() -> Result<(), Box<dyn std::error::Error>> {
+fn test_sync_settlement_retry_after_applied_xack_reply_loss() -> Result<(), Box<dyn Error>> {
     let server = RedisServer::start()?;
     let proxy = ControlledRedis::start(server.url())?;
     let bus = create_bus_url(&proxy.url())?;
@@ -157,8 +165,8 @@ fn test_sync_settlement_retry_after_applied_xack_reply_loss() -> Result<(), Box<
         return Err("published record was not received".into());
     };
     let gate = proxy.pause_after_reply("XACK");
-    let (result_tx, result_rx) = std::sync::mpsc::channel();
-    let worker = std::thread::spawn(move || {
+    let (result_tx, result_rx) = channel();
+    let worker = spawn(move || {
         let failed = receiver
             .settle(
                 received.settlement().expect("settlement token is present"),
@@ -169,7 +177,7 @@ fn test_sync_settlement_retry_after_applied_xack_reply_loss() -> Result<(), Box<
     });
     assert!(gate.wait_until_reached(Duration::from_secs(3)));
     let mut observer = Client::open(server.url())?.get_connection()?;
-    let pending: Vec<redis::Value> = cmd("XPENDING")
+    let pending: Vec<Value> = cmd("XPENDING")
         .arg(stream_key("sync-tests", "settle-reply-loss"))
         .arg(group_name(
             "sync-tests",
@@ -210,7 +218,9 @@ fn test_sync_settlement_retry_after_applied_xack_reply_loss() -> Result<(), Box<
     Ok(())
 }
 
-fn message(topic: &str, id: &str, payload: &[u8]) -> Result<OutboundMessage, Box<dyn std::error::Error>> {
+/// Builds an encoded event from `topic`, `id`, and `payload` without I/O;
+/// returns metadata validation errors for rejected topic, ID, or content type.
+fn message(topic: &str, id: &str, payload: &[u8]) -> Result<OutboundMessage, Box<dyn Error>> {
     Ok(OutboundMessage::new(
         TopicAddress::new(topic)?,
         EventId::new(id)?,
@@ -226,12 +236,15 @@ fn message(topic: &str, id: &str, payload: &[u8]) -> Result<OutboundMessage, Box
     ))
 }
 
+/// Builds a durable request for `topic`, `subscriber`, `position`, and optional
+/// `group` (`Some` explicit shared group, `None` subscriber identity); returns
+/// identifier validation errors without network I/O.
 fn request(
     topic: &str,
     subscriber: &str,
     group: Option<&str>,
     position: StartPosition,
-) -> Result<SpiSubscriptionRequest, Box<dyn std::error::Error>> {
+) -> Result<SpiSubscriptionRequest, Box<dyn Error>> {
     Ok(SpiSubscriptionRequest::new(
         Id::new(SUBSCRIPTION_IDS.fetch_add(1, Ordering::Relaxed)),
         TopicAddress::new(topic)?,
@@ -245,7 +258,7 @@ fn request(
 }
 
 #[test]
-fn test_sync_publish_receive_and_accept() -> Result<(), Box<dyn std::error::Error>> {
+fn test_sync_publish_receive_and_accept() -> Result<(), Box<dyn Error>> {
     let server = RedisServer::start()?;
     let bus = create_bus(&server)?;
     bus.publish(message("orders", "sync-1", &[0, 7, 128, 255])?)?;
@@ -267,7 +280,7 @@ fn test_sync_publish_receive_and_accept() -> Result<(), Box<dyn std::error::Erro
 
 #[test]
 #[cfg(feature = "conformance")]
-fn test_sync_spi_conformance() -> Result<(), Box<dyn std::error::Error>> {
+fn test_sync_spi_conformance() -> Result<(), Box<dyn Error>> {
     let server = RedisServer::start()?;
     let server = Arc::new(server);
     let settlement_server = Arc::clone(&server);
@@ -291,7 +304,7 @@ fn test_sync_spi_conformance() -> Result<(), Box<dyn std::error::Error>> {
             close_cancellation: Some(close_cancellation),
             shutdown_cancellation: Some(shutdown_cancellation),
             durable_recovery: Some(durable_recovery),
-            ephemeral_cleanup: None,
+            ..Default::default()
         },
         ConformanceProfile::Strict,
     );
@@ -299,6 +312,9 @@ fn test_sync_spi_conformance() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Checks repeated Accept and conflicting disposition rejection on `server`
+/// through Redis I/O. Returns success or a setup, transport, or contract
+/// failure description.
 #[cfg(feature = "conformance")]
 fn check_sync_settlement(server: &RedisServer) -> Result<(), String> {
     let bus = create_bus(server).map_err(|error| error.to_string())?;
@@ -334,6 +350,9 @@ fn check_sync_settlement(server: &RedisServer) -> Result<(), String> {
     receiver.close().map_err(|error| error.to_string())
 }
 
+/// Checks receiver usability after bounded receive cancellation on `server`
+/// through Redis I/O. Returns success or a setup, transport, or contract
+/// failure description.
 #[cfg(feature = "conformance")]
 fn check_sync_receive_cancellation(server: &RedisServer) -> Result<(), String> {
     let bus = create_bus(server).map_err(|error| error.to_string())?;
@@ -352,7 +371,7 @@ fn check_sync_receive_cancellation(server: &RedisServer) -> Result<(), String> {
         return Err("bounded receive did not time out on an empty durable stream".into());
     }
     receiver.close().map_err(|error| error.to_string())?;
-    bus.shutdown(qubit_event_bus::spi::ShutdownMode::Immediate)
+    bus.shutdown(ShutdownMode::Immediate)
         .map_err(|error| error.to_string())?;
     if matches!(receiver.receive(Duration::ZERO), Ok(ReceiveOutcome::Closed)) {
         Ok(())
@@ -361,6 +380,9 @@ fn check_sync_receive_cancellation(server: &RedisServer) -> Result<(), String> {
     }
 }
 
+/// Checks that completed Accept stays idempotent after its return value is
+/// lost, and rejects conflicting dispositions through Redis I/O on `server`.
+/// Returns success or a setup, transport, or contract failure description.
 #[cfg(feature = "conformance")]
 fn check_sync_settlement_cancellation(server: &RedisServer) -> Result<(), String> {
     // Sync SPI calls cannot be dropped mid-poll; verify their completed effect
@@ -396,11 +418,14 @@ fn check_sync_settlement_cancellation(server: &RedisServer) -> Result<(), String
         return Err("conflicting settlement succeeded after the completed operation".into());
     }
     receiver.close().map_err(|error| error.to_string())?;
-    bus.shutdown(qubit_event_bus::spi::ShutdownMode::Immediate)
+    bus.shutdown(ShutdownMode::Immediate)
         .map_err(|error| error.to_string())?;
     Ok(())
 }
 
+/// Checks close cancellation boundaries and receiver state on `server` through
+/// Redis I/O. Returns success or a setup, transport, or contract failure
+/// description.
 #[cfg(feature = "conformance")]
 fn check_sync_close_cancellation(server: &RedisServer) -> Result<(), String> {
     let bus = create_bus(server).map_err(|error| error.to_string())?;
@@ -428,7 +453,7 @@ fn check_sync_close_cancellation(server: &RedisServer) -> Result<(), String> {
     if !matches!(receiver.receive(Duration::ZERO), Ok(ReceiveOutcome::Closed)) {
         return Err("receiver was not closed after the completed operation".into());
     }
-    bus.shutdown(qubit_event_bus::spi::ShutdownMode::Immediate)
+    bus.shutdown(ShutdownMode::Immediate)
         .map_err(|error| error.to_string())?;
 
     let recovered_bus = create_bus(server).map_err(|error| error.to_string())?;
@@ -455,30 +480,36 @@ fn check_sync_close_cancellation(server: &RedisServer) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     recovered.close().map_err(|error| error.to_string())?;
     recovered_bus
-        .shutdown(qubit_event_bus::spi::ShutdownMode::Immediate)
+        .shutdown(ShutdownMode::Immediate)
         .map_err(|error| error.to_string())?;
     Ok(())
 }
 
+/// Checks shutdown cancellation boundaries and repeated completion on `server`
+/// through Redis I/O. Returns success or a setup, transport, or contract
+/// failure description.
 #[cfg(feature = "conformance")]
 fn check_sync_shutdown_cancellation(server: &RedisServer) -> Result<(), String> {
     let bus = create_bus(server).map_err(|error| error.to_string())?;
     match bus
-        .shutdown(qubit_event_bus::spi::ShutdownMode::Immediate)
+        .shutdown(ShutdownMode::Immediate)
         .map_err(|error| error.to_string())?
     {
-        qubit_event_bus::spi::ShutdownOutcome::Complete => {}
+        ShutdownOutcome::Complete => {}
         outcome => return Err(format!("shutdown did not complete: {outcome:?}")),
     }
     match bus
-        .shutdown(qubit_event_bus::spi::ShutdownMode::Immediate)
+        .shutdown(ShutdownMode::Immediate)
         .map_err(|error| error.to_string())?
     {
-        qubit_event_bus::spi::ShutdownOutcome::Complete => Ok(()),
+        ShutdownOutcome::Complete => Ok(()),
         outcome => Err(format!("repeated shutdown did not complete: {outcome:?}")),
     }
 }
 
+/// Checks an unsettled durable event survives receiver replacement on `server`
+/// through Redis I/O. Returns success or a setup, transport, or contract
+/// failure description.
 #[cfg(feature = "conformance")]
 fn check_sync_durable_recovery(server: &RedisServer) -> Result<(), String> {
     let bus = create_bus(server).map_err(|error| error.to_string())?;
@@ -502,7 +533,7 @@ fn check_sync_durable_recovery(server: &RedisServer) -> Result<(), String> {
         return Err("recovery fixture received an unexpected event".into());
     }
     receiver.close().map_err(|error| error.to_string())?;
-    bus.shutdown(qubit_event_bus::spi::ShutdownMode::Immediate)
+    bus.shutdown(ShutdownMode::Immediate)
         .map_err(|error| error.to_string())?;
 
     let recovered_bus = create_bus(server).map_err(|error| error.to_string())?;
@@ -537,13 +568,13 @@ fn check_sync_durable_recovery(server: &RedisServer) -> Result<(), String> {
     }
     recovered.close().map_err(|error| error.to_string())?;
     recovered_bus
-        .shutdown(qubit_event_bus::spi::ShutdownMode::Immediate)
+        .shutdown(ShutdownMode::Immediate)
         .map_err(|error| error.to_string())?;
     Ok(())
 }
 
 #[test]
-fn test_sync_retry_remains_in_pending_entries() -> Result<(), Box<dyn std::error::Error>> {
+fn test_sync_retry_remains_in_pending_entries() -> Result<(), Box<dyn Error>> {
     let server = RedisServer::start()?;
     let bus = create_bus(&server)?;
     bus.publish(message("retries", "sync-retry", b"payload")?)?;
@@ -563,7 +594,7 @@ fn test_sync_retry_remains_in_pending_entries() -> Result<(), Box<dyn std::error
 }
 
 #[test]
-fn test_sync_existing_consumer_group_is_not_retried() -> Result<(), Box<dyn std::error::Error>> {
+fn test_sync_existing_consumer_group_is_not_retried() -> Result<(), Box<dyn Error>> {
     let server = RedisServer::start()?;
     let bus = create_bus(&server)?;
     let first = bus.subscribe(request(
@@ -589,7 +620,9 @@ fn test_sync_existing_consumer_group_is_not_retried() -> Result<(), Box<dyn std:
     Ok(())
 }
 
-fn xgroup_command_calls(server: &RedisServer) -> Result<u64, Box<dyn std::error::Error>> {
+/// Reads the XGROUP call counter from `server` with blocking Redis I/O;
+/// returns transport, missing-statistic, and malformed-counter errors.
+fn xgroup_command_calls(server: &RedisServer) -> Result<u64, Box<dyn Error>> {
     let client = Client::open(server.url())?;
     let mut connection = client.get_connection()?;
     let info: String = cmd("INFO").arg("commandstats").query(&mut connection)?;
@@ -602,14 +635,14 @@ fn xgroup_command_calls(server: &RedisServer) -> Result<u64, Box<dyn std::error:
 }
 
 #[test]
-fn test_sync_wire_timestamp_and_payload_metadata() -> Result<(), Box<dyn std::error::Error>> {
+fn test_sync_wire_timestamp_and_payload_metadata() -> Result<(), Box<dyn Error>> {
     let event = message("metadata", "sync-meta", b"bytes")?;
     assert_eq!(WireFields::from_outbound(&event)?.version, 1);
     Ok(())
 }
 
 #[test]
-fn test_sync_unsettled_message_is_claimed_after_consumer_reconnect() -> Result<(), Box<dyn std::error::Error>> {
+fn test_sync_unsettled_message_is_claimed_after_consumer_reconnect() -> Result<(), Box<dyn Error>> {
     let server = RedisServer::start()?;
     let bus = create_bus(&server)?;
     bus.publish(message("recovery", "sync-recovery", b"resume")?)?;
@@ -640,7 +673,7 @@ fn test_sync_unsettled_message_is_claimed_after_consumer_reconnect() -> Result<(
 }
 
 #[test]
-fn test_sync_receiver_pauses_at_unsettled_limit() -> Result<(), Box<dyn std::error::Error>> {
+fn test_sync_receiver_pauses_at_unsettled_limit() -> Result<(), Box<dyn Error>> {
     let server = RedisServer::start()?;
     let bus = create_bus(&server)?;
     bus.publish(message("bounded", "sync-bound-1", b"one")?)?;
@@ -665,7 +698,7 @@ fn test_sync_receiver_pauses_at_unsettled_limit() -> Result<(), Box<dyn std::err
 }
 
 #[test]
-fn test_sync_groups_fan_out_and_share_work() -> Result<(), Box<dyn std::error::Error>> {
+fn test_sync_groups_fan_out_and_share_work() -> Result<(), Box<dyn Error>> {
     let server = RedisServer::start()?;
     let bus = create_bus(&server)?;
     bus.publish(message("groups", "group-event-1", b"one")?)?;
@@ -706,7 +739,7 @@ fn test_sync_groups_fan_out_and_share_work() -> Result<(), Box<dyn std::error::E
 }
 
 #[test]
-fn test_sync_replay_from_stream_position_and_new_tail() -> Result<(), Box<dyn std::error::Error>> {
+fn test_sync_replay_from_stream_position_and_new_tail() -> Result<(), Box<dyn Error>> {
     let server = RedisServer::start()?;
     let bus = create_bus(&server)?;
     let first = bus.publish(message("positions", "position-1", b"one")?)?;
@@ -741,7 +774,7 @@ fn test_sync_replay_from_stream_position_and_new_tail() -> Result<(), Box<dyn st
 }
 
 #[test]
-fn test_sync_reports_gap_for_removed_pending_entries() -> Result<(), Box<dyn std::error::Error>> {
+fn test_sync_reports_gap_for_removed_pending_entries() -> Result<(), Box<dyn Error>> {
     let server = RedisServer::start()?;
     let bus = create_bus(&server)?;
     bus.publish(message("gaps", "removed-event", b"payload")?)?;
@@ -773,7 +806,7 @@ fn test_sync_reports_gap_for_removed_pending_entries() -> Result<(), Box<dyn std
 }
 
 #[test]
-fn test_sync_reject_acks_and_malformed_wire_is_quarantined() -> Result<(), Box<dyn std::error::Error>> {
+fn test_sync_reject_acks_and_malformed_wire_is_quarantined() -> Result<(), Box<dyn Error>> {
     let server = RedisServer::start()?;
     let bus = create_bus(&server)?;
     bus.publish(message("malformed", "reject-event", b"reject")?)?;
@@ -832,7 +865,7 @@ fn test_sync_reject_acks_and_malformed_wire_is_quarantined() -> Result<(), Box<d
 }
 
 #[test]
-fn test_sync_redis_command_failures_are_returned_without_details() -> Result<(), Box<dyn std::error::Error>> {
+fn test_sync_redis_command_failures_are_returned_without_details() -> Result<(), Box<dyn Error>> {
     let server = RedisServer::start()?;
     let bus = create_bus(&server)?;
     let native_message = OutboundMessage::new(
@@ -912,7 +945,7 @@ fn test_sync_redis_command_failures_are_returned_without_details() -> Result<(),
 }
 
 #[test]
-fn test_sync_client_builds_standalone_and_sentinel_authentication() -> Result<(), Box<dyn std::error::Error>> {
+fn test_sync_client_builds_standalone_and_sentinel_authentication() -> Result<(), Box<dyn Error>> {
     let standalone: ProviderOptions = [
         ("redis.url".into(), "redis://127.0.0.1:1/".into()),
         ("redis.username_env".into(), "PATH".into()),
@@ -941,7 +974,7 @@ fn test_sync_client_builds_standalone_and_sentinel_authentication() -> Result<()
 }
 
 #[test]
-fn test_sync_recovers_pending_message_after_redis_restart() -> Result<(), Box<dyn std::error::Error>> {
+fn test_sync_recovers_pending_message_after_redis_restart() -> Result<(), Box<dyn Error>> {
     let mut server = RedisServer::start()?;
     let bus = create_bus(&server)?;
     bus.publish(message("restart", "sync-restart", b"durable")?)?;

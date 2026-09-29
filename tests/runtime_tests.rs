@@ -11,14 +11,31 @@
 
 mod support;
 
+use std::error::Error;
+
 use futures_lite::future::block_on;
 use redis::Client;
 use redis::RedisError;
 use redis::cmd;
 use redis::streams::StreamAutoClaimReply;
 use redis::streams::StreamReadReply;
+use support::fixture_consumer::run as run_fixture_consumer;
 use support::redis_server::RedisServer;
 
+#[test]
+fn test_smol_consumer_uses_isolated_production_features() -> Result<(), Box<dyn Error>> {
+    let server = RedisServer::start()?;
+    run_fixture_consumer("async_smol_consumer", server.url(), true)
+}
+
+#[test]
+fn test_tokio_consumer_uses_isolated_production_features() -> Result<(), Box<dyn Error>> {
+    let server = RedisServer::start()?;
+    run_fixture_consumer("async_tokio_consumer", server.url(), true)
+}
+
+/// Opens `url` and awaits PING on the host executor; returns its string reply
+/// or the Redis setup/command/transport error.
 async fn ping(url: &str) -> Result<String, RedisError> {
     let client = Client::open(url)?;
     let mut connection = client.get_multiplexed_async_connection().await?;
@@ -26,7 +43,7 @@ async fn ping(url: &str) -> Result<String, RedisError> {
 }
 
 #[test]
-fn test_smol_host_can_ping() -> Result<(), Box<dyn std::error::Error>> {
+fn test_smol_host_can_ping() -> Result<(), Box<dyn Error>> {
     let server = RedisServer::start()?;
     let response = block_on(ping(server.url()))?;
     assert_eq!(response, "PONG");
@@ -34,7 +51,7 @@ fn test_smol_host_can_ping() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[tokio::test]
-async fn test_tokio_host_can_ping() -> Result<(), Box<dyn std::error::Error>> {
+async fn test_tokio_host_can_ping() -> Result<(), Box<dyn Error>> {
     let server = RedisServer::start()?;
     let response = ping(server.url()).await?;
     assert_eq!(response, "PONG");
@@ -42,7 +59,7 @@ async fn test_tokio_host_can_ping() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
-fn test_unified_redis_features_do_not_require_global_preference() -> Result<(), Box<dyn std::error::Error>> {
+fn test_unified_redis_features_do_not_require_global_preference() -> Result<(), Box<dyn Error>> {
     let server = RedisServer::start()?;
     let response = block_on(ping(server.url()))?;
     assert_eq!(response, "PONG");
@@ -50,7 +67,7 @@ fn test_unified_redis_features_do_not_require_global_preference() -> Result<(), 
 }
 
 #[test]
-fn test_redis_6_2_supports_stream_ping() -> Result<(), Box<dyn std::error::Error>> {
+fn test_redis_6_2_supports_stream_ping() -> Result<(), Box<dyn Error>> {
     let server = RedisServer::start_version("6.2-alpine")?;
     let response = block_on(ping(server.url()))?;
     assert_eq!(response, "PONG");
@@ -58,7 +75,7 @@ fn test_redis_6_2_supports_stream_ping() -> Result<(), Box<dyn std::error::Error
 }
 
 #[test]
-fn test_redis_6_2_supports_pending_entry_recovery() -> Result<(), Box<dyn std::error::Error>> {
+fn test_redis_6_2_supports_pending_entry_recovery() -> Result<(), Box<dyn Error>> {
     let server = RedisServer::start_version("6.2-alpine")?;
     let client = Client::open(server.url())?;
     let mut connection = client.get_connection()?;

@@ -70,6 +70,50 @@
         "async",
         "discovery"
       ]
+    },
+    {
+      "name": "sync-conformance",
+      "commands": [
+        "test"
+      ],
+      "defaultFeatures": false,
+      "features": [
+        "sync",
+        "conformance"
+      ],
+      "dependency": {
+        "name": "redis",
+        "resolution": "precise",
+        "version": "0.32.7"
+      }
+    },
+    {
+      "name": "async-conformance",
+      "commands": [
+        "test"
+      ],
+      "defaultFeatures": false,
+      "features": [
+        "async",
+        "conformance"
+      ],
+      "dependency": {
+        "name": "redis",
+        "resolution": "precise",
+        "version": "0.32.7"
+      }
+    },
+    {
+      "name": "all-features",
+      "commands": [
+        "test"
+      ],
+      "allFeatures": true,
+      "dependency": {
+        "name": "redis",
+        "resolution": "precise",
+        "version": "0.32.7"
+      }
     }
   ]
 }

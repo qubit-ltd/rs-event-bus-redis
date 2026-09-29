@@ -10,10 +10,12 @@
 
 mod support;
 
+use std::env::args;
 use std::error::Error;
 use std::sync::mpsc;
 use std::time::Duration;
 
+use qubit_event_bus::DeliveryError;
 use qubit_event_bus::EventBusRegistry;
 use qubit_event_bus::SubscriberId;
 use qubit_event_bus::model::ConsumerGroup;
@@ -29,12 +31,8 @@ use qubit_event_bus_redis as _;
 use qubit_spi::ProviderSelection;
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let redis_url = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "redis://127.0.0.1/".to_owned());
-    let namespace = std::env::args()
-        .nth(2)
-        .unwrap_or_else(|| "sync-orders-example".to_owned());
+    let redis_url = args().nth(1).unwrap_or_else(|| "redis://127.0.0.1/".to_owned());
+    let namespace = args().nth(2).unwrap_or_else(|| "sync-orders-example".to_owned());
     let config = EventBusConfig::default()
         .with_selection(ProviderSelection::named("redis-streams")?)
         .with_provider_options(support::provider_options(&redis_url, &namespace, None))
@@ -54,7 +52,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         move |delivery| {
             sender
                 .send(delivery.payload().clone())
-                .map_err(|error| qubit_event_bus::DeliveryError::Handler {
+                .map_err(|error| DeliveryError::Handler {
                     source: Box::new(error),
                 })
         },

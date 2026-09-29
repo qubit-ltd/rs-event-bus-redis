@@ -7,6 +7,15 @@
 // =============================================================================
 //! Versioned byte-safe Redis stream message fields.
 
+/// Serializes caller-owned metadata and payload without additional copies.
+#[cfg(any(feature = "sync", feature = "async"))]
+#[path = "wire_fields/internal/borrowed_wire_fields.rs"]
+mod borrowed_wire_fields;
+/// Rejects serializer writes before they exceed the configured wire budget.
+#[cfg(any(feature = "sync", feature = "async"))]
+#[path = "wire_fields/internal/bounded_writer.rs"]
+mod bounded_writer;
+
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::SystemTime;
@@ -23,8 +32,16 @@ use qubit_event_bus::spi::TopicAddress;
 use qubit_event_bus::spi::TransportPayload;
 use serde::Deserialize;
 use serde::Serialize;
+use serde_json::from_str;
+use serde_json::to_string;
 
+#[cfg(any(feature = "sync", feature = "async"))]
+use self::borrowed_wire_fields::BorrowedWireFields;
+#[cfg(any(feature = "sync", feature = "async"))]
+use self::bounded_writer::BoundedWriter;
 use crate::error::RedisProviderError;
+#[cfg(any(feature = "sync", feature = "async"))]
+use crate::internal::WireLimits;
 
 /// Decoded transport components returned by [`WireFields::into_parts`].
 type WireMessageParts = (
@@ -98,32 +115,10 @@ pub struct WireFields {
 }
 
 impl WireFields {
-    /// Parses the protocol version before applying the version 1 field layout.
-    ///
-    /// # Parameters
-    ///
-    /// - `encoded`: JSON wire value stored in the Redis stream.
-    ///
-    /// # Returns
-    ///
-    /// The decoded version 1 fields.
-    ///
-    /// # Errors
-    ///
-    /// Returns `UnsupportedWireVersion` for a valid numeric version other than
-    /// 1 and an operation error for malformed JSON or version 1 fields.
-    #[cfg(any(feature = "sync", feature = "async"))]
-    pub(crate) fn decode_wire(
-        encoded: &[u8],
-        limits: crate::wire_limits::WireLimits,
-    ) -> Result<Self, RedisProviderError> {
-        crate::bounded_wire_decoder::decode(encoded, limits)
-    }
-
     /// Converts an outbound event into the version 1 Redis wire representation.
     ///
     /// Native in-process payloads cannot be persisted and are rejected. The
-    /// timestamp is clamped to the Unix epoch when it predates that epoch.
+    /// timestamp must be at or after the Unix epoch.
     ///
     /// # Parameters
     ///
@@ -135,26 +130,14 @@ impl WireFields {
     ///
     /// # Errors
     ///
-    /// Returns a configuration error for a native payload, a resource-limit
-    /// error before copying an oversized payload or producing oversized
-    /// headers, or an operation error if headers cannot be serialized.
+    /// Returns a configuration error for a native payload or a timestamp before
+    /// the Unix epoch, and an operation error if headers cannot be serialized.
+    /// This public compatibility constructor does not enforce provider size
+    /// budgets.
     pub fn from_outbound(message: &OutboundMessage) -> Result<Self, RedisProviderError> {
-        Self::from_outbound_with_limits(message, crate::wire_limits::WireLimits::default())
-    }
-
-    /// Builds wire fields, checking the payload before copying and capping
-    /// headers output. Returns a sanitized limit/configuration/encoding
-    /// error before Redis IO.
-    pub(crate) fn from_outbound_with_limits(
-        message: &OutboundMessage,
-        limits: crate::wire_limits::WireLimits,
-    ) -> Result<Self, RedisProviderError> {
         let TransportPayload::Encoded(payload) = message.payload() else {
             return Err(RedisProviderError::Configuration("encoded payload required"));
         };
-        if payload.bytes().len() > limits.payload {
-            return Err(RedisProviderError::LimitExceeded);
-        }
         let timestamp_ms = message
             .timestamp()
             .duration_since(UNIX_EPOCH)
@@ -164,7 +147,7 @@ impl WireFields {
             version: 1,
             event_id: message.id().as_str().to_owned(),
             timestamp_ms,
-            headers_json: crate::capped_writer::to_capped_json(message.headers(), limits.headers)?,
+            headers_json: to_string(message.headers()).map_err(|_| RedisProviderError::Operation("encode headers"))?,
             ordering_key: message.ordering_key().map(|key| key.as_str().to_owned()),
             content_type: payload.content_type().as_str().to_owned(),
             schema_id: payload.schema_id().map(|schema| schema.as_str().to_owned()),
@@ -188,12 +171,16 @@ impl WireFields {
     /// # Returns
     ///
     /// Topic, event ID, timestamp, headers, optional ordering key, and encoded
-    /// payload in transport order.
+    /// payload in transport order. The ordering key is `Some` only when
+    /// supplied; `None` carries no ordering metadata. Missing schema
+    /// metadata stays absent.
     ///
     /// # Errors
     ///
-    /// Returns `UnsupportedWireVersion` for unknown versions and an operation
-    /// error when a stored field is malformed.
+    /// Returns `UnsupportedWireVersion` for unknown versions, a configuration
+    /// error for timestamps outside u64/platform range or an invalid ordering
+    /// key, and an operation error for malformed event ID, headers, content
+    /// type, or schema ID.
     pub fn into_parts(self, topic: TopicAddress) -> Result<WireMessageParts, RedisProviderError> {
         if self.version != 1 {
             return Err(RedisProviderError::UnsupportedWireVersion);
@@ -207,8 +194,7 @@ impl WireFields {
                 .ok_or(RedisProviderError::Configuration(
                     "timestamp_ms exceeds the platform range",
                 ))?;
-        let headers =
-            serde_json::from_str(&self.headers_json).map_err(|_| RedisProviderError::Operation("decode headers"))?;
+        let headers = from_str(&self.headers_json).map_err(|_| RedisProviderError::Operation("decode headers"))?;
         let content_type = ContentType::new(self.content_type.as_str())
             .map_err(|_| RedisProviderError::Operation("decode content type"))?;
         let schema_id = self
@@ -233,4 +219,64 @@ impl WireFields {
             TransportPayload::Encoded(payload),
         ))
     }
+
+    /// Parses the protocol version before applying the version 1 field layout.
+    ///
+    /// # Parameters
+    ///
+    /// - `encoded`: JSON wire value stored in the Redis stream.
+    /// - `limits`: Inclusive complete wire and decoded payload byte budgets.
+    ///
+    /// # Returns
+    ///
+    /// The decoded version 1 fields.
+    ///
+    /// # Errors
+    ///
+    /// Returns `UnsupportedWireVersion` for a valid numeric version other than
+    /// 1, a size error when wire/payload bytes exceed their budget, and an
+    /// operation error for malformed JSON or version 1 fields. Version 1
+    /// rejects structural nesting of 128 containers, including ignored
+    /// fields; Serde's default recursion limit also remains enabled.
+    /// Unknown versions return before version 1 depth and payload checks.
+    /// Decoding performs no external I/O.
+    #[cfg(any(feature = "sync", feature = "async"))]
+    pub(crate) fn decode_wire(encoded: &str, limits: WireLimits) -> Result<Self, RedisProviderError> {
+        crate::bounded_wire_decoder::decode(encoded.as_bytes(), limits)
+    }
+}
+
+/// Encodes a provider message within validated payload and wire budgets.
+///
+/// # Parameters
+///
+/// - `message`: Outbound message containing an encoded payload.
+/// - `limits`: Inclusive budgets copied from validated provider settings.
+///
+/// # Returns
+///
+/// The complete version 1 JSON wire string.
+///
+/// # Errors
+///
+/// Returns `PayloadTooLarge` before processing oversized payload bytes,
+/// `WireTooLarge` as soon as headers or the final representation exceed their
+/// budget, or a stable configuration/serialization error for invalid metadata.
+/// All caller-owned metadata and payload bytes are borrowed; only the bounded
+/// header and complete wire strings are allocated. No Redis command or other
+/// external I/O is performed.
+#[cfg(any(feature = "sync", feature = "async"))]
+pub(crate) fn encode_bounded(message: &OutboundMessage, limits: WireLimits) -> Result<String, RedisProviderError> {
+    let TransportPayload::Encoded(payload) = message.payload() else {
+        return Err(RedisProviderError::Configuration("encoded payload required"));
+    };
+    limits.check_payload(payload.bytes().len())?;
+    let headers_json = BoundedWriter::new(limits.headers.min(limits.wire)).serialize(message.headers())?;
+    let timestamp_ms = message
+        .timestamp()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| RedisProviderError::Configuration("timestamp precedes the Unix epoch"))?
+        .as_millis();
+    let fields = BorrowedWireFields::new(message, payload, &headers_json, timestamp_ms);
+    BoundedWriter::new(limits.wire).serialize(&fields)
 }

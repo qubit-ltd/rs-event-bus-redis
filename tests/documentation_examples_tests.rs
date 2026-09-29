@@ -9,10 +9,13 @@
 
 mod support;
 
+use std::env::consts::EXE_SUFFIX;
+use std::env::current_exe;
 use std::error::Error;
 use std::io::BufRead;
 use std::io::BufReader;
 use std::io::Write;
+use std::path::Path;
 use std::process::Command;
 use std::process::Stdio;
 
@@ -63,15 +66,15 @@ fn marked_snippet<'text>(text: &'text str, start: &str, end: &str) -> &'text str
 }
 
 #[test]
-fn standalone_examples_publish_consume_and_close() -> Result<(), Box<dyn Error>> {
+fn test_standalone_examples_publish_consume_and_close() -> Result<(), Box<dyn Error>> {
     let redis = RedisServer::start()?;
-    let target = std::env::current_exe()?
+    let target = current_exe()?
         .parent()
-        .and_then(std::path::Path::parent)
+        .and_then(Path::parent)
         .ok_or("integration test executable has no target directory")?
         .join("examples");
 
-    let sync = Command::new(target.join(format!("sync_orders{}", std::env::consts::EXE_SUFFIX)))
+    let sync = Command::new(target.join(format!("sync_orders{}", EXE_SUFFIX)))
         .arg(redis.url())
         .arg("documentation-sync")
         .output()?;
@@ -82,7 +85,7 @@ fn standalone_examples_publish_consume_and_close() -> Result<(), Box<dyn Error>>
     );
     assert!(String::from_utf8_lossy(&sync.stdout).contains("consumed order event: order-42"));
 
-    let mut asynchronous = Command::new(target.join(format!("async_orders{}", std::env::consts::EXE_SUFFIX)))
+    let mut asynchronous = Command::new(target.join(format!("async_orders{}", EXE_SUFFIX)))
         .arg(redis.url())
         .arg("documentation-async")
         .stdin(Stdio::piped())
@@ -119,14 +122,14 @@ fn standalone_examples_publish_consume_and_close() -> Result<(), Box<dyn Error>>
 }
 
 #[test]
-fn sentinel_example_resolves_and_uses_the_master() -> Result<(), Box<dyn Error>> {
+fn test_sentinel_example_resolves_and_uses_the_master() -> Result<(), Box<dyn Error>> {
     let sentinel = SentinelServer::start()?;
-    let target = std::env::current_exe()?
+    let target = current_exe()?
         .parent()
-        .and_then(std::path::Path::parent)
+        .and_then(Path::parent)
         .ok_or("integration test executable has no target directory")?
         .join("examples")
-        .join(format!("sentinel_orders{}", std::env::consts::EXE_SUFFIX));
+        .join(format!("sentinel_orders{}", EXE_SUFFIX));
     let output = Command::new(target)
         .arg("documentation-sentinel")
         .env("REDIS_SENTINEL_NODES", sentinel.endpoints())

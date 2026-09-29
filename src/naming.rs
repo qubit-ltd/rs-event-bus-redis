@@ -31,6 +31,7 @@
 /// let key = stream_key("orders", "created");
 /// assert_eq!(key, "qubit:stream:6:orders:7:created");
 /// ```
+#[must_use]
 pub fn stream_key(namespace: &str, topic: &str) -> String {
     format!("qubit:stream:{}:{namespace}:{}:{topic}", namespace.len(), topic.len())
 }
@@ -63,6 +64,7 @@ pub fn stream_key(namespace: &str, topic: &str) -> String {
 ///     group_name("orders", "created", "billing", Some("billing")),
 /// );
 /// ```
+#[must_use]
 pub fn group_name(namespace: &str, topic: &str, subscriber: &str, group: Option<&str>) -> String {
     let group = group.unwrap_or(subscriber);
     format!(
@@ -96,6 +98,7 @@ pub fn group_name(namespace: &str, topic: &str, subscriber: &str, group: Option<
 /// assert_eq!(poison_key("orders", "created", "billing"),
 ///     "qubit:poison:6:orders:7:created:7:billing");
 /// ```
+#[must_use]
 pub fn poison_key(namespace: &str, topic: &str, group: &str) -> String {
     format!(
         "qubit:poison:{}:{namespace}:{}:{topic}:{}:{group}",
@@ -103,18 +106,4 @@ pub fn poison_key(namespace: &str, topic: &str, group: &str) -> String {
         topic.len(),
         group.len()
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::poison_key;
-
-    #[test]
-    fn test_poison_key_delimits_utf8_components_without_collisions() {
-        assert_ne!(poison_key("a:b", "c", "d"), poison_key("a", "b:c", "d"));
-        assert_eq!(
-            poison_key("订单", "创建", "消费组"),
-            "qubit:poison:6:订单:6:创建:9:消费组"
-        );
-    }
 }

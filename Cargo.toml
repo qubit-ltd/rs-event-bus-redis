@@ -10,7 +10,7 @@ description = "Synchronous and asynchronous Redis Streams providers for Qubit Ev
 homepage = "https://github.com/qubit-ltd/rs-event-bus-redis"
 documentation = "https://docs.rs/qubit-event-bus-redis"
 readme = "README.md"
-include = ["/Cargo.toml", "/LICENSE", "/README*", "/doc/**/*.md", "/src/**", "/tests/**", "/examples/**"]
+include = ["/Cargo.toml", "/LICENSE", "/README*", "/CHANGELOG*", "/doc/**/*.md", "/src/**", "/tests/**", "/examples/**", "/benches/**"]
 
 [workspace]
 resolver = "3"
@@ -59,3 +59,8 @@ required-features = ["sync", "async", "discovery"]
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage)', 'cfg(loom)'] }
+
+[[bench]]
+name = "redis_workloads"
+harness = false
+required-features = ["sync", "async"]

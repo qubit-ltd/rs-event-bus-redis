@@ -9,7 +9,9 @@
 
 mod support;
 
+use std::env::args;
 use std::error::Error;
+use std::io::stdin;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::thread;
@@ -27,17 +29,14 @@ use qubit_event_bus::model::SubscriptionDurability;
 use qubit_event_bus::model::Topic;
 use qubit_event_bus::registry::EventBusConfig;
 use qubit_event_bus::spi::ShutdownMode;
+use qubit_event_bus::spi::ShutdownOutcome;
 use qubit_event_bus_redis as _;
 use qubit_spi::ProviderSelection;
 
 fn main() -> Result<(), Box<dyn Error>> {
     future::block_on(async {
-        let redis_url = std::env::args()
-            .nth(1)
-            .unwrap_or_else(|| "redis://127.0.0.1/".to_owned());
-        let namespace = std::env::args()
-            .nth(2)
-            .unwrap_or_else(|| "async-orders-example".to_owned());
+        let redis_url = args().nth(1).unwrap_or_else(|| "redis://127.0.0.1/".to_owned());
+        let namespace = args().nth(2).unwrap_or_else(|| "async-orders-example".to_owned());
         let config = EventBusConfig::default()
             .with_selection(ProviderSelection::named("redis-streams")?)
             .with_provider_options(support::provider_options(&redis_url, &namespace, None))
@@ -76,7 +75,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         let (stop_sender, stop_receiver) = oneshot::channel::<()>();
         thread::spawn(move || {
             let mut line = String::new();
-            let _ = std::io::stdin().read_line(&mut line);
+            let _ = stdin().read_line(&mut line);
             let _ = stop_sender.send(());
         });
         println!("press Enter after the event is consumed to stop the runner");
@@ -95,7 +94,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 timeout: Duration::from_secs(5),
             })
             .await?;
-        if report.outcome != qubit_event_bus::spi::ShutdownOutcome::Complete {
+        if report.outcome != ShutdownOutcome::Complete {
             return Err("Redis provider did not complete graceful shutdown".into());
         }
         Ok(())

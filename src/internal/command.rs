@@ -9,7 +9,21 @@
 
 use redis::Cmd;
 
-/// Builds one bounded consumer-group read, adding `BLOCK` only when requested.
+/// Builds one consumer-group read while bounding the requested Redis BLOCK.
+///
+/// # Parameters
+///
+/// - `group`: Existing consumer-group name.
+/// - `consumer`: Receiver identity that will own the pending delivery.
+/// - `stream`: Redis source stream key.
+/// - `cursor`: Own-pending position or `>` for new group entries.
+/// - `block_ms`: `Some` requests 1 through 1,000 milliseconds after clamping;
+///   `None` omits BLOCK for a non-blocking read.
+///
+/// # Returns
+///
+/// An owned COUNT=1 command. Building it allocates command bytes but issues no
+/// I/O.
 pub(crate) fn read_group_command(
     group: &str,
     consumer: &str,
@@ -30,20 +44,4 @@ pub(crate) fn read_group_command(
     }
     command.arg("STREAMS").arg(stream).arg(cursor);
     command
-}
-
-#[cfg(test)]
-mod tests {
-    use super::read_group_command;
-
-    #[test]
-    fn test_read_group_command_omits_unbounded_block_and_caps_finite_block() {
-        let immediate = read_group_command("group", "consumer", "stream", ">", None).get_packed_command();
-        let immediate = String::from_utf8(immediate).expect("RESP command is ASCII");
-        assert!(!immediate.contains("BLOCK"));
-
-        let blocking = read_group_command("group", "consumer", "stream", ">", Some(5_000)).get_packed_command();
-        let blocking = String::from_utf8(blocking).expect("RESP command is ASCII");
-        assert!(blocking.contains("$5\r\nBLOCK\r\n$4\r\n1000\r\n"));
-    }
 }

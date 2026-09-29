@@ -7,9 +7,16 @@
 // =============================================================================
 //! Non-secret settings for Redis Streams providers.
 
+/// Stores resolved ACL credentials with redacted Debug formatting.
+#[path = "redis_event_bus_config/internal/redis_credentials.rs"]
 mod redis_credentials;
 
+use std::fmt::Debug;
+use std::fmt::Formatter;
+use std::fmt::Result as FmtResult;
+use std::net::Ipv6Addr;
 use std::num::NonZeroUsize;
+use std::time::Duration;
 
 use qubit_event_bus::model::ProviderOptions;
 use qubit_event_bus::registry::EventBusConfig;
@@ -56,19 +63,39 @@ pub struct RedisEventBusConfig {
     max_unsettled_per_subscription: usize,
     /// Maximum number of idle synchronous standalone connections retained.
     max_idle_connections: usize,
+    /// The single-endpoint connection and setup waiting budget.
+    connect_timeout: Duration,
+    /// The non-blocking command I/O waiting budget.
+    command_timeout: Duration,
+    /// The maximum concurrently admitted short commands per client.
+    max_concurrent_commands: usize,
+    /// The maximum active receivers per client.
+    max_active_receivers: usize,
+    /// The maximum raw encoded payload size in bytes.
+    max_payload_bytes: usize,
+    /// The maximum complete JSON wire size in bytes.
+    max_wire_bytes: usize,
+    /// The maximum serialized headers JSON size in bytes.
+    max_headers_bytes: usize,
     /// Optional approximate maximum length for each Redis stream.
     stream_maxlen_approx: Option<NonZeroUsize>,
-    /// Independent JSON wire and decoded component limits.
-    wire_limits: crate::wire_limits::WireLimits,
 }
 
-impl std::fmt::Debug for RedisEventBusConfig {
+impl Debug for RedisEventBusConfig {
     /// Formats the configuration without exposing connection credentials.
+    ///
+    /// # Parameters
+    ///
+    /// - `formatter`: Destination for the redacted debug representation.
     ///
     /// # Returns
     ///
     /// The formatter result produced while writing the redacted debug view.
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    ///
+    /// # Errors
+    ///
+    /// Returns a formatting error if the destination rejects a write.
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> FmtResult {
         formatter
             .debug_struct("RedisEventBusConfig")
             .field("connection_url", &"<redacted>")
@@ -81,14 +108,25 @@ impl std::fmt::Debug for RedisEventBusConfig {
             .field("recovery_interval_ms", &self.recovery_interval_ms)
             .field("max_unsettled_per_subscription", &self.max_unsettled_per_subscription)
             .field("max_idle_connections", &self.max_idle_connections)
+            .field("connect_timeout", &self.connect_timeout)
+            .field("command_timeout", &self.command_timeout)
+            .field("max_concurrent_commands", &self.max_concurrent_commands)
+            .field("max_active_receivers", &self.max_active_receivers)
+            .field("max_payload_bytes", &self.max_payload_bytes)
+            .field("max_wire_bytes", &self.max_wire_bytes)
+            .field("max_headers_bytes", &self.max_headers_bytes)
             .field("stream_maxlen_approx", &self.stream_maxlen_approx)
-            .field("wire_limits", &self.wire_limits)
             .finish()
     }
 }
 
 impl Default for RedisEventBusConfig {
-    /// Creates settings for local Redis with the default `qubit` namespace.
+    /// Creates local standalone settings with the `qubit` namespace and finite
+    /// defaults.
+    ///
+    /// # Returns
+    ///
+    /// A lazy configuration; no environment lookup or network I/O is performed.
     fn default() -> Self {
         Self {
             connection_url: "redis://127.0.0.1/".into(),
@@ -101,8 +139,14 @@ impl Default for RedisEventBusConfig {
             recovery_interval_ms: 1_000,
             max_unsettled_per_subscription: 100,
             max_idle_connections: 8,
+            connect_timeout: Duration::from_millis(2_000),
+            command_timeout: Duration::from_millis(2_000),
+            max_concurrent_commands: 64,
+            max_active_receivers: 256,
+            max_payload_bytes: 1_048_576,
+            max_wire_bytes: 8_388_608,
+            max_headers_bytes: 65_536,
             stream_maxlen_approx: None,
-            wire_limits: crate::wire_limits::WireLimits::default(),
         }
     }
 }
@@ -132,6 +176,200 @@ impl RedisEventBusConfig {
         ]
         .into();
         Self::from_provider_options(&options)
+    }
+
+    /// Parses and validates Redis settings from facade provider options.
+    ///
+    /// Credential options contain environment-variable names, not secret
+    /// values. Sentinel endpoints and service names must be supplied together.
+    ///
+    /// # Parameters
+    ///
+    /// - `options`: Provider-specific key/value settings from the event-bus
+    ///   facade.
+    ///
+    /// # Returns
+    ///
+    /// Validated settings with defaults applied to omitted optional values.
+    ///
+    /// # Errors
+    ///
+    /// Returns a configuration error for malformed URLs, invalid limits,
+    /// unavailable credential variables, empty namespaces, or incomplete
+    /// Sentinel settings.
+    pub fn from_provider_options(options: &ProviderOptions) -> Result<Self, RedisProviderError> {
+        /// Redis-owned option names accepted by this parser; values are never
+        /// echoed.
+        const KNOWN_OPTIONS: &[&str] = &[
+            "redis.url",
+            "redis.namespace",
+            "redis.username_env",
+            "redis.password_env",
+            "redis.sentinel.username_env",
+            "redis.sentinel.password_env",
+            "redis.sentinel.nodes",
+            "redis.sentinel.service_name",
+            "redis.claim_min_idle_ms",
+            "redis.recovery_interval_ms",
+            "redis.max_unsettled_per_subscription",
+            "redis.max_idle_connections",
+            "redis.connect_timeout_ms",
+            "redis.command_timeout_ms",
+            "redis.max_concurrent_commands",
+            "redis.max_active_receivers",
+            "redis.max_payload_bytes",
+            "redis.max_wire_bytes",
+            "redis.max_headers_bytes",
+            "redis.stream_maxlen_approx",
+        ];
+        if options
+            .keys()
+            .any(|key| key.starts_with("redis.") && !KNOWN_OPTIONS.contains(&key.as_str()))
+        {
+            return Err(RedisProviderError::Configuration("unknown Redis provider option"));
+        }
+        let connection_url = options
+            .get("redis.url")
+            .map(String::as_str)
+            .unwrap_or("redis://127.0.0.1/");
+        let namespace = options.get("redis.namespace").map(String::as_str).unwrap_or("qubit");
+        validate_url(connection_url)?;
+        validate_namespace(namespace)?;
+        let sentinel_nodes = options
+            .get("redis.sentinel.nodes")
+            .map(|nodes| parse_sentinel_nodes(nodes))
+            .transpose()?;
+        let sentinel_service = options.get("redis.sentinel.service_name").cloned();
+        let credentials = RedisCredentials::from_env_references(options, "redis")?;
+        let sentinel_credentials = RedisCredentials::from_env_references(options, "redis.sentinel")?;
+        let claim_min_idle_ms = options
+            .get("redis.claim_min_idle_ms")
+            .map(|value| {
+                value
+                    .parse::<usize>()
+                    .map_err(|_| RedisProviderError::Configuration("invalid redis.claim_min_idle_ms"))
+            })
+            .transpose()?
+            .unwrap_or(30_000);
+        let recovery_interval_ms = options
+            .get("redis.recovery_interval_ms")
+            .map(|value| {
+                value
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|value| (50..=60_000).contains(value))
+                    .ok_or(RedisProviderError::Configuration("invalid redis.recovery_interval_ms"))
+            })
+            .transpose()?
+            .unwrap_or(1_000);
+        let max_unsettled_per_subscription = options
+            .get("redis.max_unsettled_per_subscription")
+            .map(|value| {
+                value
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|value| (1..=10_000).contains(value))
+                    .ok_or(RedisProviderError::Configuration(
+                        "invalid redis.max_unsettled_per_subscription",
+                    ))
+            })
+            .transpose()?
+            .unwrap_or(100);
+        let max_idle_connections = options
+            .get("redis.max_idle_connections")
+            .map(|value| {
+                value
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|value| (1..=64).contains(value))
+                    .ok_or(RedisProviderError::Configuration("invalid redis.max_idle_connections"))
+            })
+            .transpose()?
+            .unwrap_or(8);
+        let connect_timeout = parse_limit(options, "redis.connect_timeout_ms", 2000, 60000)?;
+        let connect_timeout = Duration::from_millis(
+            u64::try_from(connect_timeout)
+                .map_err(|_| RedisProviderError::Configuration("invalid redis.connect_timeout_ms"))?,
+        );
+        let command_timeout = parse_limit(options, "redis.command_timeout_ms", 2000, 60000)?;
+        let command_timeout = Duration::from_millis(
+            u64::try_from(command_timeout)
+                .map_err(|_| RedisProviderError::Configuration("invalid redis.command_timeout_ms"))?,
+        );
+        let max_concurrent_commands = parse_limit(options, "redis.max_concurrent_commands", 64, 4096)?;
+        let max_active_receivers = parse_limit(options, "redis.max_active_receivers", 256, 4096)?;
+        let max_payload_bytes = parse_limit(options, "redis.max_payload_bytes", 1048576, 67108864)?;
+        let max_wire_bytes = parse_limit(options, "redis.max_wire_bytes", 8388608, 268435456)?;
+        let max_headers_bytes = parse_limit(options, "redis.max_headers_bytes", 65536, 67108864)?;
+        if max_idle_connections > max_concurrent_commands {
+            return Err(RedisProviderError::Configuration(
+                "redis.max_idle_connections exceeds redis.max_concurrent_commands",
+            ));
+        }
+        if max_wire_bytes < max_payload_bytes {
+            return Err(RedisProviderError::Configuration(
+                "redis.max_wire_bytes is smaller than redis.max_payload_bytes",
+            ));
+        }
+        let stream_maxlen_approx = options
+            .get("redis.stream_maxlen_approx")
+            .map(|value| {
+                value
+                    .parse::<usize>()
+                    .ok()
+                    .and_then(NonZeroUsize::new)
+                    .ok_or(RedisProviderError::Configuration("invalid redis.stream_maxlen_approx"))
+            })
+            .transpose()?;
+        if sentinel_nodes.as_ref().is_some_and(Vec::is_empty) {
+            return Err(RedisProviderError::Configuration(
+                "redis.sentinel.nodes must contain endpoints",
+            ));
+        }
+        if sentinel_nodes.is_some() != sentinel_service.is_some() {
+            return Err(RedisProviderError::Configuration(
+                "Sentinel nodes and service name must be configured together",
+            ));
+        }
+        Ok(Self {
+            connection_url: connection_url.into(),
+            namespace: namespace.into(),
+            sentinel_nodes,
+            sentinel_service,
+            credentials,
+            sentinel_credentials,
+            claim_min_idle_ms,
+            recovery_interval_ms,
+            max_unsettled_per_subscription,
+            max_idle_connections,
+            connect_timeout,
+            command_timeout,
+            max_concurrent_commands,
+            max_active_receivers,
+            max_payload_bytes,
+            max_wire_bytes,
+            max_headers_bytes,
+            stream_maxlen_approx,
+        })
+    }
+
+    /// Parses Redis provider options carried by an event-bus configuration.
+    ///
+    /// # Parameters
+    ///
+    /// - `config`: Facade configuration whose provider options contain Redis
+    ///   settings.
+    ///
+    /// # Returns
+    ///
+    /// Validated Redis settings with defaults applied.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same validation errors as
+    /// [`from_provider_options`](Self::from_provider_options).
+    pub fn from_event_bus_config(config: &EventBusConfig) -> Result<Self, RedisProviderError> {
+        Self::from_provider_options(config.provider_options())
     }
 
     /// Borrows the Redis URL used when creating a client.
@@ -185,6 +423,116 @@ impl RedisEventBusConfig {
         self.sentinel_service.as_deref()
     }
 
+    /// Returns the interval between recovery scans during a receive call.
+    ///
+    /// # Returns
+    ///
+    /// The validated interval in milliseconds, between 50 and 60,000.
+    #[must_use]
+    #[inline]
+    pub const fn recovery_interval_ms(&self) -> usize {
+        self.recovery_interval_ms
+    }
+
+    /// Returns the maximum number of idle synchronous short-command sockets
+    /// retained.
+    ///
+    /// # Returns
+    ///
+    /// The positive idle cap, separate from active receiver admission.
+    #[must_use]
+    #[inline]
+    pub const fn max_idle_connections(&self) -> usize {
+        self.max_idle_connections
+    }
+
+    /// Returns the single-endpoint connection and setup waiting budget.
+    ///
+    /// # Returns
+    ///
+    /// The validated waiting budget from 1 through 60,000 milliseconds.
+    #[must_use]
+    #[inline]
+    pub const fn connect_timeout(&self) -> Duration {
+        self.connect_timeout
+    }
+
+    /// Returns the non-blocking command I/O waiting budget.
+    ///
+    /// # Returns
+    ///
+    /// The validated waiting budget from 1 through 60,000 milliseconds.
+    #[must_use]
+    #[inline]
+    pub const fn command_timeout(&self) -> Duration {
+        self.command_timeout
+    }
+
+    /// Returns the maximum concurrently admitted short commands per client.
+    ///
+    /// # Returns
+    ///
+    /// The validated admission limit from 1 through 4,096 commands.
+    #[must_use]
+    #[inline]
+    pub const fn max_concurrent_commands(&self) -> usize {
+        self.max_concurrent_commands
+    }
+
+    /// Returns the maximum active receivers per client.
+    ///
+    /// # Returns
+    ///
+    /// The validated admission limit from 1 through 4,096 receivers.
+    #[must_use]
+    #[inline]
+    pub const fn max_active_receivers(&self) -> usize {
+        self.max_active_receivers
+    }
+
+    /// Returns the maximum raw encoded payload size in bytes.
+    ///
+    /// # Returns
+    ///
+    /// The inclusive encoded payload limit from 1 through 67,108,864 bytes.
+    #[must_use]
+    #[inline]
+    pub const fn max_payload_bytes(&self) -> usize {
+        self.max_payload_bytes
+    }
+
+    /// Returns the maximum complete JSON wire size in bytes.
+    ///
+    /// # Returns
+    ///
+    /// The inclusive complete JSON limit from 1 through 268,435,456 bytes;
+    /// it is at least the configured raw payload limit.
+    #[must_use]
+    #[inline]
+    pub const fn max_wire_bytes(&self) -> usize {
+        self.max_wire_bytes
+    }
+
+    /// Returns the maximum serialized headers JSON size in bytes.
+    pub const fn max_headers_bytes(&self) -> usize {
+        self.max_headers_bytes
+    }
+
+    /// Returns the optional approximate maximum entry count per stream.
+    ///
+    /// Redis may trim entries that are still needed by consumers when this
+    /// option is enabled.
+    ///
+    /// # Returns
+    ///
+    /// `Some` is the configured approximate length; `None` disables
+    /// provider-side trim.
+    #[must_use]
+    #[inline]
+    pub const fn stream_maxlen_approx(&self) -> Option<NonZeroUsize> {
+        self.stream_maxlen_approx
+    }
+
     /// Returns the pending idle delay, in milliseconds, before a claim is
     /// allowed.
     ///
@@ -198,22 +546,13 @@ impl RedisEventBusConfig {
         self.claim_min_idle_ms
     }
 
-    /// Returns the interval between recovery scans during a receive call.
-    ///
-    /// # Returns
-    ///
-    /// The validated interval in milliseconds, between 50 and 60,000.
-    #[must_use]
-    #[inline]
-    pub const fn recovery_interval_ms(&self) -> usize {
-        self.recovery_interval_ms
-    }
-
     /// Borrows the resolved Redis ACL username and password for client setup.
     ///
     /// # Returns
     ///
-    /// References to the optional secret values; callers must not log them.
+    /// `Some` is a resolved secret; `None` means that ACL component was not
+    /// configured. The borrowed values remain owned by this configuration
+    /// and must not be logged.
     #[cfg(any(feature = "sync", feature = "async"))]
     #[must_use]
     #[inline]
@@ -226,7 +565,9 @@ impl RedisEventBusConfig {
     ///
     /// # Returns
     ///
-    /// References to the optional secret values; callers must not log them.
+    /// `Some` is a resolved secret; `None` means that ACL component was not
+    /// configured. The borrowed values remain owned by this configuration
+    /// and must not be logged.
     #[cfg(any(feature = "sync", feature = "async"))]
     #[must_use]
     #[inline]
@@ -248,212 +589,84 @@ impl RedisEventBusConfig {
     pub(crate) const fn max_unsettled_per_subscription(&self) -> usize {
         self.max_unsettled_per_subscription
     }
+}
 
-    /// Returns the maximum UTF-8 JSON bytes stored in one wire field.
-    #[must_use]
-    pub const fn max_wire_bytes(&self) -> usize {
-        self.wire_limits.wire
+/// Parses a positive decimal provider limit without accepting signs or
+/// overflow.
+///
+/// # Parameters
+///
+/// `options` supplies `key`; `default` applies when absent; `maximum` is
+/// inclusive.
+///
+/// # Returns
+///
+/// The validated positive number.
+///
+/// # Errors
+///
+/// Returns a secret-safe configuration error for malformed or out-of-range
+/// values.
+fn parse_limit(
+    options: &ProviderOptions,
+    key: &'static str,
+    default: usize,
+    maximum: usize,
+) -> Result<usize, RedisProviderError> {
+    let Some(value) = options.get(key) else {
+        return Ok(default);
+    };
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(RedisProviderError::Configuration(key));
     }
+    value
+        .parse::<usize>()
+        .ok()
+        .filter(|value| (1..=maximum).contains(value))
+        .ok_or(RedisProviderError::Configuration(key))
+}
 
-    /// Returns the maximum decoded payload length in bytes.
-    #[must_use]
-    pub const fn max_payload_bytes(&self) -> usize {
-        self.wire_limits.payload
+/// Parses at most sixteen non-empty Sentinel host/port endpoints.
+///
+/// # Parameters
+///
+/// `nodes` contains comma-separated endpoints, including bracketed IPv6 hosts.
+///
+/// # Returns
+///
+/// Validated endpoints in their configured order.
+///
+/// # Errors
+///
+/// Returns a configuration error for an empty host, invalid port, or excess
+/// nodes.
+fn parse_sentinel_nodes(nodes: &str) -> Result<Vec<String>, RedisProviderError> {
+    let endpoints: Vec<_> = nodes.split(',').map(str::trim).collect();
+    if endpoints.len() > 16 {
+        return Err(RedisProviderError::Configuration("invalid redis.sentinel.nodes"));
     }
-
-    /// Returns the maximum decoded headers JSON string length before parsing.
-    #[must_use]
-    pub const fn max_headers_bytes(&self) -> usize {
-        self.wire_limits.headers
-    }
-
-    /// Returns the validated component limits for provider operations.
-    #[cfg(any(feature = "sync", feature = "async"))]
-    pub(crate) const fn wire_limits(&self) -> crate::wire_limits::WireLimits {
-        self.wire_limits
-    }
-
-    /// Returns the maximum number of idle synchronous connections retained.
-    #[must_use]
-    #[inline]
-    pub const fn max_idle_connections(&self) -> usize {
-        self.max_idle_connections
-    }
-
-    /// Returns the optional approximate maximum entry count per stream.
-    ///
-    /// Redis may trim entries that are still needed by consumers when this
-    /// option is enabled.
-    #[must_use]
-    pub const fn stream_maxlen_approx(&self) -> Option<NonZeroUsize> {
-        self.stream_maxlen_approx
-    }
-
-    /// Parses and validates Redis settings from facade provider options.
-    ///
-    /// Credential options contain environment-variable names, not secret
-    /// values. Sentinel endpoints and service names must be supplied together.
-    ///
-    /// # Parameters
-    ///
-    /// - `options`: Provider-specific key/value settings from the event-bus
-    ///   facade.
-    ///
-    /// # Returns
-    ///
-    /// Validated settings with defaults applied to omitted optional values.
-    ///
-    /// # Errors
-    ///
-    /// Returns a configuration error for malformed URLs, invalid limits,
-    /// unavailable credential variables, empty namespaces, or incomplete
-    /// Sentinel settings.
-    pub fn from_provider_options(options: &ProviderOptions) -> Result<Self, RedisProviderError> {
-        const KNOWN_OPTIONS: &[&str] = &[
-            "redis.url",
-            "redis.namespace",
-            "redis.username_env",
-            "redis.password_env",
-            "redis.sentinel.username_env",
-            "redis.sentinel.password_env",
-            "redis.sentinel.nodes",
-            "redis.sentinel.service_name",
-            "redis.claim_min_idle_ms",
-            "redis.recovery_interval_ms",
-            "redis.max_unsettled_per_subscription",
-            "redis.max_idle_connections",
-            "redis.stream_maxlen_approx",
-            "redis.max_wire_bytes",
-            "redis.max_payload_bytes",
-            "redis.max_headers_bytes",
-        ];
-        if options
-            .keys()
-            .any(|key| key.starts_with("redis.") && !KNOWN_OPTIONS.contains(&key.as_str()))
-        {
-            return Err(RedisProviderError::Configuration("unknown Redis provider option"));
-        }
-        let connection_url = options
-            .get("redis.url")
-            .map(String::as_str)
-            .unwrap_or("redis://127.0.0.1/");
-        let namespace = options.get("redis.namespace").map(String::as_str).unwrap_or("qubit");
-        validate_url(connection_url)?;
-        validate_namespace(namespace)?;
-        let sentinel_nodes = options.get("redis.sentinel.nodes").map(|nodes| {
-            nodes
-                .split(',')
-                .map(str::trim)
-                .filter(|node| !node.is_empty())
-                .map(str::to_owned)
-                .collect::<Vec<_>>()
-        });
-        let sentinel_service = options.get("redis.sentinel.service_name").cloned();
-        let credentials = RedisCredentials::from_env_references(options, "redis")?;
-        let sentinel_credentials = RedisCredentials::from_env_references(options, "redis.sentinel")?;
-        let claim_min_idle_ms = options
-            .get("redis.claim_min_idle_ms")
-            .map(|value| {
-                value
-                    .parse::<usize>()
-                    .map_err(|_| RedisProviderError::Configuration("invalid redis.claim_min_idle_ms"))
-            })
-            .transpose()?
-            .unwrap_or(30_000);
-        let recovery_interval_ms = options
-            .get("redis.recovery_interval_ms")
-            .map(|value| {
-                value
-                    .parse::<usize>()
-                    .ok()
-                    .filter(|value| (50..=60_000).contains(value))
-                    .ok_or(RedisProviderError::Configuration("invalid redis.recovery_interval_ms"))
-            })
-            .transpose()?
-            .unwrap_or(1_000);
-        let max_unsettled_per_subscription = options
-            .get("redis.max_unsettled_per_subscription")
-            .map(|value| {
-                value
-                    .parse::<usize>()
-                    .ok()
-                    .filter(|value| (1..=10_000).contains(value))
-                    .ok_or(RedisProviderError::Configuration(
-                        "invalid redis.max_unsettled_per_subscription",
-                    ))
-            })
-            .transpose()?
-            .unwrap_or(100);
-        let max_idle_connections = options
-            .get("redis.max_idle_connections")
-            .map(|value| {
-                value
-                    .parse::<usize>()
-                    .ok()
-                    .filter(|value| (1..=64).contains(value))
-                    .ok_or(RedisProviderError::Configuration("invalid redis.max_idle_connections"))
-            })
-            .transpose()?
-            .unwrap_or(8);
-        let wire_limits = crate::wire_limits::WireLimits {
-            wire: positive_limit(options, "redis.max_wire_bytes", 8_388_608)?,
-            payload: positive_limit(options, "redis.max_payload_bytes", 1_048_576)?,
-            headers: positive_limit(options, "redis.max_headers_bytes", 65_536)?,
+    for endpoint in &endpoints {
+        let Some((host, port)) = endpoint.rsplit_once(':') else {
+            return Err(RedisProviderError::Configuration("invalid redis.sentinel.nodes"));
         };
-        let stream_maxlen_approx = options
-            .get("redis.stream_maxlen_approx")
-            .map(|value| {
-                value
-                    .parse::<usize>()
-                    .ok()
-                    .and_then(NonZeroUsize::new)
-                    .ok_or(RedisProviderError::Configuration("invalid redis.stream_maxlen_approx"))
-            })
-            .transpose()?;
-        if sentinel_nodes.as_ref().is_some_and(Vec::is_empty) {
-            return Err(RedisProviderError::Configuration(
-                "redis.sentinel.nodes must contain endpoints",
-            ));
+        let valid_host = !host.is_empty()
+            && !host
+                .chars()
+                .any(|character| character.is_whitespace() || character.is_control())
+            && if host.starts_with('[') {
+                host.ends_with(']') && host[1..host.len() - 1].parse::<Ipv6Addr>().is_ok()
+            } else {
+                !host.contains([':', '/', '@', '?', '#', '\\', '[', ']'])
+            };
+        if !valid_host
+            || port.is_empty()
+            || !port.bytes().all(|byte| byte.is_ascii_digit())
+            || port.parse::<u16>().ok().is_none_or(|port| port == 0)
+        {
+            return Err(RedisProviderError::Configuration("invalid redis.sentinel.nodes"));
         }
-        if sentinel_nodes.is_some() != sentinel_service.is_some() {
-            return Err(RedisProviderError::Configuration(
-                "Sentinel nodes and service name must be configured together",
-            ));
-        }
-        Ok(Self {
-            connection_url: connection_url.into(),
-            namespace: namespace.into(),
-            sentinel_nodes,
-            sentinel_service,
-            credentials,
-            sentinel_credentials,
-            claim_min_idle_ms,
-            recovery_interval_ms,
-            max_unsettled_per_subscription,
-            max_idle_connections,
-            stream_maxlen_approx,
-            wire_limits,
-        })
     }
-
-    /// Parses Redis provider options carried by an event-bus configuration.
-    ///
-    /// # Parameters
-    ///
-    /// - `config`: Facade configuration whose provider options contain Redis
-    ///   settings.
-    ///
-    /// # Returns
-    ///
-    /// Validated Redis settings with defaults applied.
-    ///
-    /// # Errors
-    ///
-    /// Returns the same validation errors as
-    /// [`from_provider_options`](Self::from_provider_options).
-    pub fn from_event_bus_config(config: &EventBusConfig) -> Result<Self, RedisProviderError> {
-        Self::from_provider_options(config.provider_options())
-    }
+    Ok(endpoints.into_iter().map(str::to_owned).collect())
 }
 
 /// Parses a Redis URL and rejects embedded credentials before retaining it.
@@ -505,146 +718,4 @@ fn validate_namespace(namespace: &str) -> Result<(), RedisProviderError> {
         return Err(RedisProviderError::Configuration("invalid redis.namespace"));
     }
     Ok(())
-}
-
-/// Parses one positive byte limit without retaining caller-supplied
-/// diagnostics. Returns configuration errors for zero, malformed numbers, or
-/// usize overflow.
-fn positive_limit(options: &ProviderOptions, key: &str, default: usize) -> Result<usize, RedisProviderError> {
-    options
-        .get(key)
-        .map(|value| {
-            value
-                .parse::<usize>()
-                .ok()
-                .filter(|value| *value > 0)
-                .ok_or(RedisProviderError::Configuration("invalid Redis byte limit"))
-        })
-        .transpose()
-        .map(|value| value.unwrap_or(default))
-}
-
-#[cfg(test)]
-mod tests {
-    use qubit_event_bus::model::ProviderOptions;
-
-    use super::RedisEventBusConfig;
-
-    #[test]
-    fn config_defaults_and_debug_redact_connection_details() {
-        let config = RedisEventBusConfig::default();
-        assert_eq!(config.connection_url(), "redis://127.0.0.1/");
-        assert_eq!(config.namespace(), "qubit");
-        assert_eq!(config.recovery_interval_ms(), 1_000);
-        assert!(config.sentinel_nodes().is_none());
-        assert!(config.sentinel_service().is_none());
-        assert!(config.stream_maxlen_approx().is_none());
-        assert!(!format!("{config:?}").contains("127.0.0.1"));
-    }
-
-    #[test]
-    fn new_config_exposes_supplied_values_and_defaults() {
-        let config = RedisEventBusConfig::new("redis://localhost/", "orders").unwrap();
-        assert_eq!(config.connection_url(), "redis://localhost/");
-        assert_eq!(config.namespace(), "orders");
-        assert_eq!(config.recovery_interval_ms(), 1_000);
-        assert_eq!(config.max_idle_connections(), 8);
-    }
-
-    #[test]
-    fn new_rejects_invalid_url_credentials_and_namespace() {
-        assert!(RedisEventBusConfig::new("not a URL", "orders").is_err());
-        assert!(RedisEventBusConfig::new("redis://user:secret@localhost/", "orders").is_err());
-        assert!(RedisEventBusConfig::new("redis://localhost/", "").is_err());
-        assert!(RedisEventBusConfig::new("redis://localhost/", &"x".repeat(129)).is_err());
-    }
-
-    #[test]
-    fn provider_options_accept_recovery_interval_boundaries_and_limits() {
-        for interval in [50, 60_000] {
-            let options: ProviderOptions = [("redis.recovery_interval_ms".into(), interval.to_string())].into();
-            assert_eq!(
-                RedisEventBusConfig::from_provider_options(&options)
-                    .unwrap()
-                    .recovery_interval_ms(),
-                interval
-            );
-        }
-        for interval in [49, 60_001] {
-            let options: ProviderOptions = [("redis.recovery_interval_ms".into(), interval.to_string())].into();
-            assert!(RedisEventBusConfig::from_provider_options(&options).is_err());
-        }
-    }
-
-    #[test]
-    #[cfg(any(feature = "sync", feature = "async"))]
-    fn provider_options_validate_pool_and_stream_limits() {
-        let options: ProviderOptions = [
-            ("redis.max_idle_connections".into(), "64".into()),
-            ("redis.max_unsettled_per_subscription".into(), "10000".into()),
-            ("redis.stream_maxlen_approx".into(), "42".into()),
-        ]
-        .into();
-        let config = RedisEventBusConfig::from_provider_options(&options).unwrap();
-        assert_eq!(config.max_idle_connections(), 64);
-        assert_eq!(config.max_unsettled_per_subscription(), 10_000);
-        assert_eq!(config.stream_maxlen_approx().unwrap().get(), 42);
-        for (key, value) in [
-            ("redis.max_idle_connections", "65"),
-            ("redis.max_unsettled_per_subscription", "10001"),
-            ("redis.stream_maxlen_approx", "0"),
-        ] {
-            let options: ProviderOptions = [(key.into(), value.into())].into();
-            assert!(
-                RedisEventBusConfig::from_provider_options(&options).is_err(),
-                "{key}={value}"
-            );
-        }
-    }
-
-    #[test]
-    #[cfg(any(feature = "sync", feature = "async"))]
-    fn provider_options_accept_claim_idle_threshold() {
-        let options: ProviderOptions = [("redis.claim_min_idle_ms".into(), "125".into())].into();
-        let config = RedisEventBusConfig::from_provider_options(&options).unwrap();
-        assert_eq!(config.claim_min_idle_ms(), 125);
-    }
-
-    #[test]
-    fn event_bus_config_parsing_reads_provider_options() {
-        let options: ProviderOptions = [("redis.namespace".into(), "billing".into())].into();
-        let event_bus_config = qubit_event_bus::EventBusConfig::default().with_provider_options(options);
-        assert_eq!(
-            RedisEventBusConfig::from_event_bus_config(&event_bus_config)
-                .unwrap()
-                .namespace(),
-            "billing"
-        );
-    }
-
-    #[test]
-    fn provider_options_reject_inline_credentials_invalid_namespaces_and_partial_sentinel() {
-        for options in [
-            [("redis.url".into(), "redis://user:secret@localhost/".into())].into(),
-            [("redis.namespace".into(), "bad\nnamespace".into())].into(),
-            [("redis.sentinel.nodes".into(), "127.0.0.1:26379".into())].into(),
-        ] {
-            assert!(RedisEventBusConfig::from_provider_options(&options).is_err());
-        }
-        let error =
-            RedisEventBusConfig::from_provider_options(&[("redis.url".into(), "not a redis url".into())].into())
-                .unwrap_err();
-        assert!(!error.to_string().contains("secret"));
-    }
-
-    #[test]
-    fn provider_options_reject_unknown_redis_keys_without_echoing_values() {
-        let options: ProviderOptions = [("redis.passwrod".into(), "secret-value".into())].into();
-        let error = RedisEventBusConfig::from_provider_options(&options).unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            "invalid Redis provider configuration: unknown Redis provider option"
-        );
-        assert!(!error.to_string().contains("secret-value"));
-    }
 }

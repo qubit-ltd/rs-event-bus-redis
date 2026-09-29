@@ -8,6 +8,9 @@
 //! Private storage and loading for Redis ACL credentials.
 
 use std::env;
+use std::fmt::Debug;
+use std::fmt::Formatter;
+use std::fmt::Result as FmtResult;
 
 use qubit_event_bus::model::ProviderOptions;
 
@@ -22,13 +25,21 @@ pub(super) struct RedisCredentials {
     pub(super) password: Option<String>,
 }
 
-impl std::fmt::Debug for RedisCredentials {
+impl Debug for RedisCredentials {
     /// Formats credential presence without disclosing usernames or passwords.
+    ///
+    /// # Parameters
+    ///
+    /// - `formatter`: Destination for the redacted debug representation.
     ///
     /// # Returns
     ///
     /// The formatter result produced while writing credential-presence markers.
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    ///
+    /// # Errors
+    ///
+    /// Returns a formatting error if the destination rejects a write.
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> FmtResult {
         formatter
             .debug_struct("RedisCredentials")
             .field("username", &self.username.as_ref().map(|_| "<redacted>"))

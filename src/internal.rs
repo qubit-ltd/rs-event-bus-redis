@@ -17,7 +17,10 @@ mod decode_failure;
 mod poison_outcome;
 #[path = "internal/poison_reason.rs"]
 mod poison_reason;
+mod receive_action;
 mod receive_driver;
+mod receive_reply;
+mod receive_stage;
 #[path = "internal/recovery_scan_budget.rs"]
 pub(crate) mod recovery_scan_budget;
 #[path = "internal/recovery_scan_stage.rs"]
@@ -34,14 +37,25 @@ pub(crate) use decode::decode_entry;
 pub(crate) use decode_failure::DecodeFailure;
 pub(crate) use poison_outcome::PoisonOutcome;
 pub(crate) use poison_reason::PoisonReason;
-pub(crate) use receive_driver::ReceiveAction;
+pub(crate) use receive_action::ReceiveAction;
 pub(crate) use receive_driver::ReceiveDriver;
-pub(crate) use receive_driver::ReceiveReply;
+pub(crate) use receive_reply::ReceiveReply;
 #[cfg(test)]
 pub(crate) use recovery_scan_budget::RecoveryScanBudget;
 #[cfg(test)]
 pub(crate) use recovery_scan_stage::RecoveryScanStage;
 pub(crate) use recovery_state::RecoveryState;
 pub(crate) use settlement_action::SettlementAction;
-pub(crate) use settlement_action::settlement_action;
 pub(crate) use settlement_state::SettlementState;
+
+/// Shared transport policy rules.
+mod transport_policy;
+pub(crate) use transport_policy::TransportPolicy;
+
+/// Shared wire limits rules.
+mod wire_limits;
+pub(crate) use wire_limits::WireLimits;
+
+/// Shared settlement intention and completion state.
+mod settlement_progress;
+pub(crate) use settlement_progress::SettlementProgress;

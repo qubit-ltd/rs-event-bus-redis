@@ -5,9 +5,13 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-//! Result of atomically transferring a pending entry to quarantine.
+//! Confirmed quarantine script outcomes; errors may hide partial Lua writes.
 
-/// Result of checking and transferring a malformed group delivery.
+/// Confirmed result of checking and transferring a malformed group delivery.
+///
+/// Redis prevents concurrent command interleaving during the script but does
+/// not roll back writes on failure. An unconfirmed or failed script is reported
+/// separately as an unknown outcome rather than represented by this enum.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PoisonOutcome {
     /// Entry is recorded in quarantine and acknowledged from its original

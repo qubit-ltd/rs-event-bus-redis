@@ -22,20 +22,3 @@ use qubit_id::UuidV4Generator;
 pub(crate) fn new_consumer_name() -> Result<String, IdGenerationError> {
     Ok(format!("qubit:consumer:{}", UuidV4Generator::new().generate()?))
 }
-
-#[cfg(test)]
-mod tests {
-    use super::new_consumer_name;
-
-    #[test]
-    fn consumer_names_are_distinct_uuid_v4_values() {
-        let first = new_consumer_name().expect("UUID v4 generation succeeds");
-        let second = new_consumer_name().expect("UUID v4 generation succeeds");
-
-        assert_ne!(first, second);
-        assert!(first.starts_with("qubit:consumer:"));
-        let uuid = &first["qubit:consumer:".len()..];
-        assert_eq!(uuid.len(), 36);
-        assert_eq!(uuid.as_bytes()[14], b'4');
-    }
-}

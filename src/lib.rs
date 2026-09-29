@@ -12,9 +12,9 @@
 
 #![forbid(unsafe_code)]
 
-/// Bounded JSON serialization for public wire construction and SPI publishing.
-#[path = "internal/capped_writer.rs"]
-mod capped_writer;
+#[cfg(any(feature = "sync", feature = "async"))]
+#[path = "internal/bounded_wire_decoder.rs"]
+mod bounded_wire_decoder;
 /// Standalone and Sentinel connection providers.
 #[cfg(any(feature = "sync", feature = "async"))]
 mod client;
@@ -36,9 +36,6 @@ pub mod naming;
 /// Malformed Redis stream entry quarantine protocol.
 #[cfg(any(feature = "sync", feature = "async"))]
 mod poison;
-/// Recovery policy unit tests.
-#[cfg(all(test, any(feature = "sync", feature = "async")))]
-mod recovery;
 /// Redis backend configuration.
 mod redis_event_bus_config;
 /// Redis provider failures.
@@ -50,8 +47,7 @@ mod stream_protocol;
 pub mod wire;
 /// Versioned Redis wire fields.
 mod wire_fields;
-/// Finite wire resource bounds shared with configuration.
-#[path = "internal/wire_limits.rs"]
+#[cfg(any(feature = "sync", feature = "async"))]
 mod wire_limits;
 
 /// Synchronous SPI implementation.
@@ -62,11 +58,7 @@ pub mod sync;
 #[cfg(feature = "async")]
 pub mod r#async;
 
-/// Version-aware bounded wire decoder shared by Redis receivers.
-#[cfg(any(feature = "sync", feature = "async"))]
-#[path = "internal/bounded_wire_decoder.rs"]
-mod bounded_wire_decoder;
-
-/// Private unit regression tests.
+/// Crate-internal contract tests.
 #[cfg(test)]
+#[cfg(any(feature = "sync", feature = "async"))]
 mod tests;

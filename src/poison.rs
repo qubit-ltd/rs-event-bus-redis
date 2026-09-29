@@ -5,18 +5,28 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-//! Atomic transfer of malformed pending entries into a quarantine stream.
+//! Serialized quarantine transfer; Redis Lua does not roll back partial writes.
 
 #[cfg(feature = "sync")]
 use redis::ConnectionLike;
+use redis::ErrorKind;
 use redis::RedisError;
+#[cfg(feature = "async")]
+use redis::aio::MultiplexedConnection;
 use redis::cmd;
 
 pub(crate) use crate::internal::PoisonOutcome;
 pub(crate) use crate::internal::PoisonReason;
 
-/// Lua transfer checks ownership, copies the raw wire field, then acknowledges.
+/// Lua preflights types and ownership, copies the last wire field, then ACKs.
 const QUARANTINE_SCRIPT: &str = r#"
+local source_type = redis.call('TYPE', KEYS[1]).ok
+if source_type == 'none' then return 0 end
+if source_type ~= 'stream' then return redis.error_reply('WRONGTYPE source must be a stream') end
+local quarantine_type = redis.call('TYPE', KEYS[2]).ok
+if quarantine_type ~= 'none' and quarantine_type ~= 'stream' then
+    return redis.error_reply('WRONGTYPE quarantine must be a stream')
+end
 local pending = redis.call('XPENDING', KEYS[1], ARGV[1], ARGV[3], ARGV[3], 1)
 if #pending == 0 then return 0 end
 if pending[1][2] ~= ARGV[2] then return -1 end
@@ -28,13 +38,12 @@ if #rows == 0 then
 end
 local fields = rows[1][2]
 local wire = ''
-local missing = '0'
+local missing = '1'
 for index = 1, #fields, 2 do
     if fields[index] == 'wire' then
         wire = fields[index + 1]
-        break
+        missing = '0'
     end
-    if index == #fields - 1 then missing = '1' end
 end
 redis.call('XADD', KEYS[2], '*',
     'source_stream', KEYS[1],
@@ -48,7 +57,11 @@ if acknowledged ~= 1 then return -2 end
 return 1
 "#;
 
-/// Transfers a malformed pending entry to its quarantine stream atomically.
+/// Transfers a malformed pending entry without interleaving other commands.
+///
+/// # Type Parameters
+///
+/// - `C`: Controlled blocking transport implementing Redis command execution.
 ///
 /// # Parameters
 ///
@@ -67,8 +80,10 @@ return 1
 /// # Errors
 ///
 /// Returns a Redis error if the script cannot execute or returns an unknown
-/// status. The original pending entry remains available for retry when the
-/// script fails before its atomic `XADD` and `XACK` sequence completes.
+/// status. Type and owner checks precede writes, but Redis Lua does not roll
+/// back an `XADD` when a subsequent `XACK` fails. A lost reply can hide a
+/// successful copy and acknowledgement; callers must preserve that uncertainty
+/// and inspect the source PEL before any later recovery attempt.
 #[cfg(feature = "sync")]
 pub(crate) fn quarantine<C: ConnectionLike>(
     connection: &mut C,
@@ -95,16 +110,37 @@ pub(crate) fn quarantine<C: ConnectionLike>(
         2 => Ok(PoisonOutcome::TombstoneCleared),
         -1 => Ok(PoisonOutcome::OwnershipChanged),
         _ => Err(RedisError::from((
-            redis::ErrorKind::ResponseError,
+            ErrorKind::ResponseError,
             "invalid quarantine result",
         ))),
     }
 }
 
-/// Executes the same quarantine script on Redis's multiplexed async connection.
+/// Executes the quarantine script on a dedicated async receiver connection.
+///
+/// # Parameters
+///
+/// - `connection`: Controlled receiver connection executing one Redis script.
+/// - `source`: Source stream key whose pending record is being recovered.
+/// - `quarantine`: Group-specific destination stream key.
+/// - `group`: Consumer group whose PEL owner must match.
+/// - `consumer`: Consumer currently responsible for the source record.
+/// - `id`: Source stream ID used to associate any quarantine copy.
+/// - `reason`: Stable decode failure category stored beside the raw wire.
+///
+/// # Returns
+///
+/// A normalized transfer result without bringing the quarantined wire back to
+/// Rust. The script can copy a record and acknowledge its PEL entry.
+///
+/// # Errors
+///
+/// Returns a Redis error for a failed script or unknown status. Redis Lua does
+/// not roll back prior writes, and cancellation or reply loss can conceal a
+/// completed transfer. Callers must report an unknown outcome conservatively.
 #[cfg(feature = "async")]
 pub(crate) async fn quarantine_async(
-    connection: &mut redis::aio::MultiplexedConnection,
+    connection: &mut MultiplexedConnection,
     source: &str,
     quarantine: &str,
     group: &str,
@@ -129,21 +165,8 @@ pub(crate) async fn quarantine_async(
         2 => Ok(PoisonOutcome::TombstoneCleared),
         -1 => Ok(PoisonOutcome::OwnershipChanged),
         _ => Err(RedisError::from((
-            redis::ErrorKind::ResponseError,
+            ErrorKind::ResponseError,
             "invalid quarantine result",
         ))),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::PoisonReason;
-
-    #[test]
-    fn test_poison_reasons_have_stable_secret_free_names() {
-        assert_eq!(PoisonReason::MissingWire.as_str(), "missing_wire");
-        assert_eq!(PoisonReason::InvalidWireField.as_str(), "invalid_wire_field");
-        assert_eq!(PoisonReason::InvalidJson.as_str(), "invalid_json");
-        assert_eq!(PoisonReason::InvalidEventMetadata.as_str(), "invalid_event_metadata");
     }
 }

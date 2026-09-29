@@ -1,0 +1,18 @@
+[package]
+name = "redis-event-bus-task-notifications"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+qubit-event-bus-redis = { path = "../../..", default-features = false, features = ["sync", "discovery"] }
+qubit-event-bus = { path = "../../../../rs-event-bus", default-features = false, features = ["discovery"] }
+qubit-task = { path = "../../../../rs-task", features = ["event-bus"] }
+qubit-spi = "0.13"
+serde_json = "1"
+tokio = { version = "1.53", features = ["rt-multi-thread", "macros"] }
+
+[patch.crates-io]
+qubit-event-bus = { path = "../../../../rs-event-bus" }

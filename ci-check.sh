@@ -10,5 +10,5 @@ if [ -f "$project_root/.infra/style/rustfmt.toml" ]; then
 elif [ -f "$project_root/rustfmt.toml" ]; then
     export RS_INFRA_STYLE_RUSTFMT_CONFIG="$project_root/rustfmt.toml"
 fi
-"$project_root/.infra/tools/prepare-local-path-dependencies.sh"
+bash "$project_root/ci/prepare-event-bus.sh"
 "$project_root/.infra/tools/infra-tool.sh" rs-infra-ci --project "$project_root" "$@" check

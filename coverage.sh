@@ -3,7 +3,8 @@ set -euo pipefail
 
 project_root=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 source "$project_root/.infra/tools/cleanup-build-artifacts.sh"
-"$project_root/.infra/tools/prepare-local-path-dependencies.sh"
+bash "$project_root/ci/prepare-event-bus.sh"
+cargo llvm-cov clean --locked --profraw-only
 (
     eval "$(cargo llvm-cov show-env --sh)"
     cargo build --examples --all-features --locked --target-dir "$project_root/target/llvm-cov-target"

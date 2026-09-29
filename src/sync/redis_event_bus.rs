@@ -9,6 +9,7 @@
 
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use qubit_event_bus::error::SpiError;
 use qubit_event_bus::model::PublishAcknowledgement;
@@ -31,7 +32,9 @@ use qubit_event_bus::spi::ShutdownOutcome;
 use qubit_event_bus::spi::SpiSubscriptionRequest;
 use qubit_event_bus::spi::SubscriptionModes;
 use qubit_event_bus::spi::TopicAddress;
+use redis::ConnectionLike;
 use redis::RedisError;
+use redis::Value;
 use redis::cmd;
 
 use super::subscription::Subscription;
@@ -40,11 +43,12 @@ use crate::config::RedisEventBusConfig;
 use crate::consumer_identity::new_consumer_name;
 use crate::error::RedisProviderError;
 use crate::internal::RecoveryState;
+use crate::internal::WireLimits;
 use crate::naming::group_name;
 use crate::naming::poison_key;
 use crate::naming::stream_key;
 use crate::redis_provider_error::from_redis_error;
-use crate::wire::WireFields;
+use crate::wire_fields::encode_bounded;
 
 /// Validated Redis settings and client shared by publishers and subscribers.
 pub(super) struct RedisEventBus {
@@ -82,36 +86,53 @@ impl EventBusSpi for RedisEventBus {
     /// # Errors
     ///
     /// Returns an SPI error if the payload is not encoded, serialization fails,
-    /// a connection cannot be opened, or Redis rejects `XADD`.
+    /// admission is exhausted, a connection cannot be opened, or Redis rejects
+    /// `XADD`. A missing or malformed reply after send returns
+    /// outcome-unknown without replay.
     fn publish(&self, message: OutboundMessage) -> Result<PublishAcknowledgement, SpiError> {
-        use qubit_event_bus::model::PublishEffect;
-        let topic = message.topic();
-        let before_query = |error| crate::error::to_publish_error(topic, error, PublishEffect::NotAccepted);
-        let limits = self.settings.wire_limits();
-        let fields = WireFields::from_outbound_with_limits(&message, limits).map_err(before_query)?;
-        let key = stream_key(self.settings.namespace(), topic.as_str());
-        let payload = crate::capped_writer::to_capped_json(&fields, limits.wire).map_err(before_query)?;
+        let payload = encode_bounded(&message, WireLimits::from_config(&self.settings))
+            .map_err(|error| spi_error("publish", Some(message.topic()), error))?;
+        let key = stream_key(self.settings.namespace(), message.topic().as_str());
         let mut connection = self
             .client
             .get_connection()
-            .map_err(|error| before_query(from_redis_error("publish", &error)))?;
+            .map_err(|error| spi_error("publish", Some(message.topic()), error))?;
         let mut command = cmd("XADD");
         command.arg(&key);
         if let Some(maxlen) = self.settings.stream_maxlen_approx() {
             command.arg("MAXLEN").arg("~").arg(maxlen.get());
         }
-        let message_id: String = command
-            .arg("*")
-            .arg("wire")
-            .arg(payload)
-            .query(&mut connection)
-            .map_err(|error| {
+        command.arg("*").arg("wire").arg(payload);
+        let result = connection.req_command(&command);
+        let message_id = match result {
+            Ok(Value::BulkString(bytes)) => match String::from_utf8(bytes) {
+                Ok(id) if valid_stream_id(&id) && id != "0-0" => id,
+                _ => {
+                    connection.discard();
+                    return Err(spi_error(
+                        "publish",
+                        Some(message.topic()),
+                        RedisProviderError::OutcomeUnknown { operation: "publish" },
+                    ));
+                }
+            },
+            Ok(Value::ServerError(error)) => {
+                let error: RedisError = error.into();
+                return Err(spi_error(
+                    "publish",
+                    Some(message.topic()),
+                    from_redis_error("publish", &error),
+                ));
+            }
+            Ok(_) | Err(_) => {
                 connection.discard();
-                crate::error::query_publish_error(topic, &error)
-            })?;
-        if !valid_stream_id(&message_id) {
-            return Err(crate::error::invalid_publish_reply(topic));
-        }
+                return Err(spi_error(
+                    "publish",
+                    Some(message.topic()),
+                    RedisProviderError::OutcomeUnknown { operation: "publish" },
+                ));
+            }
+        };
         Ok(PublishAcknowledgement::Accepted {
             provider_message_id: Some(message_id),
             metadata: Default::default(),
@@ -175,10 +196,18 @@ impl EventBusSpi for RedisEventBus {
                 source: Box::new(RedisProviderError::Configuration("invalid Redis stream ID")),
             });
         }
+        let receiver_permit = self
+            .client
+            .try_receiver()
+            .map_err(|error| spi_error("subscribe", Some(&topic), error))?;
+        let receive_connection = self
+            .client
+            .get_dedicated_connection()
+            .map_err(|error| spi_error("subscribe", Some(&topic), error))?;
         let mut connection = self
             .client
             .get_connection()
-            .map_err(|error| spi_error("subscribe", Some(&topic), from_redis_error("subscribe", &error)))?;
+            .map_err(|error| spi_error("subscribe", Some(&topic), error))?;
         let result: Result<(), RedisError> = cmd("XGROUP")
             .arg("CREATE")
             .arg(&key)
@@ -191,10 +220,11 @@ impl EventBusSpi for RedisEventBus {
             .is_err_and(|error| error.is_io_error() || error.is_timeout())
         {
             connection.discard();
+            drop(connection);
             let mut retry_connection = self
                 .client
                 .get_connection()
-                .map_err(|error| spi_error("subscribe", Some(&topic), from_redis_error("subscribe", &error)))?;
+                .map_err(|error| spi_error("subscribe", Some(&topic), error))?;
             cmd("XGROUP")
                 .arg("CREATE")
                 .arg(&key)
@@ -224,7 +254,9 @@ impl EventBusSpi for RedisEventBus {
         })?;
         Ok(Box::new(Subscription {
             client: Arc::clone(&self.client),
-            receive_connection: None,
+            wire_limits: WireLimits::from_config(&self.settings),
+            receive_connection: Some(receive_connection),
+            receiver_permit: Some(receiver_permit),
             key,
             group,
             quarantine,
@@ -233,9 +265,8 @@ impl EventBusSpi for RedisEventBus {
             subscription_id: request.subscription_id(),
             closed: false,
             claim_min_idle_ms: self.settings.claim_min_idle_ms(),
-            recovery_interval: std::time::Duration::from_millis(self.settings.recovery_interval_ms() as u64),
+            recovery_interval: Duration::from_millis(self.settings.recovery_interval_ms() as u64),
             max_unsettled: self.settings.max_unsettled_per_subscription(),
-            wire_limits: self.settings.wire_limits(),
             recovery: Arc::new(Mutex::new(RecoveryState::new())),
         }))
     }
@@ -245,12 +276,28 @@ impl EventBusSpi for RedisEventBus {
     /// # Returns
     ///
     /// `Complete`; any unsettled records remain in the Redis pending entries
-    /// list.
+    /// list. No command is sent and this implementation cannot return an error.
+    ///
+    /// # Parameters
+    ///
+    /// - `_mode`: Facade shutdown request; both modes complete without extra
+    ///   Redis I/O.
     fn shutdown(&self, _mode: ShutdownMode) -> Result<ShutdownOutcome, SpiError> {
         Ok(ShutdownOutcome::Complete)
     }
 }
 
+/// Validates the two unsigned decimal components of a Redis stream ID.
+///
+/// # Parameters
+///
+/// - `value`: Milliseconds and sequence separated by exactly one dash.
+///
+/// # Returns
+///
+/// `true` only when both non-empty decimal components fit u64. No Redis I/O is
+/// issued.
+#[must_use]
 fn valid_stream_id(value: &str) -> bool {
     let Some((milliseconds, sequence)) = value.split_once('-') else {
         return false;
@@ -259,6 +306,8 @@ fn valid_stream_id(value: &str) -> bool {
         && !sequence.is_empty()
         && milliseconds.bytes().all(|byte| byte.is_ascii_digit())
         && sequence.bytes().all(|byte| byte.is_ascii_digit())
+        && milliseconds.parse::<u64>().is_ok()
+        && sequence.parse::<u64>().is_ok()
 }
 
 /// Returns the fixed capability set shared by Redis provider modes.
@@ -267,6 +316,7 @@ fn valid_stream_id(value: &str) -> bool {
 ///
 /// Encoded durable delivery with position replay and accept/retry/reject
 /// settlement.
+#[inline]
 pub(super) const fn redis_capabilities() -> EventBusCapabilities {
     EventBusCapabilities::new(
         PayloadModes::Encoded,
@@ -292,57 +342,28 @@ pub(super) const fn redis_capabilities() -> EventBusCapabilities {
 ///
 /// # Returns
 ///
-/// A retryable SPI operation error without raw Redis diagnostics.
+/// A classified SPI operation error without raw Redis diagnostics; retryability
+/// reflects both the failure category and whether that operation can safely
+/// recover.
 pub(super) fn spi_error(operation: &'static str, topic: Option<&TopicAddress>, source: RedisProviderError) -> SpiError {
     crate::error::to_spi_error(operation, topic, source)
 }
 
 #[cfg(test)]
 mod tests {
-    use std::any::TypeId;
     use std::sync::Arc;
-    use std::time::SystemTime;
+    use std::sync::Mutex;
+    use std::time::Duration;
 
-    use qubit_event_bus::model::ConsumerGroup;
-    use qubit_event_bus::model::ContentType;
-    use qubit_event_bus::model::EventId;
-    use qubit_event_bus::model::Headers;
-    use qubit_event_bus::model::ProviderOptions;
-    use qubit_event_bus::model::StartPosition;
-    use qubit_event_bus::model::SubscriberId;
-    use qubit_event_bus::model::SubscriptionDurability;
-    use qubit_event_bus::spi::EncodedPayload;
-    use qubit_event_bus::spi::EventBusSpi;
     use qubit_event_bus::spi::EventSubscriptionSpi;
-    use qubit_event_bus::spi::OutboundMessage;
-    use qubit_event_bus::spi::PayloadModes;
-    use qubit_event_bus::spi::ShutdownMode;
-    use qubit_event_bus::spi::ShutdownOutcome;
-    use qubit_event_bus::spi::SpiSubscriptionRequest;
-    use qubit_event_bus::spi::SubscriptionModes;
     use qubit_event_bus::spi::TopicAddress;
-    use qubit_event_bus::spi::TransportPayload;
     use qubit_id::Id;
 
     use super::RedisEventBus;
     use crate::client::Client;
     use crate::config::RedisEventBusConfig;
-
-    #[test]
-    fn test_capabilities_and_shutdown_are_available_without_redis() {
-        let settings = RedisEventBusConfig::default();
-        let bus = RedisEventBus {
-            client: std::sync::Arc::new(Client::new(&settings).expect("default Redis client is valid")),
-            settings,
-        };
-
-        assert_eq!(bus.capabilities().payload_modes(), PayloadModes::Encoded);
-        assert_eq!(bus.capabilities().subscription_modes(), SubscriptionModes::DURABLE);
-        assert_eq!(
-            bus.shutdown(ShutdownMode::Immediate).expect("shutdown succeeds"),
-            ShutdownOutcome::Complete
-        );
-    }
+    use crate::internal::RecoveryState;
+    use crate::internal::WireLimits;
 
     #[test]
     fn test_stream_id_validation_rejects_malformed_components() {
@@ -353,54 +374,18 @@ mod tests {
     }
 
     #[test]
-    fn connection_failures_are_returned_for_publish_and_subscribe() {
+    fn test_receiver_connection_failure_is_returned_before_delivery() {
         let settings =
             RedisEventBusConfig::new("redis://127.0.0.1:1/", "connection-errors").expect("valid test configuration");
         let bus = RedisEventBus {
             client: Arc::new(Client::new(&settings).expect("unreachable Redis URL is syntactically valid")),
             settings,
         };
-        let native_message = OutboundMessage::new(
-            TopicAddress::new("native").expect("topic is valid"),
-            EventId::new("native-event").expect("event ID is valid"),
-            SystemTime::UNIX_EPOCH,
-            Headers::new(),
-            None,
-            None,
-            TransportPayload::Native(Arc::new(7_u8)),
-        );
-        assert!(EventBusSpi::publish(&bus, native_message).is_err());
-        let topic = TopicAddress::new("events").expect("topic is valid");
-        let message = OutboundMessage::new(
-            topic.clone(),
-            EventId::new("event-1").expect("event ID is valid"),
-            SystemTime::UNIX_EPOCH,
-            Headers::new(),
-            None,
-            None,
-            TransportPayload::Encoded(EncodedPayload::new(
-                Arc::from(vec![1_u8]),
-                ContentType::new("application/octet-stream").expect("content type is valid"),
-                None,
-            )),
-        );
-        let request = SpiSubscriptionRequest::new(
-            Id::new(1),
-            topic,
-            SubscriberId::new("worker").expect("subscriber ID is valid"),
-            Some(ConsumerGroup::new("workers").expect("group name is valid")),
-            SubscriptionDurability::Durable,
-            StartPosition::Earliest,
-            ProviderOptions::new(),
-            TypeId::of::<Vec<u8>>(),
-        );
-
-        assert!(bus.publish(message).is_err());
-        assert!(bus.subscribe(request).is_err());
-
         let mut receiver = super::Subscription {
             client: Arc::clone(&bus.client),
+            wire_limits: WireLimits::from_config(&bus.settings),
             receive_connection: None,
+            receiver_permit: None,
             key: "connection-errors:events".into(),
             group: "workers".into(),
             quarantine: "connection-errors:quarantine".into(),
@@ -409,11 +394,10 @@ mod tests {
             subscription_id: Id::new(2),
             closed: false,
             claim_min_idle_ms: 0,
-            recovery_interval: std::time::Duration::from_secs(1),
+            recovery_interval: Duration::from_secs(1),
             max_unsettled: 1,
-            wire_limits: crate::wire_limits::WireLimits::default(),
-            recovery: std::sync::Arc::new(std::sync::Mutex::new(crate::internal::RecoveryState::new())),
+            recovery: Arc::new(Mutex::new(RecoveryState::new())),
         };
-        assert!(receiver.receive(std::time::Duration::ZERO).is_err());
+        assert!(receiver.receive(Duration::ZERO).is_err());
     }
 }

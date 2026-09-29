@@ -15,6 +15,10 @@ pub(crate) enum PoisonReason {
     MissingWire,
     /// Stream entry's `wire` value is not a byte string.
     InvalidWireField,
+    /// The raw wire bytes exceed the configured complete JSON budget.
+    OversizedWire,
+    /// The decoded version 1 payload exceeds its raw byte budget.
+    OversizedPayload,
     /// The wire field is not valid JSON.
     InvalidJson,
     /// A decoded field cannot construct the required event metadata.
@@ -23,10 +27,18 @@ pub(crate) enum PoisonReason {
 
 impl PoisonReason {
     /// Returns the stable, secret-free reason stored in the quarantine stream.
+    ///
+    /// # Returns
+    ///
+    /// A static category independent of message content and connection details.
+    #[must_use]
+    #[inline]
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::MissingWire => "missing_wire",
             Self::InvalidWireField => "invalid_wire_field",
+            Self::OversizedWire => "oversized_wire",
+            Self::OversizedPayload => "oversized_payload",
             Self::InvalidJson => "invalid_json",
             Self::InvalidEventMetadata => "invalid_event_metadata",
         }

@@ -9,10 +9,13 @@
 
 mod support;
 
+use std::env::args;
+use std::env::var;
 use std::error::Error;
 use std::sync::mpsc;
 use std::time::Duration;
 
+use qubit_event_bus::DeliveryError;
 use qubit_event_bus::EventBusRegistry;
 use qubit_event_bus::SubscriberId;
 use qubit_event_bus::model::ConsumerGroup;
@@ -28,11 +31,9 @@ use qubit_event_bus_redis as _;
 use qubit_spi::ProviderSelection;
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let nodes = std::env::var("REDIS_SENTINEL_NODES")?;
-    let service_name = std::env::var("REDIS_SENTINEL_SERVICE_NAME")?;
-    let namespace = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "sentinel-orders-example".to_owned());
+    let nodes = var("REDIS_SENTINEL_NODES")?;
+    let service_name = var("REDIS_SENTINEL_SERVICE_NAME")?;
+    let namespace = args().nth(1).unwrap_or_else(|| "sentinel-orders-example".to_owned());
     let config = EventBusConfig::default()
         .with_selection(ProviderSelection::named("redis-streams")?)
         .with_provider_options(support::provider_options(
@@ -56,7 +57,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         move |delivery| {
             sender
                 .send(delivery.payload().clone())
-                .map_err(|error| qubit_event_bus::DeliveryError::Handler {
+                .map_err(|error| DeliveryError::Handler {
                     source: Box::new(error),
                 })
         },

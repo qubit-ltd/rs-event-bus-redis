@@ -35,12 +35,19 @@ pub struct ReplyGate {
 }
 
 impl ReplyGate {
-    /// Arms the next matching response.
+    /// Arms the next new-entry XREADGROUP reply and resets prior gate state.
+    ///
+    /// State locking may block briefly and panics if the gate mutex is
+    /// poisoned.
     pub fn arm(&self) {
         self.arm_for_new_entries();
     }
 
-    /// Arms the next response for `command` after Redis has applied it.
+    /// Arms the next applied reply for the ASCII command name `command`.
+    ///
+    /// The command is copied and normalized to uppercase; prior gate state is
+    /// reset. State locking may block briefly and panics if the gate mutex
+    /// is poisoned.
     pub fn arm_for(&self, command: &'static str) {
         let mut state = self.state.lock().expect("reply gate lock is healthy");
         state.armed = true;
@@ -52,6 +59,11 @@ impl ReplyGate {
         state.waker = None;
     }
 
+    /// Selects new-entry XREADGROUP replies while leaving recovery reads
+    /// ungated.
+    ///
+    /// Resets prior state under the mutex; a poisoned state mutex causes a
+    /// panic.
     fn arm_for_new_entries(&self) {
         let mut state = self.state.lock().expect("reply gate lock is healthy");
         state.armed = true;
@@ -63,7 +75,10 @@ impl ReplyGate {
         state.waker = None;
     }
 
-    /// Waits until Redis has returned the response for the selected command.
+    /// Blocks until the applied reply reaches the gate or `timeout` expires.
+    ///
+    /// Returns true if the gate was reached, and false if it remains unreached.
+    /// Panics if the state mutex or condition-variable wait is poisoned.
     pub fn wait_until_reached(&self, timeout: Duration) -> bool {
         let state = self.state.lock().expect("reply gate lock is healthy");
         let (state, _) = self
@@ -73,12 +88,20 @@ impl ReplyGate {
         state.reached
     }
 
-    /// Waits without blocking the executor until the upstream reply is applied.
+    /// Returns a future completing once Redis has produced the gated reply.
+    ///
+    /// Polling registers the current waker instead of waiting for the reply
+    /// condition. Mutex locking may block briefly and panics if shared
+    /// state is poisoned.
     pub fn wait_applied(&self) -> WaitApplied<'_> {
         WaitApplied { gate: self }
     }
 
-    /// Allows the held response to continue to the client.
+    /// Releases the held response to the client and wakes blocking proxy
+    /// workers.
+    ///
+    /// State locking may block briefly and panics if the gate mutex is
+    /// poisoned.
     pub fn release(&self) {
         let mut state = self.state.lock().expect("reply gate lock is healthy");
         state.discard_reply = false;
@@ -86,7 +109,11 @@ impl ReplyGate {
         self.changed.notify_all();
     }
 
-    /// Closes the proxied client connection without delivering the held reply.
+    /// Unblocks the proxy while discarding the held reply and closing that
+    /// connection.
+    ///
+    /// State locking may block briefly and panics if the gate mutex is
+    /// poisoned.
     pub fn release_without_reply(&self) {
         let mut state = self.state.lock().expect("reply gate lock is healthy");
         state.discard_reply = true;
@@ -94,6 +121,13 @@ impl ReplyGate {
         self.changed.notify_all();
     }
 
+    /// Holds a matching applied reply until released and reports whether to
+    /// discard it.
+    ///
+    /// `command` is the uppercase command name; `request` identifies new-entry
+    /// reads. Returns false for an unmatched or delivered reply, and true
+    /// for a discarded reply. Blocks on the condition variable and panics
+    /// if the gate mutex is poisoned.
     pub(super) fn hold_if_armed(&self, command: &[u8], request: &[u8]) -> bool {
         let mut state = self.state.lock().expect("reply gate lock is healthy");
         if !state.armed || state.command.as_deref() != Some(command) {
@@ -127,6 +161,12 @@ pub struct WaitApplied<'a> {
 impl Future for WaitApplied<'_> {
     type Output = ();
 
+    /// Checks the applied gate and records `context`'s waker while it is
+    /// pending.
+    ///
+    /// Returns Ready once reached, otherwise Pending without waiting for the
+    /// reply. Mutex locking may block briefly.
+    /// Panics if the shared gate state mutex is poisoned.
     fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
         let mut state = self.gate.state.lock().expect("reply gate lock is healthy");
         if state.reached {
