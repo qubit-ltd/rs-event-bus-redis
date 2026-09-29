@@ -1,6 +1,6 @@
 # Redis Streams User Guide
 
-**For:** Rust service developers using `qubit-event-bus` 0.15 and `qubit-event-bus-redis` 0.4. This guide shows how an order publisher and billing consumer share events through Redis while keeping application code on the event-bus facade.
+**For:** Rust service developers using `qubit-event-bus` 0.16 and `qubit-event-bus-redis` 0.4. This guide shows how an order publisher and billing consumer share events through Redis while keeping application code on the event-bus facade.
 
 [简体中文](user_guide.zh_CN.md) · [README](../README.md) · [API docs](https://docs.rs/qubit-event-bus-redis)
 
@@ -10,7 +10,7 @@ Add both the facade and provider as direct dependencies. `discovery` is on by de
 
 ```toml
 [dependencies]
-qubit-event-bus = { version = "0.15", features = ["discovery"] }
+qubit-event-bus = { version = "0.16", features = ["discovery"] }
 qubit-event-bus-redis = "0.4"
 qubit-spi = "0.13"
 ```

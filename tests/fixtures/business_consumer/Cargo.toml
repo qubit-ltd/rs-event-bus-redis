@@ -7,6 +7,6 @@ publish = false
 [workspace]
 
 [dependencies]
-qubit-event-bus = { version = "0.15.0", default-features = false, features = ["discovery"] }
+qubit-event-bus = { version = "0.16.0", path = "../../../../rs-event-bus", default-features = false, features = ["discovery"] }
 qubit-event-bus-redis = { path = "../../..", default-features = false, features = ["sync", "discovery"] }
 qubit-spi = "0.13"

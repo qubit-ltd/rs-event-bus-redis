@@ -197,19 +197,16 @@ fn test_sync_spi_conformance() -> Result<(), Box<dyn std::error::Error>> {
     let server = Arc::new(server);
     let settlement_server = Arc::clone(&server);
     let settlement = Arc::new(move || check_sync_settlement(&settlement_server));
-    let cancellation_server = Arc::clone(&server);
-    let receive_cancellation = Arc::new(move || check_sync_receive_cancellation(&cancellation_server));
     let recovery_server = Arc::clone(&server);
     let durable_recovery = Arc::new(move || check_sync_durable_recovery(&recovery_server));
     let report = run_sync_with_profile(
         || create_bus(&server).expect("Redis provider should be created"),
         &ConformanceHooks {
             settlement: Some(settlement),
-            receive_cancellation: Some(receive_cancellation),
             durable_recovery: Some(durable_recovery),
             ..ConformanceHooks::default()
         },
-        ConformanceProfile::Structural,
+        ConformanceProfile::Strict,
     );
     report.assert_all_passed();
     Ok(())
@@ -248,33 +245,6 @@ fn check_sync_settlement(server: &RedisServer) -> Result<(), String> {
         return Err("conflicting settlement unexpectedly succeeded".into());
     }
     receiver.close().map_err(|error| error.to_string())
-}
-
-#[cfg(feature = "conformance")]
-fn check_sync_receive_cancellation(server: &RedisServer) -> Result<(), String> {
-    let bus = create_bus(server).map_err(|error| error.to_string())?;
-    let mut receiver = bus
-        .subscribe(
-            request(
-                "conformance-cancellation",
-                "conformance-cancellation",
-                Some("cancellation"),
-                StartPosition::Earliest,
-            )
-            .map_err(|error| error.to_string())?,
-        )
-        .map_err(|error| error.to_string())?;
-    if !matches!(receiver.receive(Duration::from_millis(1)), Ok(ReceiveOutcome::TimedOut)) {
-        return Err("bounded receive did not time out on an empty durable stream".into());
-    }
-    receiver.close().map_err(|error| error.to_string())?;
-    bus.shutdown(qubit_event_bus::spi::ShutdownMode::Immediate)
-        .map_err(|error| error.to_string())?;
-    if matches!(receiver.receive(Duration::ZERO), Ok(ReceiveOutcome::Closed)) {
-        Ok(())
-    } else {
-        Err("closed receiver did not remain closed".into())
-    }
 }
 
 #[cfg(feature = "conformance")]
@@ -330,6 +300,9 @@ fn check_sync_durable_recovery(server: &RedisServer) -> Result<(), String> {
     recovered
         .settle(&token, DeliveryDisposition::Accept)
         .map_err(|error| error.to_string())?;
+    if !matches!(recovered.receive(Duration::ZERO), Ok(ReceiveOutcome::TimedOut)) {
+        return Err("accepted delivery was unexpectedly recovered again".into());
+    }
     recovered.close().map_err(|error| error.to_string())?;
     recovered_bus
         .shutdown(qubit_event_bus::spi::ShutdownMode::Immediate)

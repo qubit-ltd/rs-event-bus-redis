@@ -12,8 +12,10 @@
 mod support;
 
 use std::any::TypeId;
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::task::Context;
@@ -230,9 +232,27 @@ fn test_async_spi_conformance() -> Result<(), Box<dyn std::error::Error>> {
         let server = Arc::clone(&recovery_server);
         Box::pin(async move { check_async_durable_recovery(&server).await })
     });
+    let settlement_cancel_server = Arc::clone(&server);
+    let settlement_cancellation: AsyncConformanceCheck = Arc::new(move || {
+        let server = Arc::clone(&settlement_cancel_server);
+        Box::pin(async move { check_async_settlement_cancellation(&server).await })
+    });
+    let close_cancel_server = Arc::clone(&server);
+    let close_cancellation: AsyncConformanceCheck = Arc::new(move || {
+        let server = Arc::clone(&close_cancel_server);
+        Box::pin(async move { check_async_close_cancellation(&server).await })
+    });
+    let shutdown_cancel_server = Arc::clone(&server);
+    let shutdown_cancellation: AsyncConformanceCheck = Arc::new(move || {
+        let server = Arc::clone(&shutdown_cancel_server);
+        Box::pin(async move { check_async_shutdown_cancellation(&server).await })
+    });
     let hooks = AsyncConformanceHooks {
         settlement: Some(settlement),
         receive_cancellation: Some(receive_cancellation),
+        settlement_cancellation: Some(settlement_cancellation),
+        close_cancellation: Some(close_cancellation),
+        shutdown_cancellation: Some(shutdown_cancellation),
         durable_recovery: Some(durable_recovery),
         ..AsyncConformanceHooks::default()
     };
@@ -254,7 +274,7 @@ fn test_async_spi_conformance() -> Result<(), Box<dyn std::error::Error>> {
             }
         },
         &hooks,
-        ConformanceProfile::Structural,
+        ConformanceProfile::Strict,
     ));
     report.assert_all_passed();
     Ok(())
@@ -290,6 +310,109 @@ async fn check_async_settlement(server: &RedisServer) -> Result<(), String> {
         return Err("conflicting settlement unexpectedly succeeded".into());
     }
     receiver.close().await.map_err(|error| error.to_string())
+}
+
+#[cfg(feature = "conformance")]
+async fn check_async_settlement_cancellation(server: &RedisServer) -> Result<(), String> {
+    let bus = create_bus(server).map_err(|error| error.to_string())?;
+    bus.publish(message("conformance-settle-cancel", "settle-cancel", b"payload").map_err(|error| error.to_string())?)
+        .await
+        .map_err(|error| error.to_string())?;
+    let mut receiver = bus
+        .subscribe(request("conformance-settle-cancel", "settle-cancel").map_err(|error| error.to_string())?)
+        .await
+        .map_err(|error| error.to_string())?;
+    let ReceiveOutcome::Message(mut received) = receiver
+        .receive(Duration::from_secs(2))
+        .await
+        .map_err(|error| error.to_string())?
+    else {
+        return Err("settlement cancellation fixture did not receive its message".into());
+    };
+    let token = received.take_settlement().ok_or("settlement token is missing")?;
+    drop(received);
+    cancel_after_operation(receiver.settle(&token, DeliveryDisposition::Accept))
+        .await
+        .map_err(|error| format!("cancelled settlement failed: {error}"))?;
+    receiver
+        .settle(&token, DeliveryDisposition::Accept)
+        .await
+        .map_err(|error| format!("repeating the applied settlement failed: {error}"))?;
+    if receiver.settle(&token, DeliveryDisposition::Retry).await.is_ok() {
+        return Err("conflicting settlement succeeded after cancellation".into());
+    }
+    receiver.close().await.map_err(|error| error.to_string())?;
+    bus.shutdown(qubit_event_bus::spi::ShutdownMode::Immediate)
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[cfg(feature = "conformance")]
+async fn check_async_close_cancellation(server: &RedisServer) -> Result<(), String> {
+    let bus = create_bus(server).map_err(|error| error.to_string())?;
+    let mut receiver = bus
+        .subscribe(request("conformance-close-cancel", "close-cancel").map_err(|error| error.to_string())?)
+        .await
+        .map_err(|error| error.to_string())?;
+    cancel_after_operation(receiver.close())
+        .await
+        .map_err(|error| format!("cancelled close failed: {error}"))?;
+    if !matches!(receiver.receive(Duration::ZERO).await, Ok(ReceiveOutcome::Closed)) {
+        return Err("receiver was not closed after cancellation".into());
+    }
+    receiver.close().await.map_err(|error| error.to_string())?;
+    bus.shutdown(qubit_event_bus::spi::ShutdownMode::Immediate)
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[cfg(feature = "conformance")]
+async fn check_async_shutdown_cancellation(server: &RedisServer) -> Result<(), String> {
+    let bus = create_bus(server).map_err(|error| error.to_string())?;
+    cancel_after_operation(bus.shutdown(qubit_event_bus::spi::ShutdownMode::Immediate))
+        .await
+        .map_err(|error| format!("cancelled shutdown failed: {error}"))?;
+    match bus.shutdown(qubit_event_bus::spi::ShutdownMode::Immediate).await {
+        Ok(qubit_event_bus::spi::ShutdownOutcome::Complete) => Ok(()),
+        Ok(outcome) => Err(format!("repeated shutdown returned {outcome:?}")),
+        Err(error) => Err(format!("repeated shutdown failed: {error}")),
+    }
+}
+
+#[cfg(feature = "conformance")]
+async fn cancel_after_operation<F: Future>(operation: F) -> F::Output {
+    let result = Arc::new(Mutex::new(None));
+    let completed = Arc::new(AtomicBool::new(false));
+    let driver_result = Arc::clone(&result);
+    let driver_completed = Arc::clone(&completed);
+    let mut operation = Box::pin(operation);
+    let mut driver = Box::pin(futures_lite::future::poll_fn(move |cx| {
+        if !driver_completed.load(Ordering::Acquire)
+            && let Poll::Ready(output) = operation.as_mut().poll(cx)
+        {
+            *driver_result.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(output);
+            driver_completed.store(true, Ordering::Release);
+            cx.waker().wake_by_ref();
+        }
+        Poll::<()>::Pending
+    }));
+    futures_lite::future::poll_fn(|cx| {
+        let _ = driver.as_mut().poll(cx);
+        if completed.load(Ordering::Acquire) {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
+    })
+    .await;
+    drop(driver);
+    result
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+        .expect("completed operation must retain its result")
 }
 
 #[cfg(feature = "conformance")]
@@ -374,8 +497,66 @@ async fn check_async_durable_recovery(server: &RedisServer) -> Result<(), String
         )
         .await
         .map_err(|error| error.to_string())?;
+    if !matches!(recovered.receive(Duration::ZERO).await, Ok(ReceiveOutcome::TimedOut)) {
+        return Err("accepted delivery was unexpectedly recovered again".into());
+    }
     recovered.close().await.map_err(|error| error.to_string())?;
     recovered_bus
+        .shutdown(qubit_event_bus::spi::ShutdownMode::Immediate)
+        .await
+        .map_err(|error| error.to_string())?;
+
+    let drop_bus = create_bus(server).map_err(|error| error.to_string())?;
+    drop_bus
+        .publish(message("conformance-recovery-drop", "recovery-drop", b"pending").map_err(|error| error.to_string())?)
+        .await
+        .map_err(|error| error.to_string())?;
+    let mut dropped = drop_bus
+        .subscribe(
+            request("conformance-recovery-drop", "recovery-drop-before-drop").map_err(|error| error.to_string())?,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    let ReceiveOutcome::Message(pending) = dropped
+        .receive(Duration::from_secs(2))
+        .await
+        .map_err(|error| error.to_string())?
+    else {
+        return Err("drop recovery fixture did not receive its event".into());
+    };
+    if pending.id().as_str() != "recovery-drop" {
+        return Err("drop recovery fixture received an unexpected event".into());
+    }
+    drop(pending);
+    drop(dropped);
+    drop_bus
+        .shutdown(qubit_event_bus::spi::ShutdownMode::Immediate)
+        .await
+        .map_err(|error| error.to_string())?;
+    let after_drop_bus = create_bus(server).map_err(|error| error.to_string())?;
+    let mut after_drop = after_drop_bus
+        .subscribe(request("conformance-recovery-drop", "recovery-drop-after-drop").map_err(|error| error.to_string())?)
+        .await
+        .map_err(|error| error.to_string())?;
+    let ReceiveOutcome::Message(recovered) = after_drop
+        .receive(Duration::from_secs(2))
+        .await
+        .map_err(|error| error.to_string())?
+    else {
+        return Err("unsettled delivery was not recovered after receiver drop".into());
+    };
+    if recovered.id().as_str() != "recovery-drop" {
+        return Err("receiver drop recovery returned an unexpected event".into());
+    }
+    let token = recovered
+        .settlement()
+        .ok_or("drop recovery settlement token is missing")?;
+    after_drop
+        .settle(token, DeliveryDisposition::Accept)
+        .await
+        .map_err(|error| error.to_string())?;
+    after_drop.close().await.map_err(|error| error.to_string())?;
+    after_drop_bus
         .shutdown(qubit_event_bus::spi::ShutdownMode::Immediate)
         .await
         .map_err(|error| error.to_string())?;
