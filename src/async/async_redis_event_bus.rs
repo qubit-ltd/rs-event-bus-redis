@@ -40,10 +40,10 @@ use crate::client::Client;
 use crate::config::RedisEventBusConfig;
 use crate::consumer_identity::new_consumer_name;
 use crate::error::RedisProviderError;
+use crate::internal::RecoveryState;
 use crate::naming::group_name;
 use crate::naming::poison_key;
 use crate::naming::stream_key;
-use crate::recovery::RecoveryState;
 use crate::redis_provider_error::from_redis_error;
 use crate::wire::WireFields;
 
@@ -207,7 +207,7 @@ impl AsyncEventBusSpi for AsyncRedisEventBus {
                 .client
                 .get_async_connection()
                 .await
-                .map_err(|_| spi_error("subscribe", Some(&topic), RedisProviderError::Operation("connect")))?;
+                .map_err(|error| spi_error("subscribe", Some(&topic), from_redis_error("subscribe", &error)))?;
             let result: Result<(), RedisError> = cmd("XGROUP")
                 .arg("CREATE")
                 .arg(&key)
@@ -225,7 +225,7 @@ impl AsyncEventBusSpi for AsyncRedisEventBus {
                     .client
                     .get_async_connection()
                     .await
-                    .map_err(|_| spi_error("subscribe", Some(&topic), RedisProviderError::Operation("connect")))?;
+                    .map_err(|error| spi_error("subscribe", Some(&topic), from_redis_error("subscribe", &error)))?;
                 cmd("XGROUP")
                     .arg("CREATE")
                     .arg(&key)
@@ -243,7 +243,7 @@ impl AsyncEventBusSpi for AsyncRedisEventBus {
                 return Err(spi_error(
                     "subscribe",
                     Some(&topic),
-                    RedisProviderError::Operation("XGROUP CREATE"),
+                    from_redis_error("subscribe", &error),
                 ));
             }
             let consumer = new_consumer_name().map_err(|_| SpiError::Operation {
@@ -412,7 +412,7 @@ mod tests {
                 claim_min_idle_ms: 0,
                 recovery_interval: std::time::Duration::from_secs(1),
                 max_unsettled: 1,
-                recovery: Arc::new(std::sync::Mutex::new(crate::recovery::RecoveryState::new())),
+                recovery: Arc::new(std::sync::Mutex::new(crate::internal::RecoveryState::new())),
             };
             assert!(receiver.receive(std::time::Duration::ZERO).await.is_err());
         });

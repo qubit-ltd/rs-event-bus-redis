@@ -9,8 +9,10 @@
 
 #[path = "internal/pooled_connection.rs"]
 mod pooled_connection;
+#[path = "internal/sync_connection_pool.rs"]
+mod sync_connection_pool;
 
 #[cfg(feature = "sync")]
 pub(crate) use pooled_connection::PooledConnection;
 #[cfg(feature = "sync")]
-pub(crate) use pooled_connection::SyncConnectionPool;
+pub(crate) use sync_connection_pool::SyncConnectionPool;

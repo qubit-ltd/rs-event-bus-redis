@@ -5,25 +5,26 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-//! Settlement metadata retained by synchronous delivery tokens.
+//! Shared Redis settlement metadata retained by synchronous and asynchronous
+//! tokens.
 
 use std::sync::Arc;
 use std::sync::Mutex;
 
 use qubit_event_bus::spi::DeliveryDisposition;
 
-use crate::recovery::RecoveryState;
+use super::recovery_state::RecoveryState;
 
-/// Redis coordinates and settlement bookkeeping carried by one delivery token.
-pub(in crate::sync) struct SettlementState {
+/// Redis coordinates and shared settlement bookkeeping carried by one token.
+pub(crate) struct SettlementState {
     /// Stream containing the pending event.
-    pub(in crate::sync) stream: String,
+    pub(crate) stream: String,
     /// Consumer group that owns the pending entry.
-    pub(in crate::sync) group: String,
+    pub(crate) group: String,
     /// Redis stream ID used by `XACK`.
-    pub(in crate::sync) message_id: String,
+    pub(crate) message_id: String,
     /// Final disposition applied through this token.
-    pub(in crate::sync) disposition: Arc<Mutex<Option<DeliveryDisposition>>>,
+    pub(crate) disposition: Arc<Mutex<Option<DeliveryDisposition>>>,
     /// Per-subscription active delivery registry released after settlement.
-    pub(in crate::sync) recovery: Arc<Mutex<RecoveryState>>,
+    pub(crate) recovery: Arc<Mutex<RecoveryState>>,
 }

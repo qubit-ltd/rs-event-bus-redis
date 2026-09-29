@@ -7,27 +7,16 @@
 // =============================================================================
 //! Per-subscription pending-entry cursors and active-delivery tracking.
 
-#[path = "internal/recovery_scan_budget.rs"]
-mod recovery_scan_budget;
-#[path = "internal/recovery_scan_stage.rs"]
-mod recovery_scan_stage;
-#[path = "internal/recovery_state.rs"]
-mod recovery_state;
-
-pub(crate) use recovery_scan_budget::RecoveryScanBudget;
-pub(crate) use recovery_scan_stage::RecoveryScanStage;
-pub(crate) use recovery_state::RecoveryState;
-
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
     use std::time::Instant;
 
-    use super::RecoveryScanBudget;
-    use super::RecoveryScanStage;
-    use super::RecoveryState;
-    use super::recovery_scan_budget::MAX_SCAN_COMMANDS_PER_STAGE;
-    use super::recovery_scan_budget::MAX_TOMBSTONE_RANGES_PER_ROUND;
+    use crate::internal::RecoveryScanBudget;
+    use crate::internal::RecoveryScanStage;
+    use crate::internal::RecoveryState;
+    use crate::internal::recovery_scan_budget::MAX_SCAN_COMMANDS_PER_STAGE;
+    use crate::internal::recovery_scan_budget::MAX_TOMBSTONE_RANGES_PER_ROUND;
 
     #[test]
     fn test_active_delivery_bound_and_retry_release() {
@@ -107,7 +96,7 @@ mod tests {
     fn test_recovery_budget_resets_per_interval_and_rejects_overflow() {
         let started = Instant::now();
         let mut budget = RecoveryScanBudget::new(Duration::MAX, started, Duration::from_millis(50)).unwrap();
-        for _ in 0..super::recovery_scan_budget::MAX_SCAN_COMMANDS_PER_STAGE {
+        for _ in 0..MAX_SCAN_COMMANDS_PER_STAGE {
             assert!(budget.take_recovery_command(RecoveryScanStage::Claim, started));
         }
         assert!(!budget.take_recovery_command(RecoveryScanStage::Claim, started));

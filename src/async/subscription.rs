@@ -22,7 +22,6 @@ use qubit_event_bus::spi::SettlementToken;
 use qubit_event_bus::spi::SpiFuture;
 use qubit_event_bus::spi::TopicAddress;
 use qubit_id::Id;
-use redis::FromRedisValue;
 use redis::Value;
 use redis::aio::MultiplexedConnection;
 use redis::cmd;
@@ -30,19 +29,24 @@ use redis::streams::StreamId;
 use redis::streams::StreamRangeReply;
 use redis::streams::StreamReadReply;
 
-use super::internal::AsyncSettlementState;
 use crate::client::Client;
 use crate::error::RedisProviderError;
-use crate::poison::DecodeFailure;
-use crate::poison::PoisonOutcome;
-use crate::poison::PoisonReason;
+use crate::error::from_redis_error as classified_spi_error;
+use crate::internal::DecodeFailure;
+use crate::internal::PoisonOutcome;
+use crate::internal::PoisonReason;
+use crate::internal::ReceiveAction;
+use crate::internal::ReceiveDriver;
+use crate::internal::ReceiveReply;
+use crate::internal::RecoveryState;
+use crate::internal::SettlementAction;
+use crate::internal::SettlementState;
+use crate::internal::decode_entry as decode_wire_entry;
+use crate::internal::read_group_command;
+use crate::internal::settlement_action;
 use crate::poison::quarantine_async;
-use crate::recovery::RecoveryScanBudget;
-use crate::recovery::RecoveryScanStage;
-use crate::recovery::RecoveryState;
 use crate::stream_protocol::parse_auto_claim;
 use crate::stream_protocol::parse_pending_entries;
-use crate::wire::WireFields;
 
 /// Asynchronous receiver whose cancelled reads remain in Redis PEL.
 pub(crate) struct Subscription {
@@ -143,10 +147,10 @@ impl AsyncEventSubscriptionSpi for Subscription {
                     .client
                     .get_async_dedicated_connection()
                     .await
-                    .map_err(|_| spi_error("receive", &self.topic, RedisProviderError::Operation("connect")))?,
+                    .map_err(|error| classified_spi_error("receive", Some(&self.topic), &error))?,
             };
             let result = async {
-                let mut budget = RecoveryScanBudget::new(timeout, started, self.recovery_interval)
+                let mut driver = ReceiveDriver::new(timeout, started, self.recovery_interval)
                     .map_err(|error| spi_error("receive", &self.topic, error))?;
                 'receive: loop {
                     let deferred = {
@@ -156,11 +160,11 @@ impl AsyncEventSubscriptionSpi for Subscription {
                             .filter(|entry| recovery.can_deliver(&entry.id))
                     };
                     if let Some(entry) = deferred
-                        && let Some(outcome) = read_entry(self, &mut connection, entry, &mut budget).await?
+                        && let Some(outcome) = read_entry(self, &mut connection, entry, &mut driver).await?
                     {
                         return Ok(outcome);
                     }
-                    while budget.take_recovery_command(RecoveryScanStage::Claim, Instant::now()) {
+                    while matches!(driver.next_action(Instant::now()), ReceiveAction::Claim) {
                         let cursor = lock_state(&self.recovery, &self.topic, "receive", "recovery lock")?
                             .claim_cursor()
                             .to_owned();
@@ -174,17 +178,20 @@ impl AsyncEventSubscriptionSpi for Subscription {
                             .arg(1)
                             .query_async(&mut connection)
                             .await
-                            .map_err(|_| {
-                                spi_error("receive", &self.topic, RedisProviderError::Operation("XAUTOCLAIM"))
-                            })?;
+                            .map_err(|error| classified_spi_error("receive", Some(&self.topic), &error))?;
                         let (claim, has_missing_entries) = parse_auto_claim(raw_claim).map_err(|_| {
                             spi_error("receive", &self.topic, RedisProviderError::Operation("XAUTOCLAIM"))
                         })?;
                         let at_end = claim.next_stream_id == "0-0";
+                        driver.reply(if at_end {
+                            ReceiveReply::ClaimAtEnd
+                        } else {
+                            ReceiveReply::ClaimHasMore
+                        });
                         lock_state(&self.recovery, &self.topic, "receive", "recovery lock")?
                             .set_claim_cursor(claim.next_stream_id);
                         let mut deleted_count = claim.deleted_ids.len() as u64;
-                        if has_missing_entries && budget.take_tombstone_probe(Instant::now()) {
+                        if has_missing_entries && driver.budget_mut().take_tombstone_probe(Instant::now()) {
                             let tombstone_cursor = lock_state(&self.recovery, &self.topic, "receive", "recovery lock")?
                                 .tombstone_cursor()
                                 .to_owned();
@@ -201,9 +208,7 @@ impl AsyncEventSubscriptionSpi for Subscription {
                                 .arg(4)
                                 .query_async(&mut connection)
                                 .await
-                                .map_err(|_| {
-                                    spi_error("receive", &self.topic, RedisProviderError::Operation("XPENDING"))
-                                })?;
+                                .map_err(|error| classified_spi_error("receive", Some(&self.topic), &error))?;
                             let pending_rows = parse_pending_entries(pending_reply).map_err(|_| {
                                 spi_error("receive", &self.topic, RedisProviderError::Operation("XPENDING"))
                             })?;
@@ -215,7 +220,7 @@ impl AsyncEventSubscriptionSpi for Subscription {
                                         .set_tombstone_cursor(id);
                                     continue;
                                 }
-                                if !budget.take_tombstone_range(Instant::now()) {
+                                if !driver.budget_mut().take_tombstone_range(Instant::now()) {
                                     scan_complete = false;
                                     break;
                                 }
@@ -225,11 +230,9 @@ impl AsyncEventSubscriptionSpi for Subscription {
                                     .arg(&id)
                                     .query_async(&mut connection)
                                     .await
-                                    .map_err(|_| {
-                                        spi_error("receive", &self.topic, RedisProviderError::Operation("XRANGE"))
-                                    })?;
+                                    .map_err(|error| classified_spi_error("receive", Some(&self.topic), &error))?;
                                 if rows.ids.is_empty() {
-                                    if !budget.take_maintenance_evaluation(Instant::now()) {
+                                    if !driver.budget_mut().take_maintenance_evaluation(Instant::now()) {
                                         scan_complete = false;
                                         break;
                                     }
@@ -243,13 +246,8 @@ impl AsyncEventSubscriptionSpi for Subscription {
                                         PoisonReason::MissingWire,
                                     )
                                     .await
-                                    .map_err(|_| {
-                                        spi_error(
-                                            "receive",
-                                            &self.topic,
-                                            RedisProviderError::Operation("XACK tombstone"),
-                                        )
-                                    })? {
+                                    .map_err(|error| classified_spi_error("receive", Some(&self.topic), &error))?
+                                    {
                                         PoisonOutcome::TombstoneCleared => deleted_count += 1,
                                         PoisonOutcome::SourceGone | PoisonOutcome::OwnershipChanged => {}
                                         PoisonOutcome::Quarantined => {}
@@ -275,7 +273,7 @@ impl AsyncEventSubscriptionSpi for Subscription {
                         if let Some(entry) = claim.claimed.into_iter().next()
                             && lock_state(&self.recovery, &self.topic, "receive", "recovery lock")?
                                 .can_deliver(&entry.id)
-                            && let Some(outcome) = read_entry(self, &mut connection, entry, &mut budget).await?
+                            && let Some(outcome) = read_entry(self, &mut connection, entry, &mut driver).await?
                         {
                             return Ok(outcome);
                         }
@@ -283,104 +281,58 @@ impl AsyncEventSubscriptionSpi for Subscription {
                             break;
                         }
                     }
-                    while budget.take_recovery_command(RecoveryScanStage::Pending, Instant::now()) {
+                    while matches!(driver.next_action(Instant::now()), ReceiveAction::Pending) {
                         let cursor = lock_state(&self.recovery, &self.topic, "receive", "recovery lock")?
                             .pending_cursor()
                             .to_owned();
-                        let pending: Option<StreamReadReply> = cmd("XREADGROUP")
-                            .arg("GROUP")
-                            .arg(&self.group)
-                            .arg(&self.consumer)
-                            .arg("COUNT")
-                            .arg(1)
-                            .arg("STREAMS")
-                            .arg(&self.key)
-                            .arg(&cursor)
-                            .query_async(&mut connection)
-                            .await
-                            .map_err(|_| {
-                                spi_error("receive", &self.topic, RedisProviderError::Operation("XREADGROUP"))
-                            })?;
+                        let pending: Option<StreamReadReply> =
+                            read_group_command(&self.group, &self.consumer, &self.key, &cursor, None)
+                                .query_async(&mut connection)
+                                .await
+                                .map_err(|error| classified_spi_error("receive", Some(&self.topic), &error))?;
                         if let Some(entry) = pending
                             .and_then(|reply| reply.keys.into_iter().next())
                             .and_then(|stream| stream.ids.into_iter().next())
                         {
+                            driver.reply(ReceiveReply::PendingEntry);
                             let id = entry.id.clone();
                             lock_state(&self.recovery, &self.topic, "receive", "recovery lock")?
                                 .set_pending_cursor(id.clone());
                             if lock_state(&self.recovery, &self.topic, "receive", "recovery lock")?.can_deliver(&id)
-                                && let Some(outcome) = read_entry(self, &mut connection, entry, &mut budget).await?
+                                && let Some(outcome) = read_entry(self, &mut connection, entry, &mut driver).await?
                             {
                                 return Ok(outcome);
                             }
                         } else {
+                            driver.reply(ReceiveReply::PendingEmpty);
                             lock_state(&self.recovery, &self.topic, "receive", "recovery lock")?.reset_pending_scan();
                             break;
                         }
                     }
-                    if timeout.is_zero() {
-                        let reply: Option<StreamReadReply> = cmd("XREADGROUP")
-                            .arg("GROUP")
-                            .arg(&self.group)
-                            .arg(&self.consumer)
-                            .arg("COUNT")
-                            .arg(1)
-                            .arg("STREAMS")
-                            .arg(&self.key)
-                            .arg(">")
-                            .query_async(&mut connection)
-                            .await
-                            .map_err(|_| {
-                                spi_error("receive", &self.topic, RedisProviderError::Operation("XREADGROUP"))
-                            })?;
-                        if let Some(entry) = reply
-                            .and_then(|r| r.keys.into_iter().next())
-                            .and_then(|s| s.ids.into_iter().next())
-                            && let Some(outcome) = read_entry(self, &mut connection, entry, &mut budget).await?
-                        {
-                            return Ok(outcome);
-                        }
-                        return Ok(ReceiveOutcome::TimedOut);
-                    }
                     loop {
-                        let now = Instant::now();
-                        if budget.recovery_due(now) {
-                            budget.start_recovery_round(now);
-                            continue 'receive;
-                        }
-                        let Some(block_interval) = budget.block_interval(Instant::now()) else {
-                            return Ok(ReceiveOutcome::TimedOut);
+                        let block_ms = match driver.next_action(Instant::now()) {
+                            ReceiveAction::ReadNew { block_ms } => block_ms,
+                            ReceiveAction::Claim => continue 'receive,
+                            ReceiveAction::TimedOut => return Ok(ReceiveOutcome::TimedOut),
+                            ReceiveAction::Pending => unreachable!("pending stage was already scanned"),
                         };
-                        if !budget.can_read_new(Instant::now()) {
-                            return Ok(ReceiveOutcome::TimedOut);
-                        }
-                        let block_ms = block_interval.as_millis().clamp(1, 1_000) as usize;
-                        let reply: Option<StreamReadReply> = cmd("XREADGROUP")
-                            .arg("GROUP")
-                            .arg(&self.group)
-                            .arg(&self.consumer)
-                            .arg("COUNT")
-                            .arg(1)
-                            .arg("BLOCK")
-                            .arg(block_ms)
-                            .arg("STREAMS")
-                            .arg(&self.key)
-                            .arg(">")
-                            .query_async(&mut connection)
-                            .await
-                            .map_err(|_| {
-                                spi_error("receive", &self.topic, RedisProviderError::Operation("XREADGROUP"))
-                            })?;
+                        let reply: Option<StreamReadReply> =
+                            read_group_command(&self.group, &self.consumer, &self.key, ">", block_ms)
+                                .query_async(&mut connection)
+                                .await
+                                .map_err(|error| classified_spi_error("receive", Some(&self.topic), &error))?;
                         let entry = reply
                             .and_then(|reply| reply.keys.into_iter().next())
                             .and_then(|stream| stream.ids.into_iter().next());
+                        driver.reply(if entry.is_some() {
+                            ReceiveReply::NewEntry
+                        } else {
+                            ReceiveReply::NewEmpty
+                        });
                         if let Some(entry) = entry
-                            && let Some(outcome) = read_entry(self, &mut connection, entry, &mut budget).await?
+                            && let Some(outcome) = read_entry(self, &mut connection, entry, &mut driver).await?
                         {
                             return Ok(outcome);
-                        }
-                        if !budget.can_read_new(Instant::now()) {
-                            return Ok(ReceiveOutcome::TimedOut);
                         }
                     }
                 }
@@ -422,7 +374,7 @@ impl AsyncEventSubscriptionSpi for Subscription {
         token: &SettlementToken,
         disposition: DeliveryDisposition,
     ) -> SpiFuture<'a, Result<(), SpiError>> {
-        let state = token.downcast_ref::<AsyncSettlementState>().map(|state| {
+        let state = token.downcast_ref::<SettlementState>().map(|state| {
             (
                 state.stream.clone(),
                 state.group.clone(),
@@ -444,35 +396,34 @@ impl AsyncEventSubscriptionSpi for Subscription {
             if !Arc::ptr_eq(&recovery, &self.recovery) {
                 return Err(invalid_token("token belongs to another receiver", &topic));
             }
-            {
+            let action = {
                 let current = lock_state(&applied, &topic, "settle", "settlement lock")?;
-                if let Some(previous) = *current {
-                    return if previous == disposition {
-                        Ok(())
-                    } else {
-                        Err(invalid_token("token already has a different disposition", &topic))
-                    };
-                }
+                settlement_action(*current, disposition)
+                    .map_err(|()| invalid_token("token already has a different disposition", &topic))?
+            };
+            if matches!(action, SettlementAction::AlreadyApplied) {
+                return Ok(());
             }
-            if disposition != DeliveryDisposition::Retry {
+            if matches!(action, SettlementAction::Acknowledge) {
                 let mut connection = client
                     .get_async_connection()
                     .await
-                    .map_err(|_| spi_error("settle", &topic, RedisProviderError::Operation("connect")))?;
+                    .map_err(|error| classified_spi_error("settle", Some(&topic), &error))?;
                 let result: Result<usize, redis::RedisError> = cmd("XACK")
                     .arg(stream)
                     .arg(group)
                     .arg(&message_id)
                     .query_async(&mut connection)
                     .await;
-                if result.is_err() {
+                if let Err(error) = result {
                     client.invalidate_async_connection().await;
-                    return Err(spi_error("settle", &topic, RedisProviderError::Operation("XACK")));
+                    return Err(classified_spi_error("settle", Some(&topic), &error));
                 }
             }
-            lock_state(&recovery, &topic, "settle", "recovery lock")?.mark_terminal(&message_id);
-            if disposition == DeliveryDisposition::Retry {
+            if matches!(action, SettlementAction::Retry) {
                 lock_state(&recovery, &topic, "settle", "recovery lock")?.mark_retry(&message_id);
+            } else {
+                lock_state(&recovery, &topic, "settle", "recovery lock")?.mark_terminal(&message_id);
             }
             {
                 let mut applied = lock_state(&applied, &topic, "settle", "settlement lock")?;
@@ -525,7 +476,7 @@ async fn read_entry(
     subscription: &Subscription,
     connection: &mut redis::aio::MultiplexedConnection,
     entry: StreamId,
-    budget: &mut RecoveryScanBudget,
+    driver: &mut ReceiveDriver,
 ) -> Result<Option<ReceiveOutcome>, SpiError> {
     let id = entry.id.clone();
     let message = match decode_entry(subscription, entry) {
@@ -541,7 +492,7 @@ async fn read_entry(
             });
         }
         Err(DecodeFailure::Poison(reason)) => {
-            if !budget.take_maintenance_evaluation(Instant::now()) {
+            if !driver.budget_mut().take_maintenance_evaluation(Instant::now()) {
                 lock_state(&subscription.recovery, &subscription.topic, "receive", "recovery lock")?
                     .reset_pending_scan();
                 return Ok(Some(ReceiveOutcome::TimedOut));
@@ -556,13 +507,7 @@ async fn read_entry(
                 reason,
             )
             .await
-            .map_err(|_| {
-                spi_error(
-                    "receive",
-                    &subscription.topic,
-                    RedisProviderError::Operation("quarantine"),
-                )
-            })?;
+            .map_err(|error| classified_spi_error("receive", Some(&subscription.topic), &error))?;
             return Ok(match outcome {
                 PoisonOutcome::Quarantined => Some(ReceiveOutcome::Gap(DeliveryGap::new(
                     "malformed Redis stream entry was quarantined",
@@ -608,46 +553,14 @@ async fn read_entry(
 ///
 /// Returns the deterministic poison reason for malformed wire data.
 fn decode_entry(subscription: &Subscription, entry: StreamId) -> Result<InboundMessage, DecodeFailure> {
-    let Some(value) = entry.map.get("wire") else {
-        return Err(DecodeFailure::Poison(PoisonReason::MissingWire));
-    };
-    let encoded: String =
-        String::from_redis_value(value).map_err(|_| DecodeFailure::Poison(PoisonReason::InvalidWireField))?;
-    let fields = WireFields::decode_wire(&encoded).map_err(|error| {
-        if matches!(error, RedisProviderError::UnsupportedWireVersion) {
-            DecodeFailure::UnsupportedVersion
-        } else {
-            DecodeFailure::Poison(PoisonReason::InvalidJson)
-        }
-    })?;
-    let (topic, event_id, timestamp, headers, ordering_key, payload) =
-        fields.into_parts(subscription.topic.clone()).map_err(|error| {
-            if matches!(error, RedisProviderError::UnsupportedWireVersion) {
-                DecodeFailure::UnsupportedVersion
-            } else {
-                DecodeFailure::Poison(PoisonReason::InvalidEventMetadata)
-            }
-        })?;
-    let settlement = SettlementToken::new(
+    decode_wire_entry(
         subscription.subscription_id,
-        AsyncSettlementState {
-            stream: subscription.key.clone(),
-            group: subscription.group.clone(),
-            message_id: entry.id,
-            disposition: Arc::new(Mutex::new(None)),
-            recovery: Arc::clone(&subscription.recovery),
-        },
-    );
-    Ok(InboundMessage::new(
-        topic,
-        event_id,
-        timestamp,
-        headers,
-        ordering_key,
-        payload,
-        Some(settlement),
-        Default::default(),
-    ))
+        &subscription.topic,
+        &subscription.key,
+        &subscription.group,
+        &subscription.recovery,
+        entry,
+    )
 }
 
 /// Converts a provider failure into a retryable, secret-safe SPI error.
@@ -705,7 +618,7 @@ mod tests {
     use super::decode_entry;
     use crate::client::Client;
     use crate::config::RedisEventBusConfig;
-    use crate::recovery::RecoveryState;
+    use crate::internal::RecoveryState;
     use crate::wire::WireFields;
 
     fn subscription() -> Subscription {
@@ -741,15 +654,15 @@ mod tests {
         let cases = [
             (
                 stream_entry(None),
-                crate::poison::DecodeFailure::Poison(crate::poison::PoisonReason::MissingWire),
+                crate::internal::DecodeFailure::Poison(crate::internal::PoisonReason::MissingWire),
             ),
             (
                 stream_entry(Some(Value::Nil)),
-                crate::poison::DecodeFailure::Poison(crate::poison::PoisonReason::InvalidWireField),
+                crate::internal::DecodeFailure::Poison(crate::internal::PoisonReason::InvalidWireField),
             ),
             (
                 stream_entry(Some(Value::BulkString(b"{".to_vec()))),
-                crate::poison::DecodeFailure::Poison(crate::poison::PoisonReason::InvalidJson),
+                crate::internal::DecodeFailure::Poison(crate::internal::PoisonReason::InvalidJson),
             ),
             (
                 stream_entry(Some(Value::BulkString(
@@ -765,7 +678,7 @@ mod tests {
                     })
                     .expect("wire fields serialize"),
                 ))),
-                crate::poison::DecodeFailure::Poison(crate::poison::PoisonReason::InvalidEventMetadata),
+                crate::internal::DecodeFailure::Poison(crate::internal::PoisonReason::InvalidEventMetadata),
             ),
         ];
 
@@ -781,7 +694,7 @@ mod tests {
             Ok(_) => panic!("unsupported wire version should be rejected"),
             Err(error) => error,
         };
-        assert_eq!(error, crate::poison::DecodeFailure::UnsupportedVersion);
+        assert_eq!(error, crate::internal::DecodeFailure::UnsupportedVersion);
     }
 
     #[test]
@@ -839,7 +752,7 @@ mod tests {
             let mut subscription = subscription();
             let token = SettlementToken::new(
                 subscription.subscription_id,
-                super::super::internal::AsyncSettlementState {
+                crate::internal::SettlementState {
                     stream: subscription.key.clone(),
                     group: subscription.group.clone(),
                     message_id: "1-0".into(),
@@ -871,7 +784,7 @@ mod tests {
             .join();
             let token = SettlementToken::new(
                 subscription.subscription_id,
-                super::super::internal::AsyncSettlementState {
+                crate::internal::SettlementState {
                     stream: subscription.key.clone(),
                     group: subscription.group.clone(),
                     message_id: "1-0".into(),
@@ -907,7 +820,7 @@ mod tests {
                 .mark_delivered("1-0".into(), 1);
             let token = SettlementToken::new(
                 subscription.subscription_id,
-                super::super::internal::AsyncSettlementState {
+                crate::internal::SettlementState {
                     stream: subscription.key.clone(),
                     group: subscription.group.clone(),
                     message_id: "1-0".into(),

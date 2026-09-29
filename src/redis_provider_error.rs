@@ -45,6 +45,7 @@ pub enum RedisProviderError {
 }
 
 /// Classifies a Redis error without retaining its diagnostic details.
+#[cfg(any(feature = "sync", feature = "async"))]
 pub(crate) fn from_redis_error(operation: &'static str, error: &redis::RedisError) -> RedisProviderError {
     use redis::ErrorKind;
 

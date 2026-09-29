@@ -7,21 +7,31 @@
 // =============================================================================
 //! Public Redis provider errors.
 
+#[cfg(any(feature = "sync", feature = "async"))]
+use qubit_event_bus::error::SpiError;
+#[cfg(any(feature = "sync", feature = "async"))]
+use qubit_event_bus::spi::TopicAddress;
+#[cfg(any(feature = "sync", feature = "async"))]
+use redis::RedisError;
+
 pub use crate::redis_provider_error::RedisProviderError;
+#[cfg(any(feature = "sync", feature = "async"))]
+use crate::redis_provider_error::from_redis_error as classify_redis_error;
 
 /// Converts a sanitized provider failure into the facade's stable SPI shape.
+#[cfg(any(feature = "sync", feature = "async"))]
 pub(crate) fn to_spi_error(
     operation: &'static str,
-    topic: Option<&qubit_event_bus::spi::TopicAddress>,
+    topic: Option<&TopicAddress>,
     source: RedisProviderError,
-) -> qubit_event_bus::error::SpiError {
+) -> SpiError {
     let (kind, retryable) = match &source {
         RedisProviderError::Configuration(_) => ("configuration", Some(false)),
         RedisProviderError::UnsupportedWireVersion => ("unsupported_wire_version", Some(false)),
         RedisProviderError::Transport { kind, retryable, .. } => (*kind, *retryable),
-        RedisProviderError::Operation(_) => ("redis_error", Some(true)),
+        RedisProviderError::Operation(_) => ("redis_error", None),
     };
-    qubit_event_bus::error::SpiError::Operation {
+    SpiError::Operation {
         provider_id: "redis-streams".into(),
         operation,
         resource: topic.map(|value| value.as_str().into()),
@@ -31,9 +41,16 @@ pub(crate) fn to_spi_error(
     }
 }
 
-#[cfg(test)]
+/// Converts a Redis client failure using stable kind and retryability rules.
+#[cfg(any(feature = "sync", feature = "async"))]
+pub(crate) fn from_redis_error(operation: &'static str, topic: Option<&TopicAddress>, source: &RedisError) -> SpiError {
+    to_spi_error(operation, topic, classify_redis_error(operation, source))
+}
+
+#[cfg(all(test, any(feature = "sync", feature = "async")))]
 mod tests {
     use redis::ErrorKind;
+    use redis::RedisError;
 
     use crate::redis_provider_error::from_redis_error;
 
@@ -46,7 +63,7 @@ mod tests {
             (ErrorKind::Moved, "unsupported_topology", Some(false)),
             (ErrorKind::ExtensionError, "redis_error", None),
         ] {
-            let error = redis::RedisError::from((error_kind, "password=secret"));
+            let error = RedisError::from((error_kind, "password=secret"));
             let provider = from_redis_error("publish", &error);
             let rendered = provider.to_string();
             assert!(!rendered.contains("secret"));
