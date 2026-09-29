@@ -141,6 +141,20 @@ fn publish_async() -> Result<(), Box<dyn std::error::Error>> {
 
 异步 facade 也要配置与同步示例相同的 codec registry。`AsyncSubscription::run` 由调用方驱动，future 应由应用 executor 轮询。丢弃尚未完成的 `receive` future 不会确认消息。Redis 会把记录留在消费组的 pending entries list；当前 consumer 后续可以再次读取，其他 consumer 则可在 idle threshold 到期后通过 `XAUTOCLAIM` 接管。
 
+## 可运行示例
+
+仓库包含完整的 facade 示例，会注册 UTF-8 codec、发布事件、消费事件并关闭订阅和总线：
+
+```bash
+cargo run --example sync_orders -- redis://127.0.0.1/ local-sync-orders
+cargo run --example async_orders -- redis://127.0.0.1/ local-async-orders
+REDIS_SENTINEL_NODES=127.0.0.1:26379,127.0.0.1:26380,127.0.0.1:26381 \
+REDIS_SENTINEL_SERVICE_NAME=qeventbus \
+  cargo run --example sentinel_orders -- local-sentinel-orders
+```
+
+异步示例会先消费事件，再等待用户按 Enter 关闭；这样 handler 能先完成，runner 随后取消其下一次接收。每条命令都需要对应的 standalone Redis 或 Sentinel 服务，并启用该示例所需的 features。
+
 ## 5. 配置 Redis 与 Sentinel
 
 | 配置项 | 默认值 | 说明 |

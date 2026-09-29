@@ -10,7 +10,7 @@ description = "Synchronous and asynchronous Redis Streams providers for Qubit Ev
 homepage = "https://github.com/qubit-ltd/rs-event-bus-redis"
 documentation = "https://docs.rs/qubit-event-bus-redis"
 readme = "README.md"
-include = ["/Cargo.toml", "/LICENSE", "/README*", "/doc/**/*.md", "/src/**", "/tests/**"]
+include = ["/Cargo.toml", "/LICENSE", "/README*", "/doc/**/*.md", "/src/**", "/tests/**", "/examples/**"]
 
 [workspace]
 resolver = "3"
@@ -34,9 +34,27 @@ thiserror = "^2.0"
 
 [dev-dependencies]
 futures-lite = "^2"
+futures-channel = "^0.3"
 redis = { version = "0.32.7", default-features = false, features = ["tokio-comp", "streams", "sentinel"] }
 tempfile = "^3.27"
 tokio = { version = "^1.53", features = ["rt", "macros"] }
+
+[[example]]
+name = "sync_orders"
+required-features = ["sync", "discovery"]
+
+[[example]]
+name = "async_orders"
+required-features = ["async", "discovery"]
+
+[[example]]
+name = "sentinel_orders"
+required-features = ["sync", "discovery"]
+
+[[test]]
+name = "documentation_examples_tests"
+path = "tests/documentation_examples_tests.rs"
+required-features = ["sync", "async", "discovery"]
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage)', 'cfg(loom)'] }

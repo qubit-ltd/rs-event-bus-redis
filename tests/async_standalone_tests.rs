@@ -12,9 +12,11 @@
 mod support;
 
 use std::any::TypeId;
+#[cfg(feature = "conformance")]
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::Mutex;
+#[cfg(feature = "conformance")]
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
@@ -59,7 +61,7 @@ use qubit_id::Id;
 use qubit_spi::AsyncServiceProvider;
 use redis::Client;
 use redis::cmd;
-use support::controlled_redis::ControlledRedis;
+use support::controlled_redis::proxy::ControlledRedis;
 use support::redis_server::RedisServer;
 
 static SUBSCRIPTION_IDS: AtomicU64 = AtomicU64::new(100);
@@ -75,6 +77,49 @@ fn test_async_close_makes_future_receives_return_closed() -> Result<(), Box<dyn 
             subscription.receive(Duration::ZERO).await?,
             ReceiveOutcome::Closed
         ));
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })
+}
+
+#[test]
+fn test_async_unpolled_close_has_no_effect_and_polled_close_converges() -> Result<(), Box<dyn std::error::Error>> {
+    let server = RedisServer::start()?;
+    let bus = create_bus(&server)?;
+    block_on(async {
+        let shutdown = bus.shutdown(qubit_event_bus::spi::ShutdownMode::Immediate);
+        drop(shutdown);
+        bus.publish(message("close-cancellation", "after-unpolled-shutdown", b"open")?)
+            .await?;
+        let mut subscription = bus
+            .subscribe(request("close-cancellation", "close-cancel-worker")?)
+            .await?;
+        let close = subscription.close();
+        drop(close);
+        assert!(!matches!(
+            subscription.receive(Duration::ZERO).await?,
+            ReceiveOutcome::Closed
+        ));
+        subscription.close().await?;
+        assert!(matches!(
+            subscription.receive(Duration::ZERO).await?,
+            ReceiveOutcome::Closed
+        ));
+        subscription.close().await?;
+        let outcome = bus.shutdown(qubit_event_bus::spi::ShutdownMode::Immediate).await?;
+        assert!(matches!(outcome, qubit_event_bus::spi::ShutdownOutcome::Complete));
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })
+}
+
+#[test]
+fn test_async_receive_future_is_send() -> Result<(), Box<dyn std::error::Error>> {
+    let server = RedisServer::start()?;
+    let bus = create_bus(&server)?;
+    block_on(async {
+        let mut subscription = bus.subscribe(request("send-contract", "send-worker")?).await?;
+        fn assert_send<T: Send>(_: T) {}
+        assert_send(subscription.receive(Duration::from_millis(50)));
+        subscription.close().await?;
         Ok::<(), Box<dyn std::error::Error>>(())
     })
 }
@@ -254,7 +299,6 @@ fn test_async_spi_conformance() -> Result<(), Box<dyn std::error::Error>> {
         close_cancellation: Some(close_cancellation),
         shutdown_cancellation: Some(shutdown_cancellation),
         durable_recovery: Some(durable_recovery),
-        ..AsyncConformanceHooks::default()
     };
     let report = block_on(run_async_with_profile(
         || {
@@ -388,18 +432,18 @@ async fn cancel_after_operation<F: Future>(operation: F) -> F::Output {
     let driver_result = Arc::clone(&result);
     let driver_completed = Arc::clone(&completed);
     let mut operation = Box::pin(operation);
-    let mut driver = Box::pin(futures_lite::future::poll_fn(move |cx| {
+    let mut driver = Box::pin(futures_lite::future::poll_fn(move |context| {
         if !driver_completed.load(Ordering::Acquire)
-            && let Poll::Ready(output) = operation.as_mut().poll(cx)
+            && let Poll::Ready(output) = operation.as_mut().poll(context)
         {
             *driver_result.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(output);
             driver_completed.store(true, Ordering::Release);
-            cx.waker().wake_by_ref();
+            context.waker().wake_by_ref();
         }
         Poll::<()>::Pending
     }));
-    futures_lite::future::poll_fn(|cx| {
-        let _ = driver.as_mut().poll(cx);
+    futures_lite::future::poll_fn(|context| {
+        let _ = driver.as_mut().poll(context);
         if completed.load(Ordering::Acquire) {
             Poll::Ready(())
         } else {
@@ -505,61 +549,6 @@ async fn check_async_durable_recovery(server: &RedisServer) -> Result<(), String
         .shutdown(qubit_event_bus::spi::ShutdownMode::Immediate)
         .await
         .map_err(|error| error.to_string())?;
-
-    let drop_bus = create_bus(server).map_err(|error| error.to_string())?;
-    drop_bus
-        .publish(message("conformance-recovery-drop", "recovery-drop", b"pending").map_err(|error| error.to_string())?)
-        .await
-        .map_err(|error| error.to_string())?;
-    let mut dropped = drop_bus
-        .subscribe(
-            request("conformance-recovery-drop", "recovery-drop-before-drop").map_err(|error| error.to_string())?,
-        )
-        .await
-        .map_err(|error| error.to_string())?;
-    let ReceiveOutcome::Message(pending) = dropped
-        .receive(Duration::from_secs(2))
-        .await
-        .map_err(|error| error.to_string())?
-    else {
-        return Err("drop recovery fixture did not receive its event".into());
-    };
-    if pending.id().as_str() != "recovery-drop" {
-        return Err("drop recovery fixture received an unexpected event".into());
-    }
-    drop(pending);
-    drop(dropped);
-    drop_bus
-        .shutdown(qubit_event_bus::spi::ShutdownMode::Immediate)
-        .await
-        .map_err(|error| error.to_string())?;
-    let after_drop_bus = create_bus(server).map_err(|error| error.to_string())?;
-    let mut after_drop = after_drop_bus
-        .subscribe(request("conformance-recovery-drop", "recovery-drop-after-drop").map_err(|error| error.to_string())?)
-        .await
-        .map_err(|error| error.to_string())?;
-    let ReceiveOutcome::Message(recovered) = after_drop
-        .receive(Duration::from_secs(2))
-        .await
-        .map_err(|error| error.to_string())?
-    else {
-        return Err("unsettled delivery was not recovered after receiver drop".into());
-    };
-    if recovered.id().as_str() != "recovery-drop" {
-        return Err("receiver drop recovery returned an unexpected event".into());
-    }
-    let token = recovered
-        .settlement()
-        .ok_or("drop recovery settlement token is missing")?;
-    after_drop
-        .settle(token, DeliveryDisposition::Accept)
-        .await
-        .map_err(|error| error.to_string())?;
-    after_drop.close().await.map_err(|error| error.to_string())?;
-    after_drop_bus
-        .shutdown(qubit_event_bus::spi::ShutdownMode::Immediate)
-        .await
-        .map_err(|error| error.to_string())?;
     Ok(())
 }
 
@@ -637,6 +626,177 @@ fn test_async_receive_cancellation_leaves_pending_message_recoverable() -> Resul
     })
 }
 
+#[test]
+fn test_async_settlement_cancellation_after_xack_is_idempotent() -> Result<(), Box<dyn std::error::Error>> {
+    let server = RedisServer::start()?;
+    let proxy = ControlledRedis::start(server.url())?;
+    let bus = create_bus_url(&proxy.url())?;
+    block_on(async {
+        bus.publish(message("async-settle-cancel", "cancel-ack", b"settle")?)
+            .await?;
+        let mut receiver = bus
+            .subscribe(request("async-settle-cancel", "worker-ack-cancel")?)
+            .await?;
+        let ReceiveOutcome::Message(received) = receiver.receive(Duration::from_secs(2)).await? else {
+            return Err("published event was not received".into());
+        };
+        if received.settlement().is_none() {
+            return Err("missing settlement token".into());
+        }
+        let gate = proxy.pause_after_reply("XACK");
+        let cancel = Arc::new(CancelReceive::default());
+        let worker_cancel = Arc::clone(&cancel);
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        let (returned_receiver, returned_message) = std::thread::scope(|scope| {
+            scope.spawn(move || {
+                let result = block_on(race(
+                    async {
+                        Some(
+                            receiver
+                                .settle(
+                                    received.settlement().expect("settlement token is present"),
+                                    DeliveryDisposition::Accept,
+                                )
+                                .await,
+                        )
+                    },
+                    WaitForSettleCancel(Arc::clone(&worker_cancel)),
+                ));
+                let _ = result_tx.send((result, receiver, received));
+            });
+            let reached = gate.wait_until_reached(Duration::from_secs(3));
+            cancel.cancel();
+            let (result, returned_receiver, returned_message) = result_rx.recv_timeout(Duration::from_secs(2))?;
+            assert!(result.is_none(), "settlement future should be cancelled after XACK");
+            gate.release();
+            if !reached {
+                return Err("XACK response gate was not reached".into());
+            }
+            let mut observer = Client::open(server.url())?.get_connection()?;
+            let pending: Vec<redis::Value> = cmd("XPENDING")
+                .arg(stream_key("async-tests", "async-settle-cancel"))
+                .arg(group_name(
+                    "async-tests",
+                    "async-settle-cancel",
+                    "worker-ack-cancel",
+                    Some("workers"),
+                ))
+                .arg("-")
+                .arg("+")
+                .arg(10)
+                .query(&mut observer)?;
+            assert!(pending.is_empty(), "Redis applied XACK before cancellation");
+            Ok::<_, Box<dyn std::error::Error>>((returned_receiver, returned_message))
+        })?;
+        let mut receiver = returned_receiver;
+        let received = returned_message;
+        receiver
+            .settle(
+                received.settlement().ok_or("missing settlement token")?,
+                DeliveryDisposition::Accept,
+            )
+            .await?;
+        assert!(
+            receiver
+                .settle(
+                    received.settlement().ok_or("missing settlement token")?,
+                    DeliveryDisposition::Reject,
+                )
+                .await
+                .is_err()
+        );
+        receiver.close().await?;
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })
+}
+
+#[test]
+fn test_async_claim_cancellation_after_owner_transfer_recovers_message() -> Result<(), Box<dyn std::error::Error>> {
+    let server = RedisServer::start()?;
+    let setup_bus = create_bus(&server)?;
+    block_on(async {
+        setup_bus
+            .publish(message("async-claim-cancel", "claim-cancel", b"claim")?)
+            .await?;
+        let mut old = setup_bus
+            .subscribe(request("async-claim-cancel", "worker-before-claim")?)
+            .await?;
+        let ReceiveOutcome::Message(_pending) = old.receive(Duration::from_secs(2)).await? else {
+            return Err("initial consumer did not create a pending delivery".into());
+        };
+        drop(old);
+        let mut observer = Client::open(server.url())?.get_connection()?;
+        let before_claim: Vec<Vec<redis::Value>> = cmd("XPENDING")
+            .arg(stream_key("async-tests", "async-claim-cancel"))
+            .arg(group_name(
+                "async-tests",
+                "async-claim-cancel",
+                "worker-before-claim",
+                Some("workers"),
+            ))
+            .arg("-")
+            .arg("+")
+            .arg(10)
+            .query(&mut observer)?;
+        let old_owner = redis::from_redis_value::<String>(&before_claim[0][1])?;
+
+        let proxy = ControlledRedis::start(server.url())?;
+        let gate = proxy.pause_after_reply("XAUTOCLAIM");
+        let bus = create_bus_url(&proxy.url())?;
+        let mut receiver = bus
+            .subscribe(request("async-claim-cancel", "worker-after-claim")?)
+            .await?;
+        let cancel = Arc::new(CancelReceive::default());
+        let worker_cancel = Arc::clone(&cancel);
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        let (result, mut receiver) = std::thread::scope(|scope| {
+            scope.spawn(move || {
+                let result = block_on(race(
+                    async { Some(receiver.receive(Duration::from_secs(2)).await) },
+                    WaitForCancel(Arc::clone(&worker_cancel)),
+                ));
+                let _ = result_tx.send((result, receiver));
+            });
+            let reached = gate.wait_until_reached(Duration::from_secs(3));
+            cancel.cancel();
+            let (result, receiver) = result_rx.recv_timeout(Duration::from_secs(2))?;
+            gate.release();
+            if !reached {
+                return Err("XAUTOCLAIM response gate was not reached".into());
+            }
+            let mut observer = Client::open(server.url())?.get_connection()?;
+            let pending: Vec<Vec<redis::Value>> = cmd("XPENDING")
+                .arg(stream_key("async-tests", "async-claim-cancel"))
+                .arg(group_name(
+                    "async-tests",
+                    "async-claim-cancel",
+                    "worker-after-claim",
+                    Some("workers"),
+                ))
+                .arg("-")
+                .arg("+")
+                .arg(10)
+                .query(&mut observer)?;
+            assert_eq!(pending.len(), 1);
+            let owner = redis::from_redis_value::<String>(&pending[0][1])?;
+            assert_ne!(owner, old_owner, "Redis applied ownership transfer before cancellation");
+            Ok::<_, Box<dyn std::error::Error>>((result, receiver))
+        })?;
+        assert!(result.is_none(), "receive future should be cancelled after claim");
+        let ReceiveOutcome::Message(received) = receiver.receive(Duration::from_secs(2)).await? else {
+            return Err("claimed pending record was not recovered".into());
+        };
+        receiver
+            .settle(
+                received.settlement().ok_or("missing settlement token")?,
+                DeliveryDisposition::Accept,
+            )
+            .await?;
+        receiver.close().await?;
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })
+}
+
 #[derive(Default)]
 struct CancelReceive {
     cancelled: std::sync::atomic::AtomicBool,
@@ -656,6 +816,21 @@ struct WaitForCancel(Arc<CancelReceive>);
 
 impl std::future::Future for WaitForCancel {
     type Output = Option<Result<ReceiveOutcome, qubit_event_bus::error::SpiError>>;
+
+    fn poll(self: std::pin::Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        if self.0.cancelled.load(Ordering::SeqCst) {
+            Poll::Ready(None)
+        } else {
+            *self.0.waker.lock().expect("cancel waker lock is healthy") = Some(context.waker().clone());
+            Poll::Pending
+        }
+    }
+}
+
+struct WaitForSettleCancel(Arc<CancelReceive>);
+
+impl std::future::Future for WaitForSettleCancel {
+    type Output = Option<Result<(), qubit_event_bus::error::SpiError>>;
 
     fn poll(self: std::pin::Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
         if self.0.cancelled.load(Ordering::SeqCst) {

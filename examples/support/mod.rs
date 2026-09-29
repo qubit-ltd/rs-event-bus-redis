@@ -5,9 +5,10 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-//! Private asynchronous subscription state shared with settlement tokens.
+//! Shared setup for the runnable provider examples.
 
-#[path = "internal/async_settlement_state.rs"]
-mod async_settlement_state;
+mod internal;
+mod utf8_codec;
 
-pub(super) use async_settlement_state::AsyncSettlementState;
+pub(crate) use internal::facade_config;
+pub(crate) use internal::provider_options;

@@ -25,13 +25,16 @@ mod consumer_identity;
 mod discovery;
 /// Secret-safe provider failures.
 pub mod error;
+/// Shared private receiver, recovery, and wire-decision state.
+#[cfg(any(feature = "sync", feature = "async"))]
+mod internal;
 /// Redis key naming helpers.
 pub mod naming;
 /// Malformed Redis stream entry quarantine protocol.
 #[cfg(any(feature = "sync", feature = "async"))]
 mod poison;
-/// Per-subscription pending-entry recovery state.
-#[cfg(any(feature = "sync", feature = "async"))]
+/// Recovery policy unit tests.
+#[cfg(all(test, any(feature = "sync", feature = "async")))]
 mod recovery;
 /// Redis backend configuration.
 mod redis_event_bus_config;

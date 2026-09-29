@@ -42,6 +42,7 @@ use qubit_event_bus::spi::conformance::ConformanceHooks;
 use qubit_event_bus::spi::conformance::ConformanceProfile;
 #[cfg(feature = "conformance")]
 use qubit_event_bus::spi::conformance::run_sync_with_profile;
+use qubit_event_bus_redis::naming::group_name;
 use qubit_event_bus_redis::naming::stream_key;
 use qubit_event_bus_redis::sync::RedisEventBusProvider;
 use qubit_event_bus_redis::wire::WireFields;
@@ -49,6 +50,7 @@ use qubit_id::Id;
 use qubit_spi::ServiceProvider;
 use redis::Client;
 use redis::cmd;
+use support::controlled_redis::proxy::ControlledRedis;
 use support::redis_server::RedisServer;
 
 static SUBSCRIPTION_IDS: AtomicU64 = AtomicU64::new(1);
@@ -121,8 +123,12 @@ fn test_sync_stream_is_untrimmed_by_default() -> Result<(), Box<dyn std::error::
 }
 
 fn create_bus(server: &RedisServer) -> Result<Arc<dyn EventBusSpi>, Box<dyn std::error::Error>> {
+    create_bus_url(server.url())
+}
+
+fn create_bus_url(url: &str) -> Result<Arc<dyn EventBusSpi>, Box<dyn std::error::Error>> {
     let options: ProviderOptions = [
-        ("redis.url".into(), server.url().into()),
+        ("redis.url".into(), url.into()),
         ("redis.namespace".into(), "sync-tests".into()),
         ("redis.claim_min_idle_ms".into(), "0".into()),
         ("redis.max_unsettled_per_subscription".into(), "1".into()),
@@ -133,6 +139,75 @@ fn create_bus(server: &RedisServer) -> Result<Arc<dyn EventBusSpi>, Box<dyn std:
         .create_configured(&config)
         .map_err(|failure| failure.into_error())
         .map_err(Into::into)
+}
+
+#[test]
+fn test_sync_settlement_retry_after_applied_xack_reply_loss() -> Result<(), Box<dyn std::error::Error>> {
+    let server = RedisServer::start()?;
+    let proxy = ControlledRedis::start(server.url())?;
+    let bus = create_bus_url(&proxy.url())?;
+    bus.publish(message("settle-reply-loss", "first", b"first")?)?;
+    let mut receiver = bus.subscribe(request(
+        "settle-reply-loss",
+        "reply-loss-worker",
+        Some("reply-loss-group"),
+        StartPosition::Earliest,
+    )?)?;
+    let ReceiveOutcome::Message(received) = receiver.receive(Duration::from_secs(2))? else {
+        return Err("published record was not received".into());
+    };
+    let gate = proxy.pause_after_reply("XACK");
+    let (result_tx, result_rx) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let failed = receiver
+            .settle(
+                received.settlement().expect("settlement token is present"),
+                DeliveryDisposition::Accept,
+            )
+            .is_err();
+        let _ = result_tx.send((failed, receiver, received));
+    });
+    assert!(gate.wait_until_reached(Duration::from_secs(3)));
+    let mut observer = Client::open(server.url())?.get_connection()?;
+    let pending: Vec<redis::Value> = cmd("XPENDING")
+        .arg(stream_key("sync-tests", "settle-reply-loss"))
+        .arg(group_name(
+            "sync-tests",
+            "settle-reply-loss",
+            "reply-loss-worker",
+            Some("reply-loss-group"),
+        ))
+        .arg("-")
+        .arg("+")
+        .arg(10)
+        .query(&mut observer)?;
+    assert!(pending.is_empty(), "Redis applied XACK before dropping its reply");
+    gate.release_without_reply();
+    let (failed, mut receiver, received) = result_rx.recv_timeout(Duration::from_secs(4))?;
+    worker.join().expect("settlement worker should finish");
+    assert!(failed, "the client must observe the lost XACK reply");
+    receiver.settle(
+        received.settlement().ok_or("missing settlement token")?,
+        DeliveryDisposition::Accept,
+    )?;
+    assert!(
+        receiver
+            .settle(
+                received.settlement().ok_or("missing settlement token")?,
+                DeliveryDisposition::Reject,
+            )
+            .is_err()
+    );
+    bus.publish(message("settle-reply-loss", "second", b"second")?)?;
+    let ReceiveOutcome::Message(second) = receiver.receive(Duration::from_secs(2))? else {
+        return Err("settlement did not release the active-delivery capacity".into());
+    };
+    receiver.settle(
+        second.settlement().ok_or("missing second settlement token")?,
+        DeliveryDisposition::Accept,
+    )?;
+    receiver.close()?;
+    Ok(())
 }
 
 fn message(topic: &str, id: &str, payload: &[u8]) -> Result<OutboundMessage, Box<dyn std::error::Error>> {
@@ -197,14 +272,25 @@ fn test_sync_spi_conformance() -> Result<(), Box<dyn std::error::Error>> {
     let server = Arc::new(server);
     let settlement_server = Arc::clone(&server);
     let settlement = Arc::new(move || check_sync_settlement(&settlement_server));
+    let cancellation_server = Arc::clone(&server);
+    let receive_cancellation = Arc::new(move || check_sync_receive_cancellation(&cancellation_server));
+    let settlement_cancel_server = Arc::clone(&server);
+    let settlement_cancellation = Arc::new(move || check_sync_settlement_cancellation(&settlement_cancel_server));
+    let close_cancel_server = Arc::clone(&server);
+    let close_cancellation = Arc::new(move || check_sync_close_cancellation(&close_cancel_server));
+    let shutdown_cancel_server = Arc::clone(&server);
+    let shutdown_cancellation = Arc::new(move || check_sync_shutdown_cancellation(&shutdown_cancel_server));
     let recovery_server = Arc::clone(&server);
     let durable_recovery = Arc::new(move || check_sync_durable_recovery(&recovery_server));
     let report = run_sync_with_profile(
         || create_bus(&server).expect("Redis provider should be created"),
         &ConformanceHooks {
             settlement: Some(settlement),
+            receive_cancellation: Some(receive_cancellation),
+            settlement_cancellation: Some(settlement_cancellation),
+            close_cancellation: Some(close_cancellation),
+            shutdown_cancellation: Some(shutdown_cancellation),
             durable_recovery: Some(durable_recovery),
-            ..ConformanceHooks::default()
         },
         ConformanceProfile::Strict,
     );
@@ -245,6 +331,151 @@ fn check_sync_settlement(server: &RedisServer) -> Result<(), String> {
         return Err("conflicting settlement unexpectedly succeeded".into());
     }
     receiver.close().map_err(|error| error.to_string())
+}
+
+#[cfg(feature = "conformance")]
+fn check_sync_receive_cancellation(server: &RedisServer) -> Result<(), String> {
+    let bus = create_bus(server).map_err(|error| error.to_string())?;
+    let mut receiver = bus
+        .subscribe(
+            request(
+                "conformance-cancellation",
+                "conformance-cancellation",
+                Some("cancellation"),
+                StartPosition::Earliest,
+            )
+            .map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+    if !matches!(receiver.receive(Duration::from_millis(1)), Ok(ReceiveOutcome::TimedOut)) {
+        return Err("bounded receive did not time out on an empty durable stream".into());
+    }
+    receiver.close().map_err(|error| error.to_string())?;
+    bus.shutdown(qubit_event_bus::spi::ShutdownMode::Immediate)
+        .map_err(|error| error.to_string())?;
+    if matches!(receiver.receive(Duration::ZERO), Ok(ReceiveOutcome::Closed)) {
+        Ok(())
+    } else {
+        Err("closed receiver did not remain closed".into())
+    }
+}
+
+#[cfg(feature = "conformance")]
+fn check_sync_settlement_cancellation(server: &RedisServer) -> Result<(), String> {
+    // Sync SPI calls cannot be dropped mid-poll; verify their completed effect
+    // remains idempotent when the caller retries after losing the return value.
+    let bus = create_bus(server).map_err(|error| error.to_string())?;
+    bus.publish(message("conformance-settle-cancel", "settle-cancel", b"payload").map_err(|error| error.to_string())?)
+        .map_err(|error| error.to_string())?;
+    let mut receiver = bus
+        .subscribe(
+            request(
+                "conformance-settle-cancel",
+                "settle-cancel",
+                Some("settle-cancel"),
+                StartPosition::Earliest,
+            )
+            .map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+    let ReceiveOutcome::Message(mut received) = receiver
+        .receive(Duration::from_secs(2))
+        .map_err(|error| error.to_string())?
+    else {
+        return Err("settlement cancellation fixture did not receive its message".into());
+    };
+    let token = received.take_settlement().ok_or("settlement token is missing")?;
+    receiver
+        .settle(&token, DeliveryDisposition::Accept)
+        .map_err(|error| error.to_string())?;
+    receiver
+        .settle(&token, DeliveryDisposition::Accept)
+        .map_err(|error| error.to_string())?;
+    if receiver.settle(&token, DeliveryDisposition::Retry).is_ok() {
+        return Err("conflicting settlement succeeded after the completed operation".into());
+    }
+    receiver.close().map_err(|error| error.to_string())?;
+    bus.shutdown(qubit_event_bus::spi::ShutdownMode::Immediate)
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[cfg(feature = "conformance")]
+fn check_sync_close_cancellation(server: &RedisServer) -> Result<(), String> {
+    let bus = create_bus(server).map_err(|error| error.to_string())?;
+    bus.publish(message("conformance-close-cancel", "close-cancel", b"payload").map_err(|error| error.to_string())?)
+        .map_err(|error| error.to_string())?;
+    let mut receiver = bus
+        .subscribe(
+            request(
+                "conformance-close-cancel",
+                "close-before-cancel",
+                Some("close-cancel"),
+                StartPosition::Earliest,
+            )
+            .map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+    let ReceiveOutcome::Message(received) = receiver
+        .receive(Duration::from_secs(2))
+        .map_err(|error| error.to_string())?
+    else {
+        return Err("close cancellation fixture did not receive its message".into());
+    };
+    drop(received);
+    receiver.close().map_err(|error| error.to_string())?;
+    if !matches!(receiver.receive(Duration::ZERO), Ok(ReceiveOutcome::Closed)) {
+        return Err("receiver was not closed after the completed operation".into());
+    }
+    bus.shutdown(qubit_event_bus::spi::ShutdownMode::Immediate)
+        .map_err(|error| error.to_string())?;
+
+    let recovered_bus = create_bus(server).map_err(|error| error.to_string())?;
+    let mut recovered = recovered_bus
+        .subscribe(
+            request(
+                "conformance-close-cancel",
+                "close-after-cancel",
+                Some("close-cancel"),
+                StartPosition::Earliest,
+            )
+            .map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+    let ReceiveOutcome::Message(received) = recovered
+        .receive(Duration::from_secs(2))
+        .map_err(|error| error.to_string())?
+    else {
+        return Err("unsettled event was not recovered after close".into());
+    };
+    let token = received.settlement().ok_or("recovered settlement token is missing")?;
+    recovered
+        .settle(token, DeliveryDisposition::Accept)
+        .map_err(|error| error.to_string())?;
+    recovered.close().map_err(|error| error.to_string())?;
+    recovered_bus
+        .shutdown(qubit_event_bus::spi::ShutdownMode::Immediate)
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[cfg(feature = "conformance")]
+fn check_sync_shutdown_cancellation(server: &RedisServer) -> Result<(), String> {
+    let bus = create_bus(server).map_err(|error| error.to_string())?;
+    match bus
+        .shutdown(qubit_event_bus::spi::ShutdownMode::Immediate)
+        .map_err(|error| error.to_string())?
+    {
+        qubit_event_bus::spi::ShutdownOutcome::Complete => {}
+        outcome => return Err(format!("shutdown did not complete: {outcome:?}")),
+    }
+    match bus
+        .shutdown(qubit_event_bus::spi::ShutdownMode::Immediate)
+        .map_err(|error| error.to_string())?
+    {
+        qubit_event_bus::spi::ShutdownOutcome::Complete => Ok(()),
+        outcome => Err(format!("repeated shutdown did not complete: {outcome:?}")),
+    }
 }
 
 #[cfg(feature = "conformance")]

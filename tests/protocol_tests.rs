@@ -7,22 +7,28 @@
 // =============================================================================
 //! Tests stable names and versioned wire-format round trips.
 
+#[cfg(any(feature = "sync", feature = "async"))]
 use std::any::TypeId;
 use std::sync::Arc;
 use std::time::SystemTime;
 
+#[cfg(any(feature = "sync", feature = "async"))]
 use qubit_event_bus::EventBusConfig;
 use qubit_event_bus::model::ContentType;
 use qubit_event_bus::model::EventId;
 use qubit_event_bus::model::Headers;
 use qubit_event_bus::model::ProviderOptions;
 use qubit_event_bus::model::SchemaId;
+#[cfg(any(feature = "sync", feature = "async"))]
 use qubit_event_bus::model::StartPosition;
+#[cfg(any(feature = "sync", feature = "async"))]
 use qubit_event_bus::model::SubscriberId;
+#[cfg(any(feature = "sync", feature = "async"))]
 use qubit_event_bus::model::SubscriptionDurability;
 use qubit_event_bus::spi::EncodedPayload;
 use qubit_event_bus::spi::OrderingKey;
 use qubit_event_bus::spi::OutboundMessage;
+#[cfg(any(feature = "sync", feature = "async"))]
 use qubit_event_bus::spi::SpiSubscriptionRequest;
 use qubit_event_bus::spi::TopicAddress;
 use qubit_event_bus::spi::TransportPayload;
@@ -34,6 +40,7 @@ use qubit_event_bus_redis::naming::stream_key;
 #[cfg(feature = "sync")]
 use qubit_event_bus_redis::sync::RedisEventBusProvider;
 use qubit_event_bus_redis::wire::WireFields;
+#[cfg(any(feature = "sync", feature = "async"))]
 use qubit_spi::ProviderMetadata;
 
 #[test]

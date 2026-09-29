@@ -51,6 +51,8 @@ fn create_order_bus() -> Result<qubit_event_bus::EventBus, Box<dyn std::error::E
 
 Register an `EventCodec<T>` in the facade's `CodecRegistry` for every payload type used with Redis. Then call the normal typed `publish` and `subscribe` APIs. See the [user guide](doc/user_guide.md) for a complete codec, consumer, async, and Sentinel example.
 
+Runnable publish-consume-close examples are available as `sync_orders`, `async_orders`, and `sentinel_orders`. Run them with `cargo run --example <name> -- <redis-url> <namespace>`; the Sentinel example reads `REDIS_SENTINEL_NODES` and `REDIS_SENTINEL_SERVICE_NAME` from the environment. See the user guide for exact commands and lifecycle notes.
+
 ## Why This Project Exists
 
 The event-bus SPI lets an application choose a transport without changing business handlers. Redis Streams provides retained records and consumer-group acknowledgements, which helps a service resume consumption after an application instance disconnects. Automatic provider discovery removes provider-specific registration glue from startup wiring.

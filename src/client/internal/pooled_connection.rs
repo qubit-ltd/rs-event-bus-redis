@@ -9,8 +9,6 @@
 
 #[cfg(feature = "sync")]
 use std::sync::Arc;
-#[cfg(feature = "sync")]
-use std::sync::Mutex as StdMutex;
 
 #[cfg(feature = "sync")]
 use redis::Connection;
@@ -18,20 +16,7 @@ use redis::Connection;
 use redis::ConnectionLike;
 
 #[cfg(feature = "sync")]
-pub(crate) struct SyncConnectionPool {
-    pub(crate) idle: StdMutex<Vec<Connection>>,
-    pub(crate) max_idle: usize,
-}
-
-#[cfg(feature = "sync")]
-impl SyncConnectionPool {
-    pub(crate) fn new(max_idle: usize) -> Self {
-        Self {
-            idle: StdMutex::new(Vec::new()),
-            max_idle,
-        }
-    }
-}
+use super::sync_connection_pool::SyncConnectionPool;
 
 #[cfg(feature = "sync")]
 pub(crate) struct PooledConnection {

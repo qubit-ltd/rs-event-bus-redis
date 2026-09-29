@@ -143,6 +143,20 @@ fn publish_async() -> Result<(), Box<dyn std::error::Error>> {
 
 The async facade also requires the same codec registry as the sync example. `AsyncSubscription::run` is caller driven; its future belongs on the application's executor. Dropping a pending `receive` future does not acknowledge the record. Redis keeps it in the consumer group's pending entries list, and a later receive by that consumer or `XAUTOCLAIM` by another consumer can recover it.
 
+## Runnable examples
+
+The repository includes complete facade examples that register the UTF-8 codec, publish an event, consume it, and close the subscription and bus:
+
+```bash
+cargo run --example sync_orders -- redis://127.0.0.1/ local-sync-orders
+cargo run --example async_orders -- redis://127.0.0.1/ local-async-orders
+REDIS_SENTINEL_NODES=127.0.0.1:26379,127.0.0.1:26380,127.0.0.1:26381 \
+REDIS_SENTINEL_SERVICE_NAME=qeventbus \
+  cargo run --example sentinel_orders -- local-sentinel-orders
+```
+
+The async example runs until it consumes the event, then waits for Enter before closing; this lets the handler finish before the runner cancels its next receive. Each command needs the matching standalone Redis or Sentinel service and the features required by that example.
+
 ## 5. Configure Redis and Sentinel
 
 | Option | Default | Meaning |

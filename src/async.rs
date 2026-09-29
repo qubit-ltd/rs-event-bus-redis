@@ -9,7 +9,6 @@
 
 mod async_redis_event_bus;
 mod async_redis_event_bus_provider;
-mod internal;
 mod subscription;
 
 pub use async_redis_event_bus_provider::AsyncRedisEventBusProvider;

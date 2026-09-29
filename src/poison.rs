@@ -7,21 +7,13 @@
 // =============================================================================
 //! Atomic transfer of malformed pending entries into a quarantine stream.
 
-#[path = "internal/decode_failure.rs"]
-mod decode_failure;
-#[path = "internal/poison_outcome.rs"]
-mod poison_outcome;
-
-#[path = "internal/poison_reason.rs"]
-mod poison_reason;
-
-pub(crate) use decode_failure::DecodeFailure;
-pub(crate) use poison_outcome::PoisonOutcome;
-pub(crate) use poison_reason::PoisonReason;
 #[cfg(feature = "sync")]
 use redis::ConnectionLike;
 use redis::RedisError;
 use redis::cmd;
+
+pub(crate) use crate::internal::PoisonOutcome;
+pub(crate) use crate::internal::PoisonReason;
 
 /// Lua transfer checks ownership, copies the raw wire field, then acknowledges.
 const QUARANTINE_SCRIPT: &str = r#"

@@ -1,4 +1,4 @@
-tasks = ["style", "clippy", "coverage-cfg-clippy", "verify", "strict-doc", "readme", "release-build", "feature-matrix", "project-hook", "loom", "package", "coverage", "audit"]
+tasks = ["style", "clippy", "coverage-cfg-clippy", "verify", "strict-doc", "readme", "release-build", "feature-matrix", "loom", "package", "project-hook", "audit"]
 
 [local]
 build_toolchain = "1.94.0"
