@@ -15,4 +15,6 @@ pub(crate) enum DecodeFailure {
     Poison(PoisonReason),
     /// The record uses a valid wire version this provider cannot decode.
     UnsupportedVersion,
+    /// The original record must remain pending for recovery with larger limits.
+    LimitExceeded,
 }

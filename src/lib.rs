@@ -12,6 +12,9 @@
 
 #![forbid(unsafe_code)]
 
+/// Bounded JSON serialization for public wire construction and SPI publishing.
+#[path = "internal/capped_writer.rs"]
+mod capped_writer;
 /// Standalone and Sentinel connection providers.
 #[cfg(any(feature = "sync", feature = "async"))]
 mod client;
@@ -47,6 +50,9 @@ mod stream_protocol;
 pub mod wire;
 /// Versioned Redis wire fields.
 mod wire_fields;
+/// Finite wire resource bounds shared with configuration.
+#[path = "internal/wire_limits.rs"]
+mod wire_limits;
 
 /// Synchronous SPI implementation.
 #[cfg(feature = "sync")]
@@ -55,3 +61,12 @@ pub mod sync;
 /// Asynchronous SPI implementation.
 #[cfg(feature = "async")]
 pub mod r#async;
+
+/// Version-aware bounded wire decoder shared by Redis receivers.
+#[cfg(any(feature = "sync", feature = "async"))]
+#[path = "internal/bounded_wire_decoder.rs"]
+mod bounded_wire_decoder;
+
+/// Private unit regression tests.
+#[cfg(test)]
+mod tests;

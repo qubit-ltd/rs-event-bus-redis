@@ -76,6 +76,8 @@ pub(crate) struct Subscription {
     pub(crate) recovery_interval: Duration,
     /// Maximum unsettled records before reads pause.
     pub(crate) max_unsettled: usize,
+    /// Validated limits checked before decoding one record.
+    pub(crate) wire_limits: crate::wire_limits::WireLimits,
     /// Active-delivery registry and recovery cursors shared with tokens.
     pub(crate) recovery: Arc<Mutex<RecoveryState>>,
 }
@@ -481,6 +483,13 @@ async fn read_entry(
     let id = entry.id.clone();
     let message = match decode_entry(subscription, entry) {
         Ok(message) => message,
+        Err(DecodeFailure::LimitExceeded) => {
+            return Err(spi_error(
+                "receive",
+                &subscription.topic,
+                RedisProviderError::LimitExceeded,
+            ));
+        }
         Err(DecodeFailure::UnsupportedVersion) => {
             return Err(SpiError::Operation {
                 provider_id: "redis-streams".into(),
@@ -560,6 +569,7 @@ fn decode_entry(subscription: &Subscription, entry: StreamId) -> Result<InboundM
         &subscription.group,
         &subscription.recovery,
         entry,
+        subscription.wire_limits,
     )
 }
 
@@ -636,6 +646,7 @@ mod tests {
             claim_min_idle_ms: 0,
             recovery_interval: Duration::from_secs(1),
             max_unsettled: 1,
+            wire_limits: crate::wire_limits::WireLimits::default(),
             recovery: Arc::new(Mutex::new(RecoveryState::new())),
         }
     }

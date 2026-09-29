@@ -58,6 +58,8 @@ pub struct RedisEventBusConfig {
     max_idle_connections: usize,
     /// Optional approximate maximum length for each Redis stream.
     stream_maxlen_approx: Option<NonZeroUsize>,
+    /// Independent JSON wire and decoded component limits.
+    wire_limits: crate::wire_limits::WireLimits,
 }
 
 impl std::fmt::Debug for RedisEventBusConfig {
@@ -80,6 +82,7 @@ impl std::fmt::Debug for RedisEventBusConfig {
             .field("max_unsettled_per_subscription", &self.max_unsettled_per_subscription)
             .field("max_idle_connections", &self.max_idle_connections)
             .field("stream_maxlen_approx", &self.stream_maxlen_approx)
+            .field("wire_limits", &self.wire_limits)
             .finish()
     }
 }
@@ -99,6 +102,7 @@ impl Default for RedisEventBusConfig {
             max_unsettled_per_subscription: 100,
             max_idle_connections: 8,
             stream_maxlen_approx: None,
+            wire_limits: crate::wire_limits::WireLimits::default(),
         }
     }
 }
@@ -245,6 +249,30 @@ impl RedisEventBusConfig {
         self.max_unsettled_per_subscription
     }
 
+    /// Returns the maximum UTF-8 JSON bytes stored in one wire field.
+    #[must_use]
+    pub const fn max_wire_bytes(&self) -> usize {
+        self.wire_limits.wire
+    }
+
+    /// Returns the maximum decoded payload length in bytes.
+    #[must_use]
+    pub const fn max_payload_bytes(&self) -> usize {
+        self.wire_limits.payload
+    }
+
+    /// Returns the maximum decoded headers JSON string length before parsing.
+    #[must_use]
+    pub const fn max_headers_bytes(&self) -> usize {
+        self.wire_limits.headers
+    }
+
+    /// Returns the validated component limits for provider operations.
+    #[cfg(any(feature = "sync", feature = "async"))]
+    pub(crate) const fn wire_limits(&self) -> crate::wire_limits::WireLimits {
+        self.wire_limits
+    }
+
     /// Returns the maximum number of idle synchronous connections retained.
     #[must_use]
     #[inline]
@@ -295,6 +323,9 @@ impl RedisEventBusConfig {
             "redis.max_unsettled_per_subscription",
             "redis.max_idle_connections",
             "redis.stream_maxlen_approx",
+            "redis.max_wire_bytes",
+            "redis.max_payload_bytes",
+            "redis.max_headers_bytes",
         ];
         if options
             .keys()
@@ -364,6 +395,11 @@ impl RedisEventBusConfig {
             })
             .transpose()?
             .unwrap_or(8);
+        let wire_limits = crate::wire_limits::WireLimits {
+            wire: positive_limit(options, "redis.max_wire_bytes", 8_388_608)?,
+            payload: positive_limit(options, "redis.max_payload_bytes", 1_048_576)?,
+            headers: positive_limit(options, "redis.max_headers_bytes", 65_536)?,
+        };
         let stream_maxlen_approx = options
             .get("redis.stream_maxlen_approx")
             .map(|value| {
@@ -396,6 +432,7 @@ impl RedisEventBusConfig {
             max_unsettled_per_subscription,
             max_idle_connections,
             stream_maxlen_approx,
+            wire_limits,
         })
     }
 
@@ -468,6 +505,23 @@ fn validate_namespace(namespace: &str) -> Result<(), RedisProviderError> {
         return Err(RedisProviderError::Configuration("invalid redis.namespace"));
     }
     Ok(())
+}
+
+/// Parses one positive byte limit without retaining caller-supplied
+/// diagnostics. Returns configuration errors for zero, malformed numbers, or
+/// usize overflow.
+fn positive_limit(options: &ProviderOptions, key: &str, default: usize) -> Result<usize, RedisProviderError> {
+    options
+        .get(key)
+        .map(|value| {
+            value
+                .parse::<usize>()
+                .ok()
+                .filter(|value| *value > 0)
+                .ok_or(RedisProviderError::Configuration("invalid Redis byte limit"))
+        })
+        .transpose()
+        .map(|value| value.unwrap_or(default))
 }
 
 #[cfg(test)]

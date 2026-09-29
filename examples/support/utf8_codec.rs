@@ -7,14 +7,18 @@
 // =============================================================================
 //! A small UTF-8 codec used by the facade examples.
 
+// BEGIN DOC UTF8 CODEC
 use std::sync::Arc;
 
 use qubit_event_bus::codec::EventCodec;
 use qubit_event_bus::error::CodecError;
 use qubit_event_bus::model::ContentType;
 use qubit_event_bus::model::SchemaId;
+use qubit_event_bus::spi::EncodedPayload;
 
 /// Encodes owned strings as UTF-8 bytes.
+/// Uses the default strict metadata validation for this content type and no
+/// schema.
 pub(crate) struct Utf8Codec(pub(crate) ContentType);
 
 impl EventCodec<String> for Utf8Codec {
@@ -30,9 +34,10 @@ impl EventCodec<String> for Utf8Codec {
         Ok(Arc::from(value.as_bytes()))
     }
 
-    fn decode(&self, bytes: &[u8]) -> Result<String, CodecError> {
-        String::from_utf8(bytes.to_vec()).map_err(|source| CodecError::Decode {
+    fn decode(&self, payload: &EncodedPayload) -> Result<String, CodecError> {
+        String::from_utf8(payload.bytes().to_vec()).map_err(|source| CodecError::Decode {
             source: Box::new(source),
         })
     }
 }
+// END DOC UTF8 CODEC

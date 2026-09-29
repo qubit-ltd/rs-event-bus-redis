@@ -84,20 +84,17 @@ impl EventBusSpi for RedisEventBus {
     /// Returns an SPI error if the payload is not encoded, serialization fails,
     /// a connection cannot be opened, or Redis rejects `XADD`.
     fn publish(&self, message: OutboundMessage) -> Result<PublishAcknowledgement, SpiError> {
-        let fields =
-            WireFields::from_outbound(&message).map_err(|error| spi_error("publish", Some(message.topic()), error))?;
-        let key = stream_key(self.settings.namespace(), message.topic().as_str());
-        let payload = serde_json::to_string(&fields).map_err(|_| {
-            spi_error(
-                "publish",
-                Some(message.topic()),
-                RedisProviderError::Operation("encode message"),
-            )
-        })?;
+        use qubit_event_bus::model::PublishEffect;
+        let topic = message.topic();
+        let before_query = |error| crate::error::to_publish_error(topic, error, PublishEffect::NotAccepted);
+        let limits = self.settings.wire_limits();
+        let fields = WireFields::from_outbound_with_limits(&message, limits).map_err(before_query)?;
+        let key = stream_key(self.settings.namespace(), topic.as_str());
+        let payload = crate::capped_writer::to_capped_json(&fields, limits.wire).map_err(before_query)?;
         let mut connection = self
             .client
             .get_connection()
-            .map_err(|error| spi_error("publish", Some(message.topic()), from_redis_error("publish", &error)))?;
+            .map_err(|error| before_query(from_redis_error("publish", &error)))?;
         let mut command = cmd("XADD");
         command.arg(&key);
         if let Some(maxlen) = self.settings.stream_maxlen_approx() {
@@ -108,7 +105,13 @@ impl EventBusSpi for RedisEventBus {
             .arg("wire")
             .arg(payload)
             .query(&mut connection)
-            .map_err(|error| spi_error("publish", Some(message.topic()), from_redis_error("publish", &error)))?;
+            .map_err(|error| {
+                connection.discard();
+                crate::error::query_publish_error(topic, &error)
+            })?;
+        if !valid_stream_id(&message_id) {
+            return Err(crate::error::invalid_publish_reply(topic));
+        }
         Ok(PublishAcknowledgement::Accepted {
             provider_message_id: Some(message_id),
             metadata: Default::default(),
@@ -232,6 +235,7 @@ impl EventBusSpi for RedisEventBus {
             claim_min_idle_ms: self.settings.claim_min_idle_ms(),
             recovery_interval: std::time::Duration::from_millis(self.settings.recovery_interval_ms() as u64),
             max_unsettled: self.settings.max_unsettled_per_subscription(),
+            wire_limits: self.settings.wire_limits(),
             recovery: Arc::new(Mutex::new(RecoveryState::new())),
         }))
     }
@@ -407,6 +411,7 @@ mod tests {
             claim_min_idle_ms: 0,
             recovery_interval: std::time::Duration::from_secs(1),
             max_unsettled: 1,
+            wire_limits: crate::wire_limits::WireLimits::default(),
             recovery: std::sync::Arc::new(std::sync::Mutex::new(crate::internal::RecoveryState::new())),
         };
         assert!(receiver.receive(std::time::Duration::ZERO).is_err());

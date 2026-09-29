@@ -42,6 +42,10 @@ pub enum RedisProviderError {
     /// A stream record uses a wire version this implementation does not decode.
     #[error("unsupported Redis event wire version")]
     UnsupportedWireVersion,
+    /// A wire, payload, or headers component exceeded a provider resource
+    /// limit.
+    #[error("Redis event resource limit exceeded")]
+    LimitExceeded,
 }
 
 /// Classifies a Redis error without retaining its diagnostic details.

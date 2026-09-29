@@ -19,6 +19,49 @@ use std::process::Stdio;
 use support::redis_server::RedisServer;
 use support::sentinel::SentinelServer;
 
+/// Confirms both published codec snippets match the helper compiled by every
+/// facade example.
+#[test]
+fn test_bilingual_utf8_codec_snippets_match_compiled_example_source() {
+    let source = marked_snippet(
+        include_str!("../examples/support/utf8_codec.rs"),
+        "// BEGIN DOC UTF8 CODEC\n",
+        "// END DOC UTF8 CODEC",
+    );
+    for (guide_name, guide) in [
+        ("English", include_str!("../doc/user_guide.md")),
+        ("Chinese", include_str!("../doc/user_guide.zh_CN.md")),
+    ] {
+        let snippet = marked_snippet(
+            guide,
+            "<!-- BEGIN DOC UTF8 CODEC -->\n```rust\n",
+            "```\n<!-- END DOC UTF8 CODEC -->",
+        );
+        assert_eq!(
+            snippet, source,
+            "{guide_name} UTF-8 codec snippet drifted from the compiled helper"
+        );
+    }
+}
+
+/// Returns the exact text between unique snippet markers, panicking if either
+/// marker is missing or repeated.
+fn marked_snippet<'text>(text: &'text str, start: &str, end: &str) -> &'text str {
+    assert_eq!(
+        text.matches(start).count(),
+        1,
+        "snippet must contain exactly one start marker: {start}"
+    );
+    assert_eq!(
+        text.matches(end).count(),
+        1,
+        "snippet must contain exactly one end marker: {end}"
+    );
+    let (_, body) = text.split_once(start).expect("start marker was checked");
+    let (snippet, _) = body.split_once(end).expect("end marker must follow the start marker");
+    snippet
+}
+
 #[test]
 fn standalone_examples_publish_consume_and_close() -> Result<(), Box<dyn Error>> {
     let redis = RedisServer::start()?;

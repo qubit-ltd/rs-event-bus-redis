@@ -21,6 +21,7 @@ use qubit_event_bus::model::StartPosition;
 use qubit_event_bus::model::SubscribeRequest;
 use qubit_event_bus::model::SubscriptionDurability;
 use qubit_event_bus::model::Topic;
+use qubit_event_bus::spi::EncodedPayload;
 use qubit_event_bus::spi::ShutdownMode;
 use qubit_event_bus::spi::ShutdownOutcome;
 use qubit_event_bus::SubscriberId;
@@ -71,6 +72,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Preserves the schema-free UTF-8 wire format with strict default metadata validation.
 struct Utf8Codec(ContentType);
 
 impl EventCodec<String> for Utf8Codec {
@@ -86,8 +88,8 @@ impl EventCodec<String> for Utf8Codec {
         Ok(Arc::from(value.as_bytes()))
     }
 
-    fn decode(&self, bytes: &[u8]) -> Result<String, CodecError> {
-        String::from_utf8(bytes.to_vec()).map_err(|source| CodecError::Decode {
+    fn decode(&self, payload: &EncodedPayload) -> Result<String, CodecError> {
+        String::from_utf8(payload.bytes().to_vec()).map_err(|source| CodecError::Decode {
             source: Box::new(source),
         })
     }

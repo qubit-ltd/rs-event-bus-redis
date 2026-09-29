@@ -14,7 +14,7 @@ use qubit_event_bus::spi::InboundMessage;
 use qubit_event_bus::spi::SettlementToken;
 use qubit_event_bus::spi::TopicAddress;
 use qubit_id::Id;
-use redis::FromRedisValue;
+use redis::Value;
 use redis::streams::StreamId;
 
 use super::decode_failure::DecodeFailure;
@@ -22,7 +22,7 @@ use super::poison_reason::PoisonReason;
 use super::recovery_state::RecoveryState;
 use super::settlement_state::SettlementState;
 use crate::error::RedisProviderError;
-use crate::wire::WireFields;
+use crate::wire_fields::WireFields;
 
 /// Decodes wire fields and binds the resulting token to the receiving
 /// subscription.
@@ -33,18 +33,23 @@ pub(crate) fn decode_entry(
     group: &str,
     recovery: &Arc<Mutex<RecoveryState>>,
     entry: StreamId,
+    limits: crate::wire_limits::WireLimits,
 ) -> Result<InboundMessage, DecodeFailure> {
     let Some(value) = entry.map.get("wire") else {
         return Err(DecodeFailure::Poison(PoisonReason::MissingWire));
     };
-    let encoded: String =
-        String::from_redis_value(value).map_err(|_| DecodeFailure::Poison(PoisonReason::InvalidWireField))?;
-    let fields = WireFields::decode_wire(&encoded).map_err(|error| {
-        if matches!(error, RedisProviderError::UnsupportedWireVersion) {
-            DecodeFailure::UnsupportedVersion
-        } else {
-            DecodeFailure::Poison(PoisonReason::InvalidJson)
-        }
+    let encoded: &[u8] = match value {
+        Value::BulkString(bytes) => bytes,
+        Value::SimpleString(value) => value.as_bytes(),
+        _ => return Err(DecodeFailure::Poison(PoisonReason::InvalidWireField)),
+    };
+    if encoded.len() > limits.wire {
+        return Err(DecodeFailure::LimitExceeded);
+    }
+    let fields = WireFields::decode_wire(encoded, limits).map_err(|error| match error {
+        RedisProviderError::UnsupportedWireVersion => DecodeFailure::UnsupportedVersion,
+        RedisProviderError::LimitExceeded => DecodeFailure::LimitExceeded,
+        _ => DecodeFailure::Poison(PoisonReason::InvalidJson),
     })?;
     let (message_topic, event_id, timestamp, headers, ordering_key, payload) =
         fields.into_parts(topic.clone()).map_err(|error| {

@@ -28,6 +28,14 @@ pub(crate) fn to_spi_error(
     let (kind, retryable) = match &source {
         RedisProviderError::Configuration(_) => ("configuration", Some(false)),
         RedisProviderError::UnsupportedWireVersion => ("unsupported_wire_version", Some(false)),
+        RedisProviderError::LimitExceeded => (
+            if operation == "receive" {
+                "receive_limit_exceeded"
+            } else {
+                "publish_limit_exceeded"
+            },
+            Some(false),
+        ),
         RedisProviderError::Transport { kind, retryable, .. } => (*kind, *retryable),
         RedisProviderError::Operation(_) => ("redis_error", None),
     };
@@ -39,6 +47,75 @@ pub(crate) fn to_spi_error(
         retryable,
         source: Box::new(source),
     }
+}
+
+/// Converts a failed publish with admission evidence from the call site.
+/// Returns the stable publish error variant without retaining client
+/// diagnostics.
+#[cfg(any(feature = "sync", feature = "async"))]
+pub(crate) fn to_publish_error(
+    topic: &TopicAddress,
+    source: RedisProviderError,
+    effect: qubit_event_bus::model::PublishEffect,
+) -> SpiError {
+    let error = to_spi_error("publish", Some(topic), source);
+    let SpiError::Operation {
+        provider_id,
+        resource,
+        kind,
+        retryable,
+        source,
+        ..
+    } = error
+    else {
+        unreachable!("provider conversion always yields an operation")
+    };
+    SpiError::Publish {
+        provider_id,
+        resource,
+        kind,
+        retryable,
+        effect,
+        source,
+    }
+}
+
+/// Classifies failures after XADD entered query. Only actual server error codes
+/// prove rejection. Type conversion, protocol, timeout, and disconnect failures
+/// remain uncertain.
+#[cfg(any(feature = "sync", feature = "async"))]
+pub(crate) fn query_publish_error(topic: &TopicAddress, error: &RedisError) -> SpiError {
+    use qubit_event_bus::model::PublishEffect;
+    let effect = if error.code().is_some() {
+        PublishEffect::NotAccepted
+    } else {
+        PublishEffect::MayHaveBeenAccepted
+    };
+    let source = if error.kind() == redis::ErrorKind::TypeError && error.code().is_none() {
+        RedisProviderError::Transport {
+            operation: "publish",
+            kind: "protocol",
+            retryable: Some(false),
+        }
+    } else {
+        classify_redis_error("publish", error)
+    };
+    to_publish_error(topic, source, effect)
+}
+
+/// Reports a syntactically invalid XADD acknowledgement after the command was
+/// submitted.
+#[cfg(any(feature = "sync", feature = "async"))]
+pub(crate) fn invalid_publish_reply(topic: &TopicAddress) -> SpiError {
+    to_publish_error(
+        topic,
+        RedisProviderError::Transport {
+            operation: "publish",
+            kind: "protocol",
+            retryable: Some(false),
+        },
+        qubit_event_bus::model::PublishEffect::MayHaveBeenAccepted,
+    )
 }
 
 /// Converts a Redis client failure using stable kind and retryability rules.

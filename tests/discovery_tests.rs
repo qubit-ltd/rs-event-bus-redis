@@ -41,6 +41,8 @@ use qubit_event_bus::model::SubscribeRequest;
 use qubit_event_bus::model::SubscriptionDurability;
 #[cfg(feature = "sync")]
 use qubit_event_bus::model::Topic;
+#[cfg(feature = "sync")]
+use qubit_event_bus::spi::EncodedPayload;
 #[cfg(all(feature = "async", feature = "conformance"))]
 use qubit_event_bus::spi::conformance::AsyncConformanceHooks;
 #[cfg(all(feature = "sync", feature = "conformance"))]
@@ -107,6 +109,8 @@ fn test_sync_registry_discovers_and_creates_redis_provider() -> Result<(), Box<d
 }
 
 #[cfg(feature = "sync")]
+/// Preserves the schema-free UTF-8 wire format with strict default metadata
+/// validation.
 struct Utf8Codec(ContentType);
 
 #[cfg(feature = "sync")]
@@ -120,8 +124,8 @@ impl EventCodec<String> for Utf8Codec {
     fn encode(&self, value: &String) -> Result<std::sync::Arc<[u8]>, CodecError> {
         Ok(std::sync::Arc::from(value.as_bytes()))
     }
-    fn decode(&self, bytes: &[u8]) -> Result<String, CodecError> {
-        String::from_utf8(bytes.to_vec()).map_err(|source| CodecError::Decode {
+    fn decode(&self, payload: &EncodedPayload) -> Result<String, CodecError> {
+        String::from_utf8(payload.bytes().to_vec()).map_err(|source| CodecError::Decode {
             source: Box::new(source),
         })
     }
@@ -166,7 +170,7 @@ fn test_business_consumer_binary_links_provider_without_provider_type_imports() 
         .arg("run")
         .arg("--quiet")
         .arg("--manifest-path")
-        .arg("tests/fixtures/business_consumer/Cargo.toml")
+        .arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/business_consumer/Cargo.toml"))
         .arg("--")
         .arg(server.url());
     #[cfg(coverage)]
