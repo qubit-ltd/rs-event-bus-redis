@@ -11,6 +11,9 @@
 /// sockets.
 #[path = "subscription/internal/receive_command.rs"]
 mod receive_command;
+/// Scans missing Redis stream records and clears stale pending entries.
+#[path = "subscription/internal/receive_tombstones.rs"]
+mod receive_tombstones;
 
 use std::io::Error as IoError;
 use std::sync::Arc;
@@ -43,7 +46,6 @@ use crate::error::RedisProviderError;
 use crate::error::from_redis_error as classified_spi_error;
 use crate::internal::DecodeFailure;
 use crate::internal::PoisonOutcome;
-use crate::internal::PoisonReason;
 use crate::internal::ReceiveAction;
 use crate::internal::ReceiveDriver;
 use crate::internal::ReceiveReply;
@@ -56,8 +58,6 @@ use crate::internal::decode_entry as decode_wire_entry;
 use crate::internal::read_group_command;
 use crate::poison::quarantine;
 use crate::stream_protocol::parse_auto_claim;
-use crate::stream_protocol::parse_pending_entries;
-use crate::stream_protocol::parse_range;
 use crate::stream_protocol::parse_read_group;
 
 /// One blocking consumer owned by a facade subscription.
@@ -223,103 +223,13 @@ impl EventSubscriptionSpi for Subscription {
                         let claimed = claim.claimed.into_iter().next();
                         lock_state(&self.recovery, &self.topic, "receive", "recovery lock")?
                             .set_claim_cursor(claim.next_stream_id);
-                        let mut deleted_count = claim.deleted_ids.len() as u64;
-                        if has_missing_entries && driver.budget_mut().take_tombstone_probe(Instant::now()) {
-                            let tombstone_cursor = lock_state(&self.recovery, &self.topic, "receive", "recovery lock")?
-                                .tombstone_cursor()
-                                .to_owned();
-                            let pending_start = if tombstone_cursor == "0-0" {
-                                "-".to_owned()
-                            } else {
-                                format!("({tombstone_cursor}")
-                            };
-                            let pending_reply: Value = cmd("XPENDING")
-                                .arg(&self.key)
-                                .arg(&self.group)
-                                .arg(pending_start)
-                                .arg("+")
-                                .arg(4)
-                                .query_receive(&mut connection, &self.client, true)
-                                .map_err(|error| spi_error("receive", Some(&self.topic), error))?;
-                            let pending_rows = parse_pending_entries(pending_reply).map_err(|_| {
-                                spi_error(
-                                    "receive",
-                                    Some(&self.topic),
-                                    RedisProviderError::OutcomeUnknown { operation: "receive" },
-                                )
-                            })?;
-                            let pending_row_count = pending_rows.len();
-                            let mut scan_complete = true;
-                            for (id, owner, idle_ms) in pending_rows {
-                                if idle_ms < self.claim_min_idle_ms as u64 {
-                                    lock_state(&self.recovery, &self.topic, "receive", "recovery lock")?
-                                        .set_tombstone_cursor(id);
-                                    continue;
-                                }
-                                if !driver.budget_mut().take_tombstone_range(Instant::now()) {
-                                    scan_complete = false;
-                                    break;
-                                }
-                                let raw_rows: Value = cmd("XRANGE")
-                                    .arg(&self.key)
-                                    .arg(&id)
-                                    .arg(&id)
-                                    .query_receive(&mut connection, &self.client, true)
-                                    .map_err(|error| spi_error("receive", Some(&self.topic), error))?;
-                                let rows = parse_range(raw_rows).map_err(|_| {
-                                    spi_error(
-                                        "receive",
-                                        Some(&self.topic),
-                                        RedisProviderError::OutcomeUnknown { operation: "receive" },
-                                    )
-                                })?;
-                                if rows.ids.is_empty() {
-                                    if !driver.budget_mut().take_maintenance_evaluation(Instant::now()) {
-                                        scan_complete = false;
-                                        break;
-                                    }
-                                    let _permit = self
-                                        .client
-                                        .try_command()
-                                        .map_err(|error| spi_error("receive", Some(&self.topic), error))?;
-                                    let timeout = self.client.command_timeout();
-                                    connection
-                                        .set_read_timeout(Some(timeout))
-                                        .map_err(|error| classified_spi_error("receive", Some(&self.topic), &error))?;
-                                    connection
-                                        .set_write_timeout(Some(timeout))
-                                        .map_err(|error| classified_spi_error("receive", Some(&self.topic), &error))?;
-                                    match quarantine(
-                                        &mut connection,
-                                        &self.key,
-                                        &self.quarantine,
-                                        &self.group,
-                                        &owner,
-                                        &id,
-                                        PoisonReason::MissingWire,
-                                    )
-                                    .map_err(|_error| {
-                                        spi_error(
-                                            "receive",
-                                            Some(&self.topic),
-                                            RedisProviderError::OutcomeUnknown {
-                                                operation: "quarantine",
-                                            },
-                                        )
-                                    })? {
-                                        PoisonOutcome::TombstoneCleared => deleted_count += 1,
-                                        PoisonOutcome::SourceGone | PoisonOutcome::OwnershipChanged => {}
-                                        PoisonOutcome::Quarantined => {}
-                                    }
-                                }
-                                lock_state(&self.recovery, &self.topic, "receive", "recovery lock")?
-                                    .set_tombstone_cursor(id);
-                            }
-                            if scan_complete && pending_row_count < 4 {
-                                lock_state(&self.recovery, &self.topic, "receive", "recovery lock")?
-                                    .reset_tombstone_cursor();
-                            }
-                        }
+                        let deleted_count = receive_tombstones::scan(
+                            self,
+                            &mut connection,
+                            &mut driver,
+                            has_missing_entries,
+                            claim.deleted_ids.len() as u64,
+                        )?;
                         if deleted_count > 0 {
                             if let Some(entry) = claimed {
                                 lock_state(&self.recovery, &self.topic, "receive", "recovery lock")?.defer_claim(entry);
@@ -779,14 +689,21 @@ mod tests {
                 Ok(_) => panic!("invalid wire should be rejected"),
                 Err(error) => error,
             };
-            assert_eq!(error, expected);
+            assert_eq!(
+                error, expected,
+                "malformed wire data maps to its stable decode category"
+            );
         }
         let unsupported = stream_entry(Some(Value::BulkString(br#"{"version":99}"#.to_vec())));
         let error = match decode_entry(&subscription, unsupported) {
             Ok(_) => panic!("unsupported wire version should be rejected"),
             Err(error) => error,
         };
-        assert_eq!(error, crate::internal::DecodeFailure::UnsupportedVersion);
+        assert_eq!(
+            error,
+            crate::internal::DecodeFailure::UnsupportedVersion,
+            "unknown wire versions remain unsupported"
+        );
     }
 
     #[test]
@@ -807,8 +724,11 @@ mod tests {
         )));
 
         let message = decode_entry(&subscription, entry).expect("valid wire is decoded");
-        assert_eq!(message.id().as_str(), "event-1");
-        assert!(message.settlement().is_some());
+        assert_eq!(message.id().as_str(), "event-1", "wire event ID is preserved");
+        assert!(
+            message.settlement().is_some(),
+            "decoded messages carry a settlement token"
+        );
     }
 
     #[test]
@@ -824,7 +744,10 @@ mod tests {
             Ok(_) => panic!("poisoned recovery lock should return an error"),
             Err(error) => error,
         };
-        assert!(matches!(error, SpiError::Operation { .. }));
+        assert!(
+            matches!(error, SpiError::Operation { .. }),
+            "poisoned recovery state maps to an operation error"
+        );
     }
 
     #[test]
@@ -843,7 +766,10 @@ mod tests {
         let error = subscription
             .settle(&token, DeliveryDisposition::Retry)
             .expect_err("foreign receiver state must be rejected");
-        assert!(matches!(error, SpiError::InvalidSettlementToken { .. }));
+        assert!(
+            matches!(error, SpiError::InvalidSettlementToken { .. }),
+            "tokens from another receiver are rejected"
+        );
     }
 
     #[test]
@@ -867,7 +793,10 @@ mod tests {
             },
         );
 
-        assert!(subscription.settle(&token, DeliveryDisposition::Accept).is_err());
+        assert!(
+            subscription.settle(&token, DeliveryDisposition::Accept).is_err(),
+            "a poisoned disposition lock prevents settlement"
+        );
     }
 
     #[test]
@@ -886,8 +815,15 @@ mod tests {
                 recovery: Arc::clone(&subscription.recovery),
             },
         );
-        assert!(subscription.settle(&token, DeliveryDisposition::Accept).is_err());
-        assert_eq!(*progress.lock().expect("progress healthy"), SettlementProgress::Open);
+        assert!(
+            subscription.settle(&token, DeliveryDisposition::Accept).is_err(),
+            "connection acquisition failure is returned to the caller"
+        );
+        assert_eq!(
+            *progress.lock().expect("progress healthy"),
+            SettlementProgress::Open,
+            "connection acquisition failure preserves the open intent"
+        );
         subscription
             .settle(&token, DeliveryDisposition::Retry)
             .expect("Retry remains available before any XACK is sent");
