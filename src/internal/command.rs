@@ -24,6 +24,7 @@ use redis::Cmd;
 ///
 /// An owned COUNT=1 command. Building it allocates command bytes but issues no
 /// I/O.
+#[must_use]
 pub(crate) fn read_group_command(
     group: &str,
     consumer: &str,

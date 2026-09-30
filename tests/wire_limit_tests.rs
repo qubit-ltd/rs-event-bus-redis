@@ -95,8 +95,11 @@ mod durable {
     use std::any::TypeId;
     use std::time::Duration;
 
+    use qubit_event_bus::CodecError;
     use qubit_event_bus::EventBusConfig;
+    use qubit_event_bus::codec::EventCodec;
     use qubit_event_bus::model::ConsumerGroup;
+    use qubit_event_bus::model::SchemaId;
     use qubit_event_bus::model::StartPosition;
     use qubit_event_bus::model::SubscriberId;
     use qubit_event_bus::model::SubscriptionDurability;
@@ -104,9 +107,11 @@ mod durable {
     use qubit_event_bus::spi::ReceiveOutcome;
     use qubit_event_bus::spi::SpiSubscriptionRequest;
     use qubit_event_bus_redis::naming::group_name;
+    use qubit_event_bus_redis::naming::poison_key;
     use qubit_event_bus_redis::naming::stream_key;
     use qubit_event_bus_redis::sync::RedisEventBusProvider;
     use qubit_id::Id;
+    use qubit_retry::RetryPolicy;
     use qubit_spi::ServiceProvider;
 
     use super::Arc;
@@ -267,7 +272,7 @@ mod durable {
                     .arg(10)
                     .query(&mut observer)?;
                 assert!(pending.is_empty(), "malformed record was acknowledged atomically");
-                let quarantine = qubit_event_bus_redis::naming::poison_key(namespace, "limits", &group);
+                let quarantine = poison_key(namespace, "limits", &group);
                 let count: usize = redis::cmd("XLEN").arg(quarantine).query(&mut observer)?;
                 assert_eq!(count, 1, "malformed record was quarantined");
             }
@@ -323,24 +328,24 @@ mod durable {
         calls: Arc<std::sync::atomic::AtomicUsize>,
         panic: bool,
     }
-    impl qubit_event_bus::codec::EventCodec<Vec<u8>> for FailingCodec {
+    impl EventCodec<Vec<u8>> for FailingCodec {
         /// Returns the accepted encoded MIME type.
         fn content_type(&self) -> &ContentType {
             &self.content
         }
         /// Requires no schema metadata.
-        fn schema_id(&self) -> Option<&qubit_event_bus::model::SchemaId> {
+        fn schema_id(&self) -> Option<&SchemaId> {
             None
         }
         /// Shares bytes for transport.
-        fn encode(&self, value: &Vec<u8>) -> Result<Arc<[u8]>, qubit_event_bus::error::CodecError> {
+        fn encode(&self, value: &Vec<u8>) -> Result<Arc<[u8]>, CodecError> {
             Ok(Arc::from(value.as_slice()))
         }
         /// Records calls and creates the selected permanent codec failure.
-        fn decode(&self, _: &EncodedPayload) -> Result<Vec<u8>, qubit_event_bus::error::CodecError> {
+        fn decode(&self, _: &EncodedPayload) -> Result<Vec<u8>, CodecError> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             assert!(!self.panic, "controlled permanent codec panic");
-            Err(qubit_event_bus::error::CodecError::Decode {
+            Err(CodecError::Decode {
                 source: Box::new(std::io::Error::other("controlled permanent decode failure")),
             })
         }
@@ -386,7 +391,7 @@ mod durable {
                     .consumer_group(ConsumerGroup::new("group")?)
                     .durability(SubscriptionDurability::Durable)
                     .start_position(StartPosition::Earliest)
-                    .retry_policy(qubit_retry::RetryPolicy::builder().max_attempts(3).build()?)
+                    .retry_policy(RetryPolicy::builder().max_attempts(3).build()?)
                     .build()?,
                 move |_| {
                     handler_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);

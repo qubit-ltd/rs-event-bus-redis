@@ -11,6 +11,7 @@ use std::sync::atomic::Ordering;
 
 use super::resource_budget::ResourceBudget;
 /// Non-cloneable permit; cancellation releases admission, not Redis execution.
+#[must_use]
 pub(crate) struct CommandPermit {
     /// Shared short-command counter decremented exactly once when this permit
     /// is dropped.
@@ -18,6 +19,7 @@ pub(crate) struct CommandPermit {
 }
 impl Drop for CommandPermit {
     /// Releases exactly the slot acquired for this application operation.
+    #[inline]
     fn drop(&mut self) {
         self.budget.commands.fetch_sub(1, Ordering::AcqRel);
     }

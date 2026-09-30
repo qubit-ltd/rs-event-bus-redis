@@ -110,6 +110,8 @@ impl RedisServer {
 
     /// Returns the connection URL borrowed from this fixture without
     /// allocating.
+    #[must_use]
+    #[inline]
     pub fn url(&self) -> &str {
         &self.url
     }

@@ -9,6 +9,7 @@
 
 /// Meaning of a completed Redis receive command.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[must_use]
 pub(crate) enum ReceiveReply {
     /// Claim cursor reached the end of its scan.
     ClaimAtEnd,

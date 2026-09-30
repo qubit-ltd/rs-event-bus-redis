@@ -9,6 +9,7 @@
 
 /// Redis operation selected by the common receive state machine.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[must_use]
 pub(crate) enum ReceiveAction {
     /// Recover work owned by another consumer.
     Claim,

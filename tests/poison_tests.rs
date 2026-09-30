@@ -48,6 +48,7 @@ use redis::Connection;
 use redis::RedisError;
 use redis::Value;
 use redis::cmd;
+use redis::from_redis_value;
 use redis::streams::StreamRangeReply;
 #[cfg(feature = "sync")]
 use serde_json::to_string;
@@ -146,8 +147,8 @@ fn assert_quarantined(observer: &mut Connection, namespace: &str, id: &str, wire
 fn assert_retained(observer: &mut Connection, namespace: &str, id: &str) -> TestResult {
     let entries = pending(observer, namespace)?;
     assert_eq!(entries.len(), 1, "limit failure must retain source in PEL");
-    let row: Vec<Value> = redis::from_redis_value(&entries[0])?;
-    let pending_id: String = redis::from_redis_value(&row[0])?;
+    let row: Vec<Value> = from_redis_value(&entries[0])?;
+    let pending_id: String = from_redis_value(&row[0])?;
     assert_eq!(pending_id, id);
     let group = group_name(namespace, "events", "worker", Some("group"));
     let rows: StreamRangeReply = cmd("XRANGE")

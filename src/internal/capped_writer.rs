@@ -16,8 +16,11 @@ use crate::error::RedisProviderError;
 
 /// Accumulates at most `limit` output bytes.
 struct CappedWriter {
+    /// Serialized bytes accumulated without exceeding the configured bound.
     bytes: Vec<u8>,
+    /// Maximum number of output bytes permitted in `bytes`.
     limit: usize,
+    /// Whether a write was rejected because it would exceed `limit`.
     exceeded: bool,
 }
 
@@ -34,13 +37,28 @@ impl Write for CappedWriter {
     }
 
     /// This memory writer has no buffered external output.
+    #[inline]
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
 }
 
 /// Serializes `value` without constructing output larger than `limit`.
-/// Returns a sanitized limit or encoding error and performs no Redis IO.
+///
+/// # Parameters
+///
+/// - `value`: Value encoded as JSON.
+/// - `limit`: Maximum serialized UTF-8 byte length; excess output is rejected.
+///
+/// # Returns
+///
+/// The JSON string when its encoded output fits within `limit`.
+///
+/// # Errors
+///
+/// Returns `LimitExceeded` when output exceeds the cap, or a sanitized
+/// operation error when JSON encoding or UTF-8 conversion fails. No Redis IO
+/// occurs.
 pub(crate) fn to_capped_json<T: Serialize>(value: &T, limit: usize) -> Result<String, RedisProviderError> {
     let mut writer = CappedWriter {
         bytes: Vec::new(),

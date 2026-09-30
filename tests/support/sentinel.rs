@@ -127,6 +127,7 @@ impl SentinelServer {
 
     /// Returns allocated comma-separated local Sentinel endpoints for provider
     /// options.
+    #[must_use]
     pub fn endpoints(&self) -> String {
         self.sentinel_ports
             .iter()
@@ -144,6 +145,8 @@ impl SentinelServer {
     }
 
     /// Returns the original replica's local TCP port without performing IO.
+    #[must_use]
+    #[inline]
     pub fn replica_port(&self) -> u16 {
         self.replica_port
     }

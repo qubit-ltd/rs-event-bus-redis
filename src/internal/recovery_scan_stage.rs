@@ -5,7 +5,8 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-//! Per-subscription pending-entry cursors and active-delivery tracking.
+//! Classifies bounded recovery scans so claim and own-pending phases share a
+//! command budget.
 
 /// Which Redis recovery scan is consuming a receive-call command budget.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

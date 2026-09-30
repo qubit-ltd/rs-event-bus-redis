@@ -63,7 +63,7 @@ impl ConnectionLike for AsyncCommandConnection {
     /// # Returns
     ///
     /// A future yielding the owned reply; Redis setup, transport, and protocol
-    /// errors propagate. The command and lease remain borrowed for `a`; the
+    /// errors propagate. The command and lease remain borrowed for `'a`; the
     /// host executor drives I/O.
     ///
     /// # Errors
@@ -90,7 +90,7 @@ impl ConnectionLike for AsyncCommandConnection {
     /// # Returns
     ///
     /// A host-polled future yielding owned replies, or Redis transport/protocol
-    /// errors. The command and lease remain borrowed for `a` while
+    /// errors. The command and lease remain borrowed for `'a` while
     /// admission is retained.
     ///
     /// # Errors

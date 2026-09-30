@@ -11,18 +11,28 @@ mod support;
 use std::sync::Arc;
 use std::time::SystemTime;
 
+use qubit_event_bus::CodecError;
+use qubit_event_bus::DeliveryError;
 use qubit_event_bus::EventBusConfig;
+use qubit_event_bus::codec::EventCodec;
+use qubit_event_bus::error::ReceiveError;
 use qubit_event_bus::model::ContentType;
+use qubit_event_bus::model::DeadLetterEvent;
+use qubit_event_bus::model::DuplicateRiskPolicy;
 use qubit_event_bus::model::EventId;
 use qubit_event_bus::model::Headers;
 use qubit_event_bus::model::ProviderOptions;
 use qubit_event_bus::model::PublishEffect;
+use qubit_event_bus::model::SchemaId;
 use qubit_event_bus::spi::EncodedPayload;
 use qubit_event_bus::spi::EventBusSpi;
 use qubit_event_bus::spi::OutboundMessage;
 use qubit_event_bus::spi::TopicAddress;
 use qubit_event_bus::spi::TransportPayload;
 use qubit_event_bus_redis::sync::RedisEventBusProvider;
+use qubit_event_bus_redis::wire::WireFields;
+use qubit_id::Id;
+use qubit_retry::RetryPolicy;
 use qubit_spi::ServiceProvider;
 use support::scripted_redis::ScriptedRedis;
 use support::scripted_redis::Step;
@@ -91,30 +101,28 @@ fn query_disconnect_is_uncertain() {
 
 /// Small deterministic codec used by the real facade retry tests.
 struct BytesCodec(ContentType);
-impl qubit_event_bus::codec::EventCodec<Vec<u8>> for BytesCodec {
+impl EventCodec<Vec<u8>> for BytesCodec {
     /// Returns the bytes MIME type.
     fn content_type(&self) -> &ContentType {
         &self.0
     }
     /// This test wire format carries no schema.
-    fn schema_id(&self) -> Option<&qubit_event_bus::model::SchemaId> {
+    fn schema_id(&self) -> Option<&SchemaId> {
         None
     }
     /// Shares an owned copy of the supplied application bytes.
-    fn encode(&self, value: &Vec<u8>) -> Result<Arc<[u8]>, qubit_event_bus::error::CodecError> {
+    fn encode(&self, value: &Vec<u8>) -> Result<Arc<[u8]>, CodecError> {
         Ok(Arc::from(value.as_slice()))
     }
     /// Copies compatible received bytes for the application.
-    fn decode(&self, payload: &EncodedPayload) -> Result<Vec<u8>, qubit_event_bus::error::CodecError> {
+    fn decode(&self, payload: &EncodedPayload) -> Result<Vec<u8>, CodecError> {
         Ok(payload.bytes().to_vec())
     }
 }
 
 /// Executes a real XADD, discards its reply, and observes actual stream
 /// records.
-fn applied_xadd_reply_loss(
-    policy: qubit_event_bus::model::DuplicateRiskPolicy,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn applied_xadd_reply_loss(policy: DuplicateRiskPolicy) -> Result<(), Box<dyn std::error::Error>> {
     use qubit_event_bus::EventBus;
     use qubit_event_bus::codec::CodecRegistry;
     use qubit_event_bus::facade::EventBusFacadeConfig;
@@ -167,7 +175,7 @@ fn applied_xadd_reply_loss(
         .map(|entry| redis::from_redis_value(entry.map.get("wire").unwrap()).unwrap())
         .collect();
     for wire in &wires {
-        let fields: qubit_event_bus_redis::wire::WireFields = serde_json::from_str(wire)?;
+        let fields: WireFields = serde_json::from_str(wire)?;
         assert_eq!(fields.event_id, event_id.as_str());
     }
     assert!(
@@ -179,12 +187,12 @@ fn applied_xadd_reply_loss(
 
 #[test]
 fn applied_xadd_lost_reply_forbid_has_one_record() -> Result<(), Box<dyn std::error::Error>> {
-    applied_xadd_reply_loss(qubit_event_bus::model::DuplicateRiskPolicy::Forbid)
+    applied_xadd_reply_loss(DuplicateRiskPolicy::Forbid)
 }
 
 #[test]
 fn applied_xadd_lost_reply_allow_duplicates_does_not_blindly_retry() -> Result<(), Box<dyn std::error::Error>> {
-    applied_xadd_reply_loss(qubit_event_bus::model::DuplicateRiskPolicy::AllowDuplicates)
+    applied_xadd_reply_loss(DuplicateRiskPolicy::AllowDuplicates)
 }
 
 #[cfg(feature = "async")]
@@ -284,7 +292,7 @@ fn async_applied_xadd_reply_loss_covers_both_duplicate_policies() -> Result<(), 
             .map(|entry| redis::from_redis_value(entry.map.get("wire").unwrap()).unwrap())
             .collect();
         for wire in &wires {
-            let fields: qubit_event_bus_redis::wire::WireFields = serde_json::from_str(wire)?;
+            let fields: WireFields = serde_json::from_str(wire)?;
             assert_eq!(fields.event_id, event_id.as_str());
         }
         assert!(wires.windows(2).all(|pair| pair[0] == pair[1]));
@@ -295,29 +303,23 @@ fn async_applied_xadd_reply_loss_covers_both_duplicate_policies() -> Result<(), 
 /// Encodes the original bytes inside the DLQ envelope for a deterministic test
 /// transport.
 struct DeadBytesCodec(ContentType);
-impl qubit_event_bus::codec::EventCodec<qubit_event_bus::model::DeadLetterEvent<Vec<u8>>> for DeadBytesCodec {
+impl EventCodec<DeadLetterEvent<Vec<u8>>> for DeadBytesCodec {
     /// Uses the same test MIME type as the source codec.
     fn content_type(&self) -> &ContentType {
         &self.0
     }
     /// No schema is used by this test codec.
-    fn schema_id(&self) -> Option<&qubit_event_bus::model::SchemaId> {
+    fn schema_id(&self) -> Option<&SchemaId> {
         None
     }
     /// Copies original bytes while leaving DLQ identity and headers to the
     /// facade.
-    fn encode(
-        &self,
-        value: &qubit_event_bus::model::DeadLetterEvent<Vec<u8>>,
-    ) -> Result<Arc<[u8]>, qubit_event_bus::error::CodecError> {
+    fn encode(&self, value: &DeadLetterEvent<Vec<u8>>) -> Result<Arc<[u8]>, CodecError> {
         Ok(Arc::from(value.original_event().payload().as_slice()))
     }
     /// Receiving DLQ events is outside this failure-injection fixture.
-    fn decode(
-        &self,
-        _: &EncodedPayload,
-    ) -> Result<qubit_event_bus::model::DeadLetterEvent<Vec<u8>>, qubit_event_bus::error::CodecError> {
-        Err(qubit_event_bus::error::CodecError::Decode {
+    fn decode(&self, _: &EncodedPayload) -> Result<DeadLetterEvent<Vec<u8>>, CodecError> {
+        Err(CodecError::Decode {
             source: Box::new(std::io::Error::other("unused DLQ decoder")),
         })
     }
@@ -379,7 +381,7 @@ fn applied_dlq_xadd_lost_reply_stops_and_preserves_durable_source() -> Result<()
             .dead_letter(DeadLetterPolicy::with_topic_name("dead")?)
             .build()?,
         |_: Delivery<Vec<u8>>| {
-            Err(qubit_event_bus::DeliveryError::Handler {
+            Err(DeliveryError::Handler {
                 source: Box::new(std::io::Error::other("controlled handler failure")),
             })
         },
@@ -412,7 +414,7 @@ fn applied_dlq_xadd_lost_reply_stops_and_preserves_durable_source() -> Result<()
         .query(&mut observer)?;
     assert_eq!(pending.len(), 1);
     let request = SpiSubscriptionRequest::new(
-        qubit_id::Id::new(500),
+        Id::new(500),
         TopicAddress::new("events")?,
         SubscriberId::new("worker")?,
         Some(ConsumerGroup::new("group")?),
@@ -497,7 +499,7 @@ fn async_applied_dlq_reply_loss_preserves_durable_source() -> Result<(), Box<dyn
                         .consumer_group(ConsumerGroup::new("group").unwrap())
                         .durability(SubscriptionDurability::Durable)
                         .start_position(StartPosition::Earliest)
-                        .retry_policy(qubit_retry::RetryPolicy::builder().max_attempts(3).build().unwrap())
+                        .retry_policy(RetryPolicy::builder().max_attempts(3).build().unwrap())
                         .error_handler(|_, _| FailureDirective::DeadLetter)
                         .dead_letter(DeadLetterPolicy::with_topic_name("dead").unwrap())
                         .build()
@@ -507,16 +509,13 @@ fn async_applied_dlq_reply_loss_preserves_durable_source() -> Result<(), Box<dyn
                 .unwrap();
             let failure = subscription
                 .run(|_| async {
-                    Err(qubit_event_bus::DeliveryError::Handler {
+                    Err(DeliveryError::Handler {
                         source: Box::new(std::io::Error::other("controlled async handler failure")),
                     })
                 })
                 .await
                 .unwrap_err();
-            assert!(matches!(
-                failure,
-                qubit_event_bus::error::ReceiveError::DeadLetterForwardFailed { .. }
-            ));
+            assert!(matches!(failure, ReceiveError::DeadLetterForwardFailed { .. }));
             subscription.close().await.unwrap();
             facade
                 .shutdown(ShutdownMode::Graceful {
@@ -547,7 +546,7 @@ fn async_applied_dlq_reply_loss_preserves_durable_source() -> Result<(), Box<dyn
     assert_eq!(pending.len(), 1);
     futures_lite::future::block_on(async {
         let request = SpiSubscriptionRequest::new(
-            qubit_id::Id::new(600),
+            Id::new(600),
             TopicAddress::new("events")?,
             SubscriberId::new("worker")?,
             Some(ConsumerGroup::new("group")?),

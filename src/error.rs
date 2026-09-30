@@ -10,7 +10,11 @@
 #[cfg(any(feature = "sync", feature = "async"))]
 use qubit_event_bus::error::SpiError;
 #[cfg(any(feature = "sync", feature = "async"))]
+use qubit_event_bus::model::PublishEffect;
+#[cfg(any(feature = "sync", feature = "async"))]
 use qubit_event_bus::spi::TopicAddress;
+#[cfg(any(feature = "sync", feature = "async"))]
+use redis::ErrorKind;
 #[cfg(any(feature = "sync", feature = "async"))]
 use redis::RedisError;
 
@@ -68,14 +72,18 @@ pub(crate) fn to_spi_error(
 }
 
 /// Converts a failed publish with admission evidence from the call site.
-/// Returns the stable publish error variant without retaining client
-/// diagnostics.
+///
+/// # Parameters
+///
+/// - `topic`: Topic associated with the failed publish.
+/// - `source`: Sanitized provider error describing the failure.
+/// - `effect`: Evidence indicating whether Redis may have accepted the write.
+///
+/// # Returns
+///
+/// A stable SPI publish error without raw client diagnostics.
 #[cfg(any(feature = "sync", feature = "async"))]
-pub(crate) fn to_publish_error(
-    topic: &TopicAddress,
-    source: RedisProviderError,
-    effect: qubit_event_bus::model::PublishEffect,
-) -> SpiError {
+pub(crate) fn to_publish_error(topic: &TopicAddress, source: RedisProviderError, effect: PublishEffect) -> SpiError {
     let error = to_spi_error("publish", Some(topic), source);
     let SpiError::Operation {
         provider_id,
@@ -101,15 +109,25 @@ pub(crate) fn to_publish_error(
 /// Classifies failures after XADD entered query. Only actual server error codes
 /// prove rejection. Type conversion, protocol, timeout, and disconnect failures
 /// remain uncertain.
+///
+/// # Parameters
+///
+/// - `topic`: Topic associated with the publish command.
+/// - `error`: Redis failure returned after submitting `XADD`.
+///
+/// # Returns
+///
+/// A publish SPI error that distinguishes proven rejection from an uncertain
+/// write outcome.
 #[cfg(any(feature = "sync", feature = "async"))]
 pub(crate) fn query_publish_error(topic: &TopicAddress, error: &RedisError) -> SpiError {
-    use qubit_event_bus::model::PublishEffect;
+    use PublishEffect;
     let effect = if error.code().is_some() {
         PublishEffect::NotAccepted
     } else {
         PublishEffect::MayHaveBeenAccepted
     };
-    let source = if error.kind() == redis::ErrorKind::TypeError && error.code().is_none() {
+    let source = if error.kind() == ErrorKind::TypeError && error.code().is_none() {
         RedisProviderError::Transport {
             operation: "publish",
             kind: "protocol",
@@ -125,12 +143,20 @@ pub(crate) fn query_publish_error(topic: &TopicAddress, error: &RedisError) -> S
 
 /// Reports a syntactically invalid XADD acknowledgement after the command was
 /// submitted.
+///
+/// # Parameters
+///
+/// - `topic`: Topic associated with the submitted publish command.
+///
+/// # Returns
+///
+/// A publish SPI error with an uncertain acceptance outcome.
 #[cfg(any(feature = "sync", feature = "async"))]
 pub(crate) fn invalid_publish_reply(topic: &TopicAddress) -> SpiError {
     to_publish_error(
         topic,
         RedisProviderError::OutcomeUnknown { operation: "publish" },
-        qubit_event_bus::model::PublishEffect::MayHaveBeenAccepted,
+        PublishEffect::MayHaveBeenAccepted,
     )
 }
 

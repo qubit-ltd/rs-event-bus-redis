@@ -69,6 +69,7 @@ impl AsyncEventBusSpi for AsyncRedisEventBus {
     /// # Returns
     ///
     /// The static capability set supported by this Redis Streams backend.
+    #[inline]
     fn capabilities(&self) -> EventBusCapabilities {
         EventBusCapabilities::new(
             PayloadModes::Encoded,
@@ -91,13 +92,13 @@ impl AsyncEventBusSpi for AsyncRedisEventBus {
     /// before the reply leaves the publish outcome unknown, so a retry may
     /// append a duplicate.
     ///
+    /// # Type Parameters
+    ///
+    /// - `'a`: Lifetime shared by the bus borrow and the returned future.
     /// # Parameters
     ///
     /// - `message`: Event with an encoded payload and its transport metadata.
     ///
-    /// # Type Parameters
-    ///
-    /// - `'a`: Lifetime shared by the bus borrow and the returned future.
     ///
     /// # Returns
     ///
@@ -162,14 +163,14 @@ impl AsyncEventBusSpi for AsyncRedisEventBus {
     /// Unsettled entries remain in the pending entries list when a read future
     /// is cancelled or a receiver is closed.
     ///
+    /// # Type Parameters
+    ///
+    /// - `'a`: Lifetime shared by the bus borrow and the returned future.
     /// # Parameters
     ///
     /// - `request`: Topic, group, start position, and identity for the
     ///   receiver.
     ///
-    /// # Type Parameters
-    ///
-    /// - `'a`: Lifetime shared by the bus borrow and the returned future.
     ///
     /// # Returns
     ///
@@ -303,10 +304,6 @@ impl AsyncEventBusSpi for AsyncRedisEventBus {
 
     /// Completes shutdown without acknowledging any unsettled delivery.
     ///
-    /// # Returns
-    ///
-    /// A future resolving to `Complete`; pending records remain in Redis.
-    ///
     /// # Type Parameters
     ///
     /// - `'a`: Lifetime shared by the bus borrow and the returned future.
@@ -316,10 +313,15 @@ impl AsyncEventBusSpi for AsyncRedisEventBus {
     /// - `_mode`: Facade shutdown request; this implementation issues no Redis
     ///   command.
     ///
+    /// # Returns
+    ///
+    /// A future resolving to `Complete`; pending records remain in Redis.
+    ///
     /// # Errors
     ///
     /// The returned future always resolves successfully; pending PEL state is
     /// untouched.
+    #[inline]
     fn shutdown<'a>(&'a self, _mode: ShutdownMode) -> SpiFuture<'a, Result<ShutdownOutcome, SpiError>> {
         Box::pin(async { Ok(ShutdownOutcome::Complete) })
     }

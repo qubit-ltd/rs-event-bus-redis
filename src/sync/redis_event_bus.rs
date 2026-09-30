@@ -69,6 +69,7 @@ impl EventBusSpi for RedisEventBus {
     /// # Returns
     ///
     /// The static capability set supported by this backend.
+    #[inline]
     fn capabilities(&self) -> EventBusCapabilities {
         redis_capabilities()
     }
@@ -269,15 +270,20 @@ impl EventBusSpi for RedisEventBus {
 
     /// Completes shutdown without acknowledging pending messages.
     ///
-    /// # Returns
-    ///
-    /// `Complete`; any unsettled records remain in the Redis pending entries
-    /// list. No command is sent and this implementation cannot return an error.
-    ///
     /// # Parameters
     ///
     /// - `_mode`: Facade shutdown request; both modes complete without extra
     ///   Redis I/O.
+    ///
+    /// # Returns
+    ///
+    /// `Complete`; any unsettled records remain in the Redis pending entries
+    /// list.
+    ///
+    /// # Errors
+    ///
+    /// This implementation always succeeds without sending a Redis command.
+    #[inline]
     fn shutdown(&self, _mode: ShutdownMode) -> Result<ShutdownOutcome, SpiError> {
         Ok(ShutdownOutcome::Complete)
     }
@@ -341,6 +347,7 @@ pub(super) const fn redis_capabilities() -> EventBusCapabilities {
 /// A classified SPI operation error without raw Redis diagnostics; retryability
 /// reflects both the failure category and whether that operation can safely
 /// recover.
+#[inline]
 pub(super) fn spi_error(operation: &'static str, topic: Option<&TopicAddress>, source: RedisProviderError) -> SpiError {
     crate::error::to_spi_error(operation, topic, source)
 }

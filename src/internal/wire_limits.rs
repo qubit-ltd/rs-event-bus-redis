@@ -34,6 +34,7 @@ impl Default for WireLimits {
 
 impl WireLimits {
     /// Copies the validated byte budgets from provider configuration.
+    #[must_use]
     pub(crate) fn from_config(config: &RedisEventBusConfig) -> Self {
         Self {
             wire: config.max_wire_bytes(),

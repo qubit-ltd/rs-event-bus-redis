@@ -10,6 +10,7 @@
 use super::poison_reason::PoisonReason;
 /// Separates incompatible records from records safe to quarantine.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[must_use]
 pub(crate) enum DecodeFailure {
     /// The record is malformed and can be transferred to quarantine.
     Poison(

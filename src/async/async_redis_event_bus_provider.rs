@@ -46,7 +46,7 @@ use crate::error::RedisProviderError;
 ///     .create_configured(&config)
 ///     .await
 ///     .map_err(|failure| failure.into_error())?;
-/// let _capabilities = bus.capabilities();
+/// assert_eq!(bus.capabilities().payload_modes(), qubit_event_bus::spi::PayloadModes::Encoded);
 /// # Ok(())
 /// # }
 /// # futures_lite::future::block_on(example()).expect("lazy provider creation succeeds");
@@ -123,6 +123,7 @@ impl AsyncServiceProvider<EventBusSpec> for AsyncRedisEventBusProvider {
 /// # Returns
 ///
 /// An SPI error that omits the raw Redis client diagnostic.
+#[inline]
 pub(super) fn spi_error(operation: &'static str, topic: Option<&TopicAddress>, source: RedisProviderError) -> SpiError {
     crate::error::to_spi_error(operation, topic, source)
 }

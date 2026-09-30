@@ -176,6 +176,7 @@ impl RecoveryScanBudget {
     /// `true` after exactly one reservation, or `false` when the phase,
     /// deadline, or shared limit forbids it. Zero timeout permits one
     /// command per phase.
+    #[must_use]
     pub(crate) fn take_recovery_command(&mut self, stage: RecoveryScanStage, now: Instant) -> bool {
         if self.command_count >= MAX_SCAN_COMMANDS_PER_ROUND {
             return false;
@@ -211,6 +212,7 @@ impl RecoveryScanBudget {
     ///
     /// `true` after reservation; `false` for zero timeout, an expired deadline,
     /// or a previously reserved probe. This method does not issue Redis I/O.
+    #[must_use]
     pub(crate) fn take_tombstone_probe(&mut self, now: Instant) -> bool {
         if self.zero_timeout || !self.within_deadline(now) || self.tombstone_probe_used {
             return false;
@@ -229,6 +231,7 @@ impl RecoveryScanBudget {
     ///
     /// `true` after reservation; `false` without mutation when zero timeout,
     /// deadline, missing probe, or the four-range cap prevents a command.
+    #[must_use]
     pub(crate) fn take_tombstone_range(&mut self, now: Instant) -> bool {
         if self.zero_timeout
             || !self.within_deadline(now)
@@ -251,6 +254,7 @@ impl RecoveryScanBudget {
     ///
     /// `true` after reservation; `false` when deadline or quota prevents it.
     /// Zero timeout permits one poison evaluation and no tombstone probes.
+    #[must_use]
     pub(crate) fn take_maintenance_evaluation(&mut self, now: Instant) -> bool {
         if !self.within_deadline(now) {
             return false;

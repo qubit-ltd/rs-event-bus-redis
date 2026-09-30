@@ -227,6 +227,7 @@ pub(crate) fn parse_pending_entries(value: Value) -> Result<Vec<(String, String,
 /// # Returns
 ///
 /// A static diagnostic without source keys, wire bytes, or raw server details.
+#[must_use]
 fn invalid_reply() -> RedisError {
     RedisError::from((ErrorKind::TypeError, "invalid Redis Streams response"))
 }
