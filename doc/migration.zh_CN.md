@@ -1,12 +1,70 @@
-# 迁移到 Redis provider 0.5
+# 迁移到 Redis provider 0.6
 
 [English](migration.md) · [用户指南](user_guide.zh_CN.md)
 
-将 `qubit-event-bus-redis` 从 0.4 升级到 0.5 时，须同时采用
-`qubit-event-bus` 0.17。一起更新直接依赖、下游 fixture 和 lockfile，不能混用
+将 `qubit-event-bus-redis` 从 0.5 升级到 0.6 时，须同时采用
+`qubit-event-bus` 0.18。一起更新直接依赖、下游 fixture 和 lockfile，不能混用
 不同 SPI minor。`decode(&EncodedPayload)`、`PublishFailure` 和
 `PayloadLimits` 的迁移见[核心迁移指南](https://github.com/qubit-ltd/rs-event-bus/blob/main/doc/migration.zh_CN.md)。
 codec 应精确验证元数据；需要读取历史 schema 时，明确记录并实现允许的版本集合。
+
+## 替换调度配置并明确结算策略
+
+旧的 `SyncDeliverySchedulerConfig` / `DeliveryAdmissionConfig` 及对应 facade setter/getter 已删除。原来的执行与队列预算不能直接当成新的持有预算，应明确选择四个正数限额：
+
+```rust,ignore
+// Before: qubit-event-bus 0.17 only.
+use qubit_event_bus::facade::DeliveryAdmissionConfig;
+use qubit_event_bus::facade::EventBusFacadeConfig;
+use qubit_event_bus::facade::SyncDeliverySchedulerConfig;
+
+let facade = EventBusFacadeConfig::new()
+    .with_sync_delivery_scheduler(SyncDeliverySchedulerConfig::new(4, 256)?)
+    .with_delivery_admission(DeliveryAdmissionConfig::new(256)?);
+```
+
+升级到 core 0.18 后，在创建总线时调用下面的函数，并保留已有 codec registry 配置：
+
+```rust
+use std::num::NonZeroU32;
+use std::num::NonZeroUsize;
+use std::time::Duration;
+
+use qubit_event_bus::error::ConfigurationError;
+use qubit_event_bus::facade::DeliverySchedulingConfig;
+use qubit_event_bus::facade::EventBusFacadeConfig;
+use qubit_event_bus::facade::SettlementRetryConfig;
+
+fn facade_config() -> Result<EventBusFacadeConfig, ConfigurationError> {
+    let scheduling = DeliverySchedulingConfig::new(
+        NonZeroUsize::new(4).expect("positive running limit"),
+        NonZeroUsize::new(256).expect("positive owned limit"),
+        NonZeroUsize::new(32).expect("positive per-subscription limit"),
+        NonZeroUsize::new(256).expect("positive subscription limit"),
+    )?;
+    let settlement = SettlementRetryConfig::new(
+        NonZeroU32::new(5).expect("positive attempt limit"),
+        Duration::from_secs(5),
+        Duration::from_millis(10),
+        Duration::from_secs(1),
+    )?;
+    Ok(EventBusFacadeConfig::new()
+        .with_delivery_scheduling(scheduling)
+        .with_settlement_retry(settlement))
+}
+```
+
+参数依次是同时运行的 handler、全局持有投递、每订阅持有投递和注册订阅数，默认 4/256/32/256。运行量与每订阅持有量均不能超过全局持有量。持有量覆盖接收预留、排队、handler 与结算，异步暂停 session 仍计入注册数。旧 queue=0 不再表示直接交接：若符合原有背压意图，可以设置 owned=running，同时明确选择正数的每订阅和订阅数量限制。这是新的容量模型，不是等价的队列参数换算。
+
+`SettlementRetryConfig` 默认总尝试五次（含首次）、累计五秒、首次退避 10 ms、最大退避一秒。设置一次尝试可禁用重试。只有 `retryable() == Some(true)` 才重试；`Some(false)` 和 `None` 都停止，后者归类为 `RetryabilityUnknown`。panic、无效 token 和基础设施失败也会停止。elapsed 预算约束尝试与退避，不能强制取消在途调用；超过截止点返回成功仍算成功。
+
+## 更新诊断与恢复流程
+
+`Diagnostic::SettlementFailed.error` 由 `Box<str>` 改为 `Arc<SpiError>`，`attempt` 表示从 1 开始的 SPI 尝试次数。新增 `Diagnostic::SettlementStopped` 携带最终 `attempts` 和 `termination`。更新匹配代码，读取结构化错误字段并保留原因链，不按格式化字符串分类；匹配非穷尽 diagnostic enum 时保留 `_` 分支。`terminal_failure()` 中的 `SubscriptionStopReason::Settlement` 保存相同上下文，清理失败不能覆盖首个终止原因。
+
+通过 `bus.delivery_metrics()` 和 `subscription.delivery_metrics().metrics` 区分排队、运行中 handler、结算重试和终止失败。保存快照后关闭失败订阅，修复原因，再使用相同 namespace/topic/group 创建新的持久订阅。pending 历史只有在尚未被裁剪且满足 `redis.claim_min_idle_ms` 条件时才能认领；更改 `StartPosition` 不会回退已有 group。若 Redis 已执行 `XACK` 但回复丢失，可能已无待恢复消息。
+
+优雅关闭除了返回报告，也可能返回 `Err(ShutdownError::TimedOut)`。两次有界等待策略必须先处理首个超时，再尝试一次；第二次仍未完成则交外部监督器处理，详见[用户指南](user_guide.zh_CN.md)。不能用 `Immediate` 作为超时救援。调用方等待有界不代表不合作的工作或进程必然退出。
 
 wire 版本 1 继续支持。部署前测试真实保留的 stream 数据；Rust API 升级不需要
 删除 stream 或消费组。限额内格式错误的版本 1 记录仍采用既有隔离并确认路径；

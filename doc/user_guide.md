@@ -1,6 +1,6 @@
 # Redis Streams User Guide
 
-**For:** Rust service developers using `qubit-event-bus` 0.17 and `qubit-event-bus-redis` 0.5. This guide shows how an order publisher and billing consumer share events through Redis while keeping application code on the event-bus facade.
+**For:** Rust service developers using `qubit-event-bus` 0.18 and `qubit-event-bus-redis` 0.6. This guide shows how an order publisher and billing consumer share events through Redis while keeping application code on the event-bus facade.
 
 [简体中文](user_guide.zh_CN.md) · [README](../README.md) · [API docs](https://docs.rs/qubit-event-bus-redis)
 
@@ -10,12 +10,12 @@ Add both the facade and provider as direct dependencies. `discovery` is on by de
 
 ```toml
 [dependencies]
-qubit-event-bus = { version = "0.17", features = ["discovery"] }
-qubit-event-bus-redis = "0.5"
+qubit-event-bus = { version = "0.18", features = ["discovery"] }
+qubit-event-bus-redis = "0.6"
 qubit-spi = "0.13"
 ```
 
-The version dependency form shows the package relationships. To use the unreleased changes described here, replace the provider dependency with a `path` to this checkout; use the verified local facade path for an unpublished upstream snapshot too. Repository example commands run current sources and do not establish registry availability.
+Use matching core and provider minor versions, and update the lockfile with both packages together. The repository examples use the current checkout; consult the migration guide before upgrading an existing deployment.
 
 For discovery, disable defaults and select `features = ["sync", "discovery"]` or `["async", "discovery"]` on the provider, and enable facade `discovery`. For manual registration, provider `features = ["sync"]` or `["async"]` suffice; facade discovery is unnecessary. `async` enables the Redis client's Smol adapter; its futures can be polled by a Smol or Tokio host. The crate does not start a Tokio runtime or spawn a subscription worker; the facade's async runner is polled by the application's executor.
 
@@ -328,6 +328,34 @@ Each subscription stops receiving new entries while its unsettled count reaches 
 
 Without `redis.stream_maxlen_approx`, the provider does not trim streams; it never deletes groups automatically. Monitor Redis memory and stream growth. Before deleting a stream or group, stop consumers and decide how to handle every pending event; deleting pending records can produce `ReceiveOutcome::Gap`. Configure Redis persistence and replication to match the application's recovery objectives: `Accepted` does not mean fsynced, and Sentinel replication can lose writes that were not replicated before promotion.
 
+### Bound facade work and stop settlement failures
+
+`EventBusFacadeConfig::with_delivery_scheduling` sets `DeliverySchedulingConfig` for both sync and async buses. Its four positive limits default to **4 running handlers, 256 owned deliveries, 32 owned per subscription, and 256 registered subscriptions**. Ownership includes receive reservations, queued messages, running handlers, and settlement. `max_running_handlers` and `max_owned_per_subscription` must not exceed `max_owned_deliveries`. The provider's separate 100-unsettled limit remains in effect; these are count limits, not a total memory budget. A paused async session still occupies a subscription slot until close or terminal cleanup.
+
+A queued hot key and settlement backoff do not consume a running-handler slot. Fairness for an eligible B alongside A applies when B can reserve owned capacity or has already been received; it does not discover B behind an arbitrary unread A backlog. Redis declares no per-key ordering, so this scheduler does not add that unsupported guarantee.
+
+Configure settlement with `EventBusFacadeConfig::with_settlement_retry(SettlementRetryConfig::new(...)?);` see the [migration example](migration.md). Defaults are **5 total attempts including the first, 5 seconds from just before the first SPI attempt, 10 ms initial backoff, and 1 second maximum backoff**. Only `SpiError::retryable() == Some(true)` allows retry. `Some(false)` stops immediately; `None` stops as `RetryabilityUnknown`. Panic, invalid token, clock, or timer failures also terminate. The budget is checked between attempts; it cannot cancel a blocked in-flight Redis command, and late success remains success. An async settle cancelled by pausing still consumes its started attempt; resuming continues the same finite budget.
+
+When settlement terminates, the facade records the first cause before cleanup and stops new receives and handler starts. Already started work can finish; close failures do not overwrite the original cause. Inspect `subscription.terminal_failure()` for `SubscriptionStopReason::Settlement` with event ID, disposition, attempts, termination, and structured `Arc<SpiError>`. Diagnostics emit `SettlementFailed` per failed attempt and one `SettlementStopped` for terminal settlement. Preserve this context in telemetry.
+
+Read `bus.delivery_metrics()` and `subscription.delivery_metrics().metrics` for `reserved_receives`, `queued`, `running_handlers`, `settling`, `lane_waiting`, `settlement_attempts`, `settlement_retries`, `settlement_terminal_failures`, `completed`, handler/settlement duration count, total and maximum, and `oldest_owned_age`. `lane_waiting` is part of `queued`; retries count actual SPI calls after the first. Snapshots are not transactional across concurrent changes. Closed subscription handles retain counters, and bus counters survive subscription removal. These facade snapshots do not measure Redis PEL or reconnect state: also inspect `XPENDING` and `XINFO GROUPS`.
+
+To recover, record the first cause and snapshots, correct connectivity, codec, limits, or policy as appropriate, finish closing the failed subscription, and create a new `Durable` subscription with the **same namespace, topic, and group**. Its new consumer can claim retained pending work after `redis.claim_min_idle_ms`; `StartPosition` does not reset the existing group. Recovery depends on record retention and claim policy: trimming or deletion can destroy pending history, and an already applied `XACK` whose reply was lost leaves nothing to claim. Repeated settlement of the same token and disposition is idempotent; that does not make business handling exactly once.
+
+### Bound facade work and stop settlement failures
+
+`EventBusFacadeConfig::with_delivery_scheduling` sets `DeliverySchedulingConfig` for both sync and async buses. Its four positive limits default to **4 running handlers, 256 owned deliveries, 32 owned per subscription, and 256 registered subscriptions**. Ownership includes receive reservations, queued messages, running handlers, and settlement. `max_running_handlers` and `max_owned_per_subscription` must not exceed `max_owned_deliveries`. The provider's separate 100-unsettled limit remains in effect; these are count limits, not a total memory budget. A paused async session still occupies a subscription slot until close or terminal cleanup.
+
+A queued hot key and settlement backoff do not consume a running-handler slot. Fairness for an eligible B alongside A applies when B can reserve owned capacity or has already been received; it does not discover B behind an arbitrary unread A backlog. Redis declares no per-key ordering, so this scheduler does not add that unsupported guarantee.
+
+Configure settlement with `EventBusFacadeConfig::with_settlement_retry(SettlementRetryConfig::new(...)?);` see the [migration example](migration.md). Defaults are **5 total attempts including the first, 5 seconds from just before the first SPI attempt, 10 ms initial backoff, and 1 second maximum backoff**. Only `SpiError::retryable() == Some(true)` allows retry. `Some(false)` stops immediately; `None` stops as `RetryabilityUnknown`. Panic, invalid token, clock, or timer failures also terminate. The budget is checked between attempts; it cannot cancel a blocked in-flight Redis command, and late success remains success. An async settle cancelled by pausing still consumes its started attempt; resuming continues the same finite budget.
+
+When settlement terminates, the facade records the first cause before cleanup and stops new receives and handler starts. Already started work can finish; close failures do not overwrite the original cause. Inspect `subscription.terminal_failure()` for `SubscriptionStopReason::Settlement` with event ID, disposition, attempts, termination, and structured `Arc<SpiError>`. Diagnostics emit `SettlementFailed` per failed attempt and one `SettlementStopped` for terminal settlement. Preserve this context in telemetry.
+
+Read `bus.delivery_metrics()` and `subscription.delivery_metrics().metrics` for `reserved_receives`, `queued`, `running_handlers`, `settling`, `lane_waiting`, `settlement_attempts`, `settlement_retries`, `settlement_terminal_failures`, `completed`, handler/settlement duration count, total and maximum, and `oldest_owned_age`. `lane_waiting` is part of `queued`; retries count actual SPI calls after the first. Snapshots are not transactional across concurrent changes. Closed subscription handles retain counters, and bus counters survive subscription removal. These facade snapshots do not measure Redis PEL or reconnect state: also inspect `XPENDING` and `XINFO GROUPS`.
+
+To recover, record the first cause and snapshots, correct connectivity, codec, limits, or policy as appropriate, finish closing the failed subscription, and create a new `Durable` subscription with the **same namespace, topic, and group**. Its new consumer can claim retained pending work after `redis.claim_min_idle_ms`; `StartPosition` does not reset the existing group. Recovery depends on record retention and claim policy: trimming or deletion can destroy pending history, and an already applied `XACK` whose reply was lost leaves nothing to claim. Repeated settlement of the same token and disposition is idempotent; that does not make business handling exactly once.
+
 ### Bound one record and recover an incompatible consumer
 
 The provider options `redis.max_wire_bytes`, `redis.max_payload_bytes`, and `redis.max_headers_bytes` default to 8,388,608, 1,048,576, and 65,536 bytes. Values must be positive integers; zero, invalid numbers, and overflow are configuration errors. They are independent: JSON expansion can exceed the wire limit even when payload bytes fit. The facade's separate `PayloadLimits` defaults to 1 MiB in both directions; configure both layers deliberately.
@@ -408,9 +436,10 @@ Redis persistence and replication are deployment responsibilities. `Accepted` pr
 
 With `qubit-task` notifications, consumers should deduplicate by `TaskId` and retain the highest `state_version`, ignoring duplicate/older notifications and querying the task service for authoritative state. Notification failure does not roll back committed task/business state; notifications can be lost, delayed or repeated. The provider and task notification integration do not supply a transactional outbox. If a business transaction must commit together with a durable notification, implement that outbox and its publisher in the application.
 
-## 12. Migrate to this unreleased tree
+## 12. Upgrade from provider 0.5
 
-Cargo still reports `0.4.0`; these changes have not been published as `0.5.0`. Review the new default timeouts, 64-operation/256-receiver caps, and 1MiB/8MiB payload/wire limits before upgrading. Tune both related idle/concurrency settings, handle new provider error variants and stable SPI kinds, and remove assumptions that every transport error permits safe publish replay or that unknown ACK permits a new disposition. Receive timeouts remain scheduling budgets rather than hard synchronous deadlines. Wire stays at version 1, so stored v1 records keep their format; old oversized records follow the configured quarantine policy. Manual registration and discovery use different feature sets as shown above.
+Upgrade `qubit-event-bus-redis` to 0.6 together with `qubit-event-bus` 0.18. The [migration guide](migration.md) lists removed facade configuration, new ownership limits, settlement retry behavior, structured terminal diagnostics, and recovery steps. Keep stored wire version 1 data and consumer groups; test retained pending entries before rollout.
+
 
 See [design](design.md), [coverage evidence](coverage-review.md), and [workload benchmark](connection-reuse-benchmark.md). Performance/coverage results require their own measured evidence; this guide makes no new throughput or final coverage claim.
 

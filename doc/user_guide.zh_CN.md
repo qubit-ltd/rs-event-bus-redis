@@ -1,6 +1,6 @@
 # Redis Streams 用户指南
 
-**读者：** 使用 `qubit-event-bus` 0.17 和 `qubit-event-bus-redis` 0.5 的 Rust 服务开发者。本指南以订单发布服务和账单消费服务为例，说明如何通过 Redis 共享事件，同时让应用代码继续使用 event-bus facade。
+**读者：** 使用 `qubit-event-bus` 0.18 和 `qubit-event-bus-redis` 0.6 的 Rust 服务开发者。本指南以订单发布服务和账单消费服务为例，说明如何通过 Redis 共享事件，同时让应用代码继续使用 event-bus facade。
 
 [English](user_guide.md) · [README](../README.zh_CN.md) · [API 文档](https://docs.rs/qubit-event-bus-redis)
 
@@ -10,12 +10,12 @@
 
 ```toml
 [dependencies]
-qubit-event-bus = { version = "0.17", features = ["discovery"] }
-qubit-event-bus-redis = "0.5"
+qubit-event-bus = { version = "0.18", features = ["discovery"] }
+qubit-event-bus-redis = "0.6"
 qubit-spi = "0.13"
 ```
 
-这里的版本写法用于展示依赖关系。使用本文所述未发布变更时，应将 provider 依赖改为指向当前 checkout 的 `path`；上游 facade 尚未发布的快照也应使用已核对的本地路径。仓库 example 命令运行当前源码，不能据此推断 registry 版本可用。
+core 和 provider 应使用对应的 minor 版本，并一起更新 lockfile。仓库 examples 基于当前 checkout；升级已有服务前，先按迁移指南检查版本变化和恢复步骤。
 
 采用自动发现时，provider 关闭默认 feature 后应选择 `["sync", "discovery"]` 或 `["async", "discovery"]`，facade 也须启用 `discovery`。采用手动注册时，provider 只需 `["sync"]` 或 `["async"]`，facade 无须启用发现功能。`async` 可以使用 Redis client 的 Smol adapter，也能在 Tokio host 中运行。crate 不会启动 Tokio runtime 或生成订阅 worker；异步 facade 的 runner 由应用现有 executor 驱动。
 
@@ -328,6 +328,34 @@ Redis 提供至少一次投递，因此 handler 应具备幂等性。如果 hand
 
 未设置 `redis.stream_maxlen_approx` 时，provider 不会裁剪 stream，也不会自动删除 group。应监控 Redis 内存和 stream 增长。删除 stream 或 group 前，先停止 consumer 并决定如何处理 pending 消息；删除 pending record 可能导致 `ReceiveOutcome::Gap`。Redis persistence 和 replication 配置需符合业务恢复目标：`Accepted` 不代表已 fsync，Sentinel 切换也可能丢失尚未复制的写入。
 
+### 限制 facade 工作量并收敛结算失败
+
+同步与异步总线都通过 `EventBusFacadeConfig::with_delivery_scheduling` 配置 `DeliverySchedulingConfig`。四个正数限额默认依次为：**同时运行 4 个 handler、全局持有 256 条投递、每订阅持有 32 条投递、注册 256 个订阅**。持有量包括接收预留、已收待执行、运行中和结算中的投递。`max_running_handlers`、`max_owned_per_subscription` 均不能超过 `max_owned_deliveries`。provider 自身默认 100 条未结算记录的限额仍然生效；这些限制约束数量，不代表进程总内存预算。暂停的异步 session 仍占用订阅名额，直到关闭或终止清理完成。
+
+等待中的热点键和结算退避不会占用 handler 执行名额。A 与 B 之间的公平调度要求 B 有可预留的持有额度，或者已被接收且可执行；不能据此保证穿透任意长度、尚未读取的 A 积压。Redis 声明不支持按键顺序，新调度器也不会赋予 Redis 该保证。
+
+结算策略使用 `EventBusFacadeConfig::with_settlement_retry(SettlementRetryConfig::new(...)?);`，完整参数见[迁移示例](migration.zh_CN.md)。默认**总共尝试 5 次（含首次），从首次 SPI 尝试前开始计时最多 5 秒，首次退避 10 ms，最大退避 1 秒**。只有 `SpiError::retryable() == Some(true)` 允许重试；`Some(false)` 立即停止，`None` 以 `RetryabilityUnknown` 停止。panic、无效 token、时钟或 timer 失败也会终止。预算在尝试之间检查，不能取消已阻塞的 Redis 命令；超过截止点返回成功仍按成功处理。异步暂停取消了在途 settle 时，已经开始的 attempt 仍计入预算，恢复后继续使用原有有限预算。
+
+结算终止时，facade 先记录首个原因，再清理并停止新的接收和 handler 启动。已启动的工作可继续完成，关闭失败不会覆盖原始原因。通过 `subscription.terminal_failure()` 获取 `SubscriptionStopReason::Settlement`，其中包含事件 ID、disposition、attempts、termination 和结构化 `Arc<SpiError>`。每次失败产生 `SettlementFailed`，首次终止产生一次 `SettlementStopped`；应把这些上下文保存到 telemetry。
+
+使用 `bus.delivery_metrics()` 和 `subscription.delivery_metrics().metrics` 查看 `reserved_receives`、`queued`、`running_handlers`、`settling`、`lane_waiting`、`settlement_attempts`、`settlement_retries`、`settlement_terminal_failures`、`completed`、handler/settlement 耗时样本数、总量、最大值及 `oldest_owned_age`。`lane_waiting` 是 `queued` 的子集，重试计数只累计首次之后真正进入 SPI 的调用。并发变化期间的快照不保证事务一致性。关闭后的订阅句柄保留计数，总线累计值也不会随订阅移除而消失。这些 facade 快照不表示 Redis PEL 或重连状态，还需检查 `XPENDING` 和 `XINFO GROUPS`。
+
+恢复时先保存首个原因和快照，按错误修复连接、codec、限额或策略，完成失败订阅的关闭，然后使用**相同 namespace、topic 和 group** 创建新的 `Durable` 订阅。新的 consumer 达到 `redis.claim_min_idle_ms` 条件后可认领保留的 pending 消息；`StartPosition` 不会重置已有 group。能否恢复取决于记录保留情况和 claim 策略：裁剪或删除可能破坏 pending 历史，已执行 `XACK` 但回复丢失时也没有可认领的消息。同一 token、同一 disposition 的重复结算是幂等的，但业务处理仍不保证恰好一次。
+
+### 限制 facade 工作量并收敛结算失败
+
+同步与异步总线都通过 `EventBusFacadeConfig::with_delivery_scheduling` 配置 `DeliverySchedulingConfig`。四个正数限额默认依次为：**同时运行 4 个 handler、全局持有 256 条投递、每订阅持有 32 条投递、注册 256 个订阅**。持有量包括接收预留、已收待执行、运行中和结算中的投递。`max_running_handlers`、`max_owned_per_subscription` 均不能超过 `max_owned_deliveries`。provider 自身默认 100 条未结算记录的限额仍然生效；这些限制约束数量，不代表进程总内存预算。暂停的异步 session 仍占用订阅名额，直到关闭或终止清理完成。
+
+等待中的热点键和结算退避不会占用 handler 执行名额。A 与 B 之间的公平调度要求 B 有可预留的持有额度，或者已被接收且可执行；不能据此保证穿透任意长度、尚未读取的 A 积压。Redis 声明不支持按键顺序，新调度器也不会赋予 Redis 该保证。
+
+结算策略使用 `EventBusFacadeConfig::with_settlement_retry(SettlementRetryConfig::new(...)?);`，完整参数见[迁移示例](migration.zh_CN.md)。默认**总共尝试 5 次（含首次），从首次 SPI 尝试前开始计时最多 5 秒，首次退避 10 ms，最大退避 1 秒**。只有 `SpiError::retryable() == Some(true)` 允许重试；`Some(false)` 立即停止，`None` 以 `RetryabilityUnknown` 停止。panic、无效 token、时钟或 timer 失败也会终止。预算在尝试之间检查，不能取消已阻塞的 Redis 命令；超过截止点返回成功仍按成功处理。异步暂停取消了在途 settle 时，已经开始的 attempt 仍计入预算，恢复后继续使用原有有限预算。
+
+结算终止时，facade 先记录首个原因，再清理并停止新的接收和 handler 启动。已启动的工作可继续完成，关闭失败不会覆盖原始原因。通过 `subscription.terminal_failure()` 获取 `SubscriptionStopReason::Settlement`，其中包含事件 ID、disposition、attempts、termination 和结构化 `Arc<SpiError>`。每次失败产生 `SettlementFailed`，首次终止产生一次 `SettlementStopped`；应把这些上下文保存到 telemetry。
+
+使用 `bus.delivery_metrics()` 和 `subscription.delivery_metrics().metrics` 查看 `reserved_receives`、`queued`、`running_handlers`、`settling`、`lane_waiting`、`settlement_attempts`、`settlement_retries`、`settlement_terminal_failures`、`completed`、handler/settlement 耗时样本数、总量、最大值及 `oldest_owned_age`。`lane_waiting` 是 `queued` 的子集，重试计数只累计首次之后真正进入 SPI 的调用。并发变化期间的快照不保证事务一致性。关闭后的订阅句柄保留计数，总线累计值也不会随订阅移除而消失。这些 facade 快照不表示 Redis PEL 或重连状态，还需检查 `XPENDING` 和 `XINFO GROUPS`。
+
+恢复时先保存首个原因和快照，按错误修复连接、codec、限额或策略，完成失败订阅的关闭，然后使用**相同 namespace、topic 和 group** 创建新的 `Durable` 订阅。新的 consumer 达到 `redis.claim_min_idle_ms` 条件后可认领保留的 pending 消息；`StartPosition` 不会重置已有 group。能否恢复取决于记录保留情况和 claim 策略：裁剪或删除可能破坏 pending 历史，已执行 `XACK` 但回复丢失时也没有可认领的消息。同一 token、同一 disposition 的重复结算是幂等的，但业务处理仍不保证恰好一次。
+
 ### 限制单条记录并恢复不兼容的 consumer
 
 `redis.max_wire_bytes`、`redis.max_payload_bytes`、`redis.max_headers_bytes` 默认分别为 8,388,608、1,048,576、65,536 字节。值必须为正整数，零、非法数字和溢出都是配置错误。三个限额独立，payload 未超限仍可能因 JSON 膨胀使 wire 超限。facade 的 `PayloadLimits` 另有默认各 1 MiB 的双向限制，需要一起配置。
@@ -408,9 +436,10 @@ Redis 持久化和复制由部署负责。`Accepted` 只证明 XADD 被接受，
 
 对 `qubit-task` 通知，consumer 应按 `TaskId` 去重并保留最高 `state_version`，忽略重复、旧版本通知，并查询任务服务取得权威状态。通知失败不回滚已提交的任务或业务状态，通知可能丢失、迟到或重复。provider 和任务通知集成都不提供事务性 outbox。业务事务必须与持久通知一起提交时，应用须实现 outbox 及其发布器。
 
-## 12. 如何迁移到当前未发布工作树
+## 12. 从 provider 0.5 升级
 
-Cargo 仍报告 `0.4.0`，尚未将这些变更发布为 `0.5.0`。升级前检查新增默认超时、64 个短操作/256 个 receiver 的准入上限，以及 1MiB/8MiB 的 payload/wire 限额。同步调整相关的 idle/concurrency 配置，处理新的 provider 错误变体和 SPI kind，并去掉“所有传输错误都能安全重发 publish”或“未知 ACK 后可换决定”的假设。receive timeout 仍是调度预算，不是同步硬截止时间。wire 保持版本 1，已存储的 v1 格式不变；历史超限记录按配置隔离。手动注册与自动发现使用上文所示的不同 feature 集。
+将 `qubit-event-bus-redis` 升级到 0.6 时，也要将 `qubit-event-bus` 升级到 0.18。[迁移指南](migration.zh_CN.md)列出了已移除的 facade 配置、新的持有量限额、结算重试、结构化终止诊断及恢复步骤。保留 wire 版本 1 数据和现有消费组；发布前应验证保留的 pending 记录。
+
 
 参阅[设计说明](design.zh_CN.md)、[覆盖率证据](coverage-review.zh_CN.md)和[工作负载基准](connection-reuse-benchmark.zh_CN.md)。性能、覆盖率须以各自测量为证；本指南没有宣称新的吞吐量或最终覆盖率结果。
 

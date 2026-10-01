@@ -1,14 +1,73 @@
-# Migration to Redis provider 0.5
+# Migration to Redis provider 0.6
 
 [简体中文](migration.zh_CN.md) · [User guide](user_guide.md)
 
-Upgrade `qubit-event-bus-redis` from 0.4 to 0.5 together with
-`qubit-event-bus` 0.17. Update direct dependencies, downstream fixtures, and
+Upgrade `qubit-event-bus-redis` from 0.5 to 0.6 together with
+`qubit-event-bus` 0.18. Update direct dependencies, downstream fixtures, and
 lockfiles together; do not mix SPI minor generations. The
 [core migration guide](https://github.com/qubit-ltd/rs-event-bus/blob/main/doc/migration.md)
 explains the `decode(&EncodedPayload)`, `PublishFailure`, and `PayloadLimits`
 API changes. Register migrated codecs with exact metadata validation, or an
 explicit documented historical schema allowlist.
+
+## Replace scheduling configuration and choose a settlement policy
+
+The old `SyncDeliverySchedulerConfig` / `DeliveryAdmissionConfig` types and their facade setters/getters are removed. Their old execution and queue budgets are not interchangeable with the new ownership budget. Choose all four positive limits deliberately:
+
+```rust,ignore
+// Before: qubit-event-bus 0.17 only.
+use qubit_event_bus::facade::DeliveryAdmissionConfig;
+use qubit_event_bus::facade::EventBusFacadeConfig;
+use qubit_event_bus::facade::SyncDeliverySchedulerConfig;
+
+let facade = EventBusFacadeConfig::new()
+    .with_sync_delivery_scheduler(SyncDeliverySchedulerConfig::new(4, 256)?)
+    .with_delivery_admission(DeliveryAdmissionConfig::new(256)?);
+```
+
+After, with core 0.18 (call this function during bus construction and retain the existing codec registry):
+
+```rust
+use std::num::NonZeroU32;
+use std::num::NonZeroUsize;
+use std::time::Duration;
+
+use qubit_event_bus::error::ConfigurationError;
+use qubit_event_bus::facade::DeliverySchedulingConfig;
+use qubit_event_bus::facade::EventBusFacadeConfig;
+use qubit_event_bus::facade::SettlementRetryConfig;
+
+fn facade_config() -> Result<EventBusFacadeConfig, ConfigurationError> {
+    let scheduling = DeliverySchedulingConfig::new(
+        NonZeroUsize::new(4).expect("positive running limit"),
+        NonZeroUsize::new(256).expect("positive owned limit"),
+        NonZeroUsize::new(32).expect("positive per-subscription limit"),
+        NonZeroUsize::new(256).expect("positive subscription limit"),
+    )?;
+    let settlement = SettlementRetryConfig::new(
+        NonZeroU32::new(5).expect("positive attempt limit"),
+        Duration::from_secs(5),
+        Duration::from_millis(10),
+        Duration::from_secs(1),
+    )?;
+    Ok(EventBusFacadeConfig::new()
+        .with_delivery_scheduling(scheduling)
+        .with_settlement_retry(settlement))
+}
+```
+
+The order is running handlers, globally owned deliveries, owned per subscription, and registered subscriptions. Defaults are 4/256/32/256. Running and per-subscription ownership must not exceed global ownership. Owned deliveries include receive reservations, queued work, handlers, and settlement; async paused sessions remain registered. An old queue capacity of zero no longer means direct handoff: choose owned=running if that fits the intended backpressure, and select positive per-subscription/subscription limits. This is a new capacity model, not an exact queue conversion.
+
+`SettlementRetryConfig` defaults to five attempts including the first, five seconds elapsed, 10 ms initial backoff, and one second maximum backoff. Set one attempt to disable retries. Only `retryable() == Some(true)` retries: `Some(false)` and `None` stop, with `None` classified as `RetryabilityUnknown`. Panic, invalid token, and infrastructure failures also stop. The elapsed budget governs attempts and waits, not forced cancellation of an in-flight call; success after the deadline is still success.
+
+## Migrate diagnostics and recovery
+
+`Diagnostic::SettlementFailed.error` is now `Arc<SpiError>` rather than `Box<str>`, and `attempt` is the one-based SPI attempt. A `Diagnostic::SettlementStopped` adds the final `attempts` and `termination`. Update pattern matches to read structured error fields and preserve the source chain rather than classifying formatted strings; include `_` for the non-exhaustive diagnostic enum. `SubscriptionStopReason::Settlement` preserves the same context in `terminal_failure()`. Cleanup cannot replace the first terminal cause.
+
+Use `bus.delivery_metrics()` and `subscription.delivery_metrics().metrics` to distinguish queued work, running handlers, settlement retries, and terminal failures. Close the failed subscription after recording these snapshots, repair the cause, then create a new durable subscription with the same namespace/topic/group. Pending history can be claimed only while retained and eligible under `redis.claim_min_idle_ms`; changing `StartPosition` does not rewind an existing group. If Redis already applied `XACK` but its reply was lost, there may be nothing left to recover.
+
+Graceful shutdown can return `Err(ShutdownError::TimedOut)` as well as a report. A two-call bounded policy must handle the first timeout before trying again and pass unfinished work to an external supervisor after the second; see the [user guide](user_guide.md). It must not use `Immediate` as timeout rescue. Bounded caller waiting does not guarantee non-cooperative work or the process exits.
+
 
 Wire version 1 remains supported. Test retained stream data before rollout;
 a Rust API upgrade does not require deleting streams or consumer groups.
