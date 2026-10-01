@@ -263,7 +263,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
     task_service.shutdown().await?;
     subscription.cancel()?;
-    bus.shutdown(ShutdownMode::Immediate)?;
+    let _ = bus.shutdown(ShutdownMode::Immediate)?;
 
     // Missing application codec makes every notification fail. The task's
     // business state still commits; this example does not implement an outbox.
@@ -277,7 +277,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
     assert_eq!(task_service.get(id).await?.ok_or("task disappeared")?.state, TaskState::Succeeded,
         "notification failure cannot roll back task state");
-    failing_bus.shutdown(ShutdownMode::Immediate)?;
+    let _ = failing_bus.shutdown(ShutdownMode::Immediate)?;
     println!("task notifications: lifecycle, duplicate/stale projection, failure preserves business state passed");
     Ok(())
 }

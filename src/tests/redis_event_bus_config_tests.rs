@@ -18,6 +18,7 @@ fn test_provider_options_validate_pool_and_stream_limits() {
         ("redis.max_idle_connections".into(), "64".into()),
         ("redis.max_unsettled_per_subscription".into(), "10000".into()),
         ("redis.stream_maxlen_approx".into(), "42".into()),
+        ("redis.allow_lossy_retention".into(), "true".into()),
     ]
     .into();
     let config = RedisEventBusConfig::from_provider_options(&options).unwrap();
@@ -43,4 +44,32 @@ fn test_provider_options_accept_claim_idle_threshold() {
     let options: ProviderOptions = [("redis.claim_min_idle_ms".into(), "125".into())].into();
     let config = RedisEventBusConfig::from_provider_options(&options).unwrap();
     assert_eq!(config.claim_min_idle_ms(), 125);
+}
+
+#[test]
+#[cfg(any(feature = "sync", feature = "async"))]
+fn test_lossy_retention_requires_explicit_pairing() {
+    for options in [
+        [("redis.stream_maxlen_approx".into(), "10".into())].into(),
+        [("redis.allow_lossy_retention".into(), "true".into())].into(),
+        [
+            ("redis.stream_maxlen_approx".into(), "10".into()),
+            ("redis.allow_lossy_retention".into(), "false".into()),
+        ]
+        .into(),
+        [
+            ("redis.stream_maxlen_approx".into(), "10".into()),
+            ("redis.allow_lossy_retention".into(), "TRUE".into()),
+        ]
+        .into(),
+    ] {
+        assert!(RedisEventBusConfig::from_provider_options(&options).is_err());
+    }
+    assert!(RedisEventBusConfig::from_provider_options(&ProviderOptions::new()).is_ok());
+    let options: ProviderOptions = [
+        ("redis.stream_maxlen_approx".into(), "10".into()),
+        ("redis.allow_lossy_retention".into(), "true".into()),
+    ]
+    .into();
+    assert!(RedisEventBusConfig::from_provider_options(&options).is_ok());
 }

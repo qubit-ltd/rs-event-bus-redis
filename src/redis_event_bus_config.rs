@@ -221,6 +221,7 @@ impl RedisEventBusConfig {
             "redis.max_wire_bytes",
             "redis.max_headers_bytes",
             "redis.stream_maxlen_approx",
+            "redis.allow_lossy_retention",
         ];
         if options
             .keys()
@@ -321,6 +322,16 @@ impl RedisEventBusConfig {
                     .ok_or(RedisProviderError::Configuration("invalid redis.stream_maxlen_approx"))
             })
             .transpose()?;
+        let allow_lossy_retention = match options.get("redis.allow_lossy_retention").map(String::as_str) {
+            None | Some("false") => false,
+            Some("true") => true,
+            Some(_) => return Err(RedisProviderError::Configuration("invalid redis.allow_lossy_retention")),
+        };
+        if stream_maxlen_approx.is_some() != allow_lossy_retention {
+            return Err(RedisProviderError::Configuration(
+                "redis.stream_maxlen_approx requires redis.allow_lossy_retention=true",
+            ));
+        }
         if sentinel_nodes.as_ref().is_some_and(Vec::is_empty) {
             return Err(RedisProviderError::Configuration(
                 "redis.sentinel.nodes must contain endpoints",

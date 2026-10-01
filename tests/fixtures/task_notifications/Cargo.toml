@@ -11,7 +11,7 @@ qubit-event-bus-redis = { path = "../../..", default-features = false, features 
 qubit-event-bus = { version = "0.18.0", path = "../../../../rs-event-bus", default-features = false, features = ["discovery"] }
 qubit-task = { path = "../../../../rs-task", features = ["event-bus"] }
 qubit-codec = { path = "../../../../rs-codec" }
-qubit-id = { path = "../../../../rs-id" }
+qubit-id = "0.6"
 qubit-model-metadata = { path = "../../../../rs-model-metadata" }
 qubit-spi = "0.13"
 serde_json = "1"

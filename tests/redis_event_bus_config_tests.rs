@@ -305,7 +305,11 @@ fn test_provider_options_defaults_and_sentinel_credentials_are_redacted() {
 
 #[test]
 fn test_stream_maxlen_approx_is_an_optional_positive_limit() {
-    let options: ProviderOptions = [("redis.stream_maxlen_approx".into(), "4096".into())].into();
+    let options: ProviderOptions = [
+        ("redis.stream_maxlen_approx".into(), "4096".into()),
+        ("redis.allow_lossy_retention".into(), "true".into()),
+    ]
+    .into();
     let config = RedisEventBusConfig::from_provider_options(&options).unwrap();
     assert_eq!(config.stream_maxlen_approx().map(|value| value.get()), Some(4096));
 }

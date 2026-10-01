@@ -86,6 +86,7 @@ fn test_sync_approximate_stream_limit_trims_old_entries_when_enabled() -> Result
         ("redis.url".into(), server.url().into()),
         ("redis.namespace".into(), "sync-limit-tests".into()),
         ("redis.stream_maxlen_approx".into(), "10".into()),
+        ("redis.allow_lossy_retention".into(), "true".into()),
     ]
     .into();
     let bus = RedisEventBusProvider
