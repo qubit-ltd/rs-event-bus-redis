@@ -17,3 +17,6 @@ pub mod redis_server;
 pub mod scripted_redis;
 #[allow(dead_code)]
 pub mod sentinel;
+#[cfg(any(feature = "sync", feature = "async"))]
+#[allow(dead_code)]
+pub mod settlement_fault;
