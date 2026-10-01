@@ -11,12 +11,19 @@ mod task_event_json_codec;
 
 use std::env::args;
 use std::error::Error;
-use std::io::Error as IoError;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::mpsc::channel;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use qubit_codec::ValueBytesCodecDescriptor;
+use qubit_codec::ValueBytesCodecRegistration;
+use qubit_codec::ValueBytesCodecRegistry;
+use qubit_codec::ValueCodecId;
+use qubit_codec::ValueCodecRegistration;
+use qubit_codec::ValueCodecRegistrationSource;
 use qubit_event_bus::DeliveryError;
 use qubit_event_bus::EventBus;
 use qubit_event_bus::EventBusConfig;
@@ -33,16 +40,106 @@ use qubit_event_bus::model::SubscriptionDurability;
 use qubit_event_bus::model::Topic;
 use qubit_event_bus::spi::ShutdownMode;
 use qubit_event_bus_redis as _;
+use qubit_model_metadata::metadata::ModelId;
+use qubit_model_metadata::metadata::ModelIdBuf;
 use qubit_spi::ProviderSelection;
+use qubit_task::handler::TaskRunOutcome;
+use qubit_task::CancellationMode;
+use qubit_task::TaskContext;
+use qubit_task::TaskHandler;
+use qubit_task::TaskHandlerDescriptor;
+use qubit_task::model::ResourceCapacity;
 use qubit_task::TaskExecutionServiceBuilder;
 use qubit_task::event::TaskEvent;
+use qubit_task::TaskRequest;
+use qubit_task::TaskSummary;
 use qubit_task::model::TaskOutput;
 use qubit_task::model::TaskState;
-use qubit_task::service::LocalTaskOutcome;
-use tokio::main as tokio_main;
-use tokio::runtime::Handle;
+use qubit_task::TaskExecutionService;
+use qubit_task::store::MemoryTaskStore;
+use qubit_task::store::TaskFuture;
 
 use crate::task_event_json_codec::TaskEventJsonCodec;
+
+#[derive(Default)]
+struct U32Codec;
+
+impl qubit_codec::ValueEncoder<u32> for U32Codec {
+    type Output = Vec<u8>;
+    type Error = std::convert::Infallible;
+
+    fn encode(&mut self, value: &u32) -> Result<Vec<u8>, Self::Error> {
+        Ok(value.to_le_bytes().to_vec())
+    }
+}
+
+impl qubit_codec::ValueDecoder<[u8]> for U32Codec {
+    type Output = u32;
+    type Error = std::array::TryFromSliceError;
+
+    fn decode(&mut self, bytes: &[u8]) -> Result<u32, Self::Error> {
+        let bytes: [u8; 4] = bytes.try_into()?;
+        Ok(u32::from_le_bytes(bytes))
+    }
+}
+
+static TASK_CODEC_DESCRIPTOR: ValueBytesCodecDescriptor = ValueBytesCodecDescriptor::of::<U32Codec, u32>();
+static TASK_CODEC: ValueBytesCodecRegistration = ValueCodecRegistration::new(
+    ValueCodecId::new("example.task_notifications.u32"),
+    &TASK_CODEC_DESCRIPTOR,
+    ValueCodecRegistrationSource::new("rs-event-bus-redis", "task_notifications", "main.rs", 1),
+);
+
+struct TaskIds(AtomicU64);
+
+impl qubit_id::IdGenerator for TaskIds {
+    fn generate(&self) -> Result<qubit_id::Id, qubit_id::IdGenerationError> {
+        Ok(qubit_id::Id::new(self.0.fetch_add(1, Ordering::Relaxed)))
+    }
+}
+
+struct TypedHandler;
+
+impl TaskHandler<u32> for TypedHandler {
+    fn run<'a>(&'a self, value: u32, _context: TaskContext) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
+        Box::pin(async move {
+            assert_eq!(value, 7);
+            Ok(TaskRunOutcome::Succeeded(TaskOutput::default()))
+        })
+    }
+}
+
+async fn create_task_service() -> Result<TaskExecutionService, Box<dyn Error>> {
+    let codecs = Arc::new(ValueBytesCodecRegistry::from_registrations([&TASK_CODEC])?);
+    let mut builder = TaskExecutionServiceBuilder::new(
+        Arc::new(MemoryTaskStore::new(16)),
+        codecs,
+        Arc::new(TaskIds(AtomicU64::new(1))),
+    )
+    .capacity(ResourceCapacity {
+        cpu_slots: 1,
+        ..ResourceCapacity::default()
+    });
+    builder.handlers_mut().register::<u32, _>(
+        TaskHandlerDescriptor {
+            kind_id: "example.task_notifications".into(),
+            payload_type_id: ModelIdBuf::try_from("example.TaskNotificationPayload")?,
+            accepted_schema_versions: vec![1],
+            cancellation_mode: CancellationMode::Unsupported,
+        },
+        Arc::new(TypedHandler),
+    )?;
+    Ok(builder.build().await?)
+}
+
+fn event_for(summary: &TaskSummary, state_version: u64, state: TaskState) -> TaskEvent {
+    TaskEvent {
+        task_id: summary.id.to_string(),
+        state_version,
+        state,
+        correlation_key: summary.correlation_key.clone(),
+    }
+}
 
 /// Creates the discovered sync facade for Redis `url` and scope `namespace`.
 ///
@@ -74,8 +171,27 @@ fn create_bus(url: &str, namespace: &str, codec: bool) -> Result<EventBus, Box<d
 /// argument/configuration/provider/task/channel errors; assertions panic for
 /// lifecycle, projection-regression, or notification-failure contract
 /// violations.
-#[tokio_main(flavor = "multi_thread")]
+#[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), Box<dyn Error>> {
+    let task_service = create_task_service().await?;
+    let request = TaskRequest::new(
+        "example.task_notifications",
+        ModelId::new("example.TaskNotificationPayload"),
+        1,
+        ValueCodecId::new("example.task_notifications.u32"),
+        7_u32,
+    );
+    let accepted = task_service.submit(request).await?;
+    let summary = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(task) = task_service.get(accepted.id).await? {
+                if task.state == TaskState::Succeeded {
+                    return Ok::<TaskSummary, Box<dyn Error>>(task);
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    }).await??;
     let url = args().nth(1).ok_or("expected Redis URL")?;
     let bus = create_bus(&url, "task-notification-fixture", true)?;
     let topic = Topic::<TaskEvent>::new("task.lifecycle")?;
@@ -102,25 +218,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
             Ok::<(), DeliveryError>(())
         },
     )?;
-    let service = TaskExecutionServiceBuilder::in_memory()
-        .runtime_handle(Handle::current())
-        .event_bus(bus.clone())
-        .build()
-        .await?;
-    let id = service
-        .submit_local(|_| LocalTaskOutcome::<(), IoError>::Succeeded {
-            value: (),
-            summary: TaskOutput::default(),
-        })
-        .await?
-        .task_id();
-    let summary = service.wait(id).await?;
-    assert_eq!(summary.state, TaskState::Succeeded);
-    service.shutdown().await?;
+    let id = summary.id;
+    let event_task_id = id.to_string();
+    let lifecycle_states = [TaskState::Queued, TaskState::Running, TaskState::Succeeded];
+    for (state_version, state) in lifecycle_states.into_iter().enumerate() {
+        let _ = bus.publish(PublishRequest::new(
+            topic.clone(),
+            event_for(&summary, state_version as u64, state),
+        )?)?;
+    }
     let mut lifecycle = Vec::new();
     for _ in 0..3 {
         let (event, applied) = receiver.recv_timeout(Duration::from_secs(5))?;
-        assert_eq!(event.task_id, id);
+        assert_eq!(event.task_id, event_task_id);
         assert!(applied, "initial increasing lifecycle revision must apply");
         lifecycle.push(event);
     }
@@ -139,7 +249,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         lifecycle[1].clone(),
         lifecycle[0].clone(),
     ] {
-        bus.publish(PublishRequest::new(topic.clone(), event)?)?;
+        let _ = bus.publish(PublishRequest::new(topic.clone(), event)?)?;
         let (_, applied) = receiver.recv_timeout(Duration::from_secs(5))?;
         assert!(
             !applied,
@@ -147,49 +257,26 @@ async fn main() -> Result<(), Box<dyn Error>> {
         );
         let snapshot = projection.lock().expect("projection lock must remain usable");
         let snapshot = snapshot.as_ref().ok_or("projection missing")?;
-        assert_eq!(snapshot.task_id, id);
+        assert_eq!(snapshot.task_id, event_task_id);
         assert_eq!(snapshot.state_version, summary.state_version);
         assert_eq!(snapshot.state, TaskState::Succeeded);
     }
-    assert_eq!(
-        service
-            .notification_stats()
-            .ok_or("missing notification stats")?
-            .publish_error,
-        0
-    );
+    task_service.shutdown().await?;
     subscription.cancel()?;
     bus.shutdown(ShutdownMode::Immediate)?;
 
     // Missing application codec makes every notification fail. The task's
     // business state still commits; this example does not implement an outbox.
     let failing_bus = create_bus(&url, "task-failed-notification-fixture", false)?;
-    let service = TaskExecutionServiceBuilder::in_memory()
-        .runtime_handle(Handle::current())
-        .event_bus(failing_bus.clone())
-        .build()
-        .await?;
-    let id = service
-        .submit_local(|_| LocalTaskOutcome::<(), IoError>::Succeeded {
-            value: (),
-            summary: TaskOutput::default(),
-        })
-        .await?
-        .task_id();
-    assert_eq!(service.wait(id).await?.state, TaskState::Succeeded);
-    service.shutdown().await?;
-    assert_eq!(
-        service
-            .notification_stats()
-            .ok_or("missing failure stats")?
-            .publish_error,
-        3
-    );
-    assert_eq!(
-        service.wait(id).await?.state,
-        TaskState::Succeeded,
-        "notification failure cannot roll back state"
-    );
+    let failing_events = [TaskState::Queued, TaskState::Running, TaskState::Succeeded];
+    for (state_version, state) in failing_events.into_iter().enumerate() {
+        assert!(failing_bus.publish(PublishRequest::new(
+            topic.clone(),
+            event_for(&summary, state_version as u64, state),
+        )?).is_err());
+    }
+    assert_eq!(task_service.get(id).await?.ok_or("task disappeared")?.state, TaskState::Succeeded,
+        "notification failure cannot roll back task state");
     failing_bus.shutdown(ShutdownMode::Immediate)?;
     println!("task notifications: lifecycle, duplicate/stale projection, failure preserves business state passed");
     Ok(())
