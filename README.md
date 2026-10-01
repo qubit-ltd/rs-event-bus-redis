@@ -59,6 +59,10 @@ Core 0.18 bounds running handlers, owned deliveries, per-subscription ownership,
 - [API documentation](https://docs.rs/qubit-event-bus-redis)
 - [简体中文 README](README.zh_CN.md)
 
+## Lossy stream retention
+
+Redis streams are not trimmed by default. To enable approximate `MAXLEN` trimming, configure both `redis.stream_maxlen_approx=<positive integer>` and `redis.allow_lossy_retention=true`. Trimming can remove unread or pending entries and cause delivery gaps; subscriptions stop on gaps by default. Monitor `XLEN`, `XPENDING`, and `XINFO` when validating retention behavior. An accepted `XADD` is not an fsync or replication guarantee.
+
 ## Testing
 
 ```bash

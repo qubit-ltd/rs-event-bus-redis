@@ -446,3 +446,8 @@ Redis 持久化和复制由部署负责。`Accepted` 只证明 XADD 被接受，
 ## 支持范围
 
 支持 Redis 单实例和 Sentinel、Redis 6.2+、编码 payload、消费组、accept/retry/reject 结算，以及从 Redis stream position 重放。暂不支持 Cluster、native payload、顺序保证、延迟投递、自动生命周期清理、死信路由和 TLS 配置。provider 不承诺恰好一次处理。
+
+
+## 有损 Stream 保留策略
+
+Redis Stream 默认不裁剪。启用近似 `MAXLEN` 裁剪时，必须同时设置 `redis.stream_maxlen_approx=<正整数>` 和 `redis.allow_lossy_retention=true`。裁剪可能删除尚未读取或仍处于 pending 状态的条目；订阅默认会在缺口后停止。验证保留策略时检查 `XLEN`、`XPENDING` 和 `XINFO`。`XADD` 接纳不代表 fsync 或副本持久化保证。

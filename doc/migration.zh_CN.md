@@ -94,3 +94,8 @@ Redis 不按 EventId 自动去重，`XADD` 接纳也不证明 fsync 或 handler 
 facade 死信转发与源 `XACK` 是两个操作，消费者必须容忍重复逻辑死信。
 部署前针对实际 Redis 版本运行 provider feature matrix、conformance、
 有界解码、回复丢失和持久恢复测试。
+
+
+## 有损 Stream 保留策略
+
+Redis Stream 默认不裁剪。启用近似 `MAXLEN` 裁剪时，必须同时设置 `redis.stream_maxlen_approx=<正整数>` 和 `redis.allow_lossy_retention=true`。裁剪可能删除尚未读取或仍处于 pending 状态的条目；订阅默认会在缺口后停止。验证保留策略时检查 `XLEN`、`XPENDING` 和 `XINFO`。`XADD` 接纳不代表 fsync 或副本持久化保证。
