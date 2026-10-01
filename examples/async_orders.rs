@@ -55,7 +55,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .build()?,
             )
             .await?;
-        bus.publish(PublishRequest::new(topic, "order-43".to_owned())?).await?;
+        let _ = bus.publish(PublishRequest::new(topic, "order-43".to_owned())?).await?;
 
         let received = Arc::new(Mutex::new(None::<String>));
         let handler_received = Arc::clone(&received);

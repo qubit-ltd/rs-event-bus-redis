@@ -57,7 +57,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 })
         },
     )?;
-    bus.publish(PublishRequest::new(topic, "order-42".to_owned())?)?;
+    let _ = bus.publish(PublishRequest::new(topic, "order-42".to_owned())?)?;
     let received = receiver.recv_timeout(Duration::from_secs(5))?;
     println!("consumed order event: {received}");
     subscription.cancel()?;

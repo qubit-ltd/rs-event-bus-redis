@@ -103,7 +103,7 @@ fn test_sync_registry_discovers_and_creates_redis_provider() -> Result<(), Box<d
             let _ = sender.send(delivery.payload().clone());
         },
     )?;
-    bus.publish(PublishRequest::new(topic, "automatically discovered".to_owned())?)?;
+    let _ = bus.publish(PublishRequest::new(topic, "automatically discovered".to_owned())?)?;
     assert_eq!(
         receiver.recv_timeout(Duration::from_secs(3))?,
         "automatically discovered"
