@@ -9,31 +9,27 @@
 
 `qubit-event-bus-redis` adds synchronous and runtime-neutral asynchronous Redis Streams providers to applications using Qubit Event Bus. A service can publish an encoded event to Redis, then let another process consume and acknowledge it through the same typed facade and automatically discovered SPI provider.
 
-This working tree retains Cargo version `0.4.0` and includes unreleased changes to limits and error handling. See the guide’s migration notes before upgrading; no `0.5.0` release is implied.
-
 ## Installation
 
 ```toml
 [dependencies]
-qubit-event-bus = { version = "0.17", features = ["discovery"] }
-qubit-event-bus-redis = "0.5"
+qubit-event-bus = { version = "0.18", features = ["discovery"] }
+qubit-event-bus-redis = "0.6"
 qubit-spi = "0.13"
 ```
 
-The version dependency form shows the package relationships. To use the unreleased changes described here, replace the provider dependency with a `path` to this checkout; use the verified local facade path for an unpublished upstream snapshot too. Repository example commands run current sources and do not establish registry availability.
-
-The default features enable `sync`, `async`, and `discovery`. Disable defaults and select `sync` or `async` to keep a deployment's feature set smaller. Redis 6.2 or later is required for `XAUTOCLAIM` recovery.
+The default features enable `sync`, `async`, and `discovery`. To keep one SPI while using registry discovery, set `default-features = false` on `qubit-event-bus-redis` and select `features = ["sync", "discovery"]` or `features = ["async", "discovery"]`. Enabling discovery only on `qubit-event-bus` does not register the Redis provider. Redis 6.2 or later is required for `XAUTOCLAIM` recovery.
 
 ## Quick Start
 
-An order service can select the Redis provider during startup. The provider is linked as an ordinary dependency and submitted to both registry inventories; the application still uses the `qubit-event-bus` facade for typed publish and subscribe calls.
+An order service can select the Redis provider during startup. The provider is linked as an ordinary dependency and, with `discovery`, submitted to each enabled SPI's registry inventory; the application still uses the `qubit-event-bus` facade for typed publish and subscribe calls.
 
 ```bash
 cargo run --example sync_orders -- redis://127.0.0.1/ local-sync-orders
 cargo run --example async_orders -- redis://127.0.0.1/ local-async-orders
 ```
 
-With a running Redis service, each example registers a UTF-8 codec, publishes an order event, consumes it, and closes its resources. The sync example waits for handler completion; the async example asks for Enter after printing its consumed event. The [user guide](doc/user_guide.md) includes directly copyable Markdown programs, exact features for discovery/manual registration, and Sentinel setup.
+With a running Redis service, each example registers a UTF-8 codec, publishes an order event, consumes it, and closes its resources. The [user guide](doc/user_guide.md) provides complete commands with a unique namespace, a durable `billing` group, and the new-group start cursor, plus the Docker fixture command and Sentinel setup.
 
 ## Why This Project Exists
 
@@ -51,6 +47,8 @@ The event-bus SPI lets an application choose a transport without changing busine
 Redis delivery is at least once. Handlers should tolerate duplicates. A successful `XADD` means Redis accepted the command; it does not prove the record was fsynced or processed. By default streams are not trimmed. Set `redis.stream_maxlen_approx` to opt into Redis `XADD MAXLEN ~ N`; this approximate retention can remove unread or pending history and cause gaps, so use it only when that loss policy is acceptable. The provider does not implement Cluster, native/delayed delivery, TLS configuration, or a dead-letter policy. Stream and group cleanup is an operator task.
 
 Each wire record, payload, and decoded headers string has a finite provider limit (8 MiB, 1 MiB, and 64 KiB by default), in addition to the facade's 1 MiB encoded publish/receive limits. Receive overflow stops the subscription and retains the pending entry without acknowledgement or quarantine. Public publication errors report `PublishFailure.effect()`; lost `XADD` replies are uncertain and default retry policy forbids blind resubmission. Version 1 wire data remains supported. See the [migration guide](doc/migration.md).
+
+Core 0.18 bounds running handlers, owned deliveries, per-subscription ownership, and registered subscriptions separately. Settlement retries are finite and require explicitly retryable errors; unknown retryability stops the subscription. The [user guide](doc/user_guide.md) covers first-cause diagnostics, delivery metrics, durable recovery, and bounded shutdown waits that do not guarantee forced process exit.
 
 ## Learn More
 
