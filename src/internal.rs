@@ -44,6 +44,7 @@ pub(crate) use receive_reply::ReceiveReply;
 pub(crate) use recovery_scan_budget::RecoveryScanBudget;
 #[cfg(test)]
 pub(crate) use recovery_scan_stage::RecoveryScanStage;
+pub(crate) use recovery_state::RecoveryGuard;
 pub(crate) use recovery_state::RecoveryState;
 pub(crate) use settlement_action::SettlementAction;
 pub(crate) use settlement_state::SettlementState;

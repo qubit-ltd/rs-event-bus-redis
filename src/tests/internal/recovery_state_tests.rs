@@ -9,8 +9,69 @@
 
 use redis::Value;
 use redis::streams::StreamId;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::time::Duration;
+use std::time::Instant;
 
+use crate::internal::RecoveryGuard;
 use crate::internal::RecoveryState;
+
+#[test]
+fn test_complete_recovery_persists_next_due_and_retry_forces_scan() {
+    let mut state = RecoveryState::new();
+    let started = Instant::now();
+    let (due, _, generation) = state.recovery_schedule(started);
+    assert!(due);
+    state.complete_recovery_at(started + Duration::from_secs(1), generation);
+    let (due, _, _) = state.recovery_schedule(started);
+    assert!(!due);
+    let (due, _, _) = state.recovery_schedule(started + Duration::from_secs(1));
+    assert!(due);
+    state.mark_retry("missing-entry");
+    let (due, _, _) = state.recovery_schedule(started);
+    assert!(due);
+}
+
+#[test]
+fn test_retry_during_recovery_cannot_be_cleared_by_stale_completion() {
+    let mut state = RecoveryState::new();
+    let started = Instant::now();
+    let (_, _, generation) = state.recovery_schedule(started);
+    state.begin_recovery();
+    state.mark_retry("concurrent-retry");
+    state.complete_recovery_at(started + Duration::from_secs(1), generation);
+    let (due, _, _) = state.recovery_schedule(started);
+    assert!(
+        due,
+        "new retry obligation survives an older scan completion"
+    );
+}
+
+#[test]
+fn test_receive_recovery_guard_forces_only_if_armed() {
+    let state = Arc::new(Mutex::new(RecoveryState::new()));
+    let started = Instant::now();
+    state
+        .lock()
+        .expect("state")
+        .complete_recovery_at(started + Duration::from_secs(1), 0);
+    {
+        let _cancelled = RecoveryGuard::new(Arc::clone(&state));
+    }
+    let (due, _, generation) = state.lock().expect("state").recovery_schedule(started);
+    assert!(due);
+    state
+        .lock()
+        .expect("state")
+        .complete_recovery_at(started + Duration::from_secs(1), generation);
+    {
+        let mut completed = RecoveryGuard::new(Arc::clone(&state));
+        completed.disarm();
+    }
+    let (due, _, _) = state.lock().expect("state").recovery_schedule(started);
+    assert!(!due);
+}
 
 #[test]
 fn test_active_delivery_bound_and_retry_release() {
@@ -51,7 +112,9 @@ fn test_gap_preserves_one_claimed_entry_for_the_next_receive() {
     };
     state.defer_claim(entry);
     assert_eq!(
-        state.take_deferred_claim().map(|entry| entry.id.as_str().to_owned()),
+        state
+            .take_deferred_claim()
+            .map(|entry| entry.id.as_str().to_owned()),
         Some("4-0".to_owned())
     );
     assert!(state.take_deferred_claim().is_none());

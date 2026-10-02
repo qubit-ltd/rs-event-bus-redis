@@ -25,6 +25,10 @@ pub(crate) struct ReceiveDriver {
     budget: RecoveryScanBudget,
     /// Phase used for the next command dispatch.
     stage: ReceiveStage,
+    /// True only after XAUTOCLAIM has reached its terminal cursor.
+    claim_at_end: bool,
+    /// Set by a matching empty own-pending response after terminal claim.
+    completed_round: bool,
 }
 
 impl ReceiveDriver {
@@ -35,10 +39,13 @@ impl ReceiveDriver {
     /// - `timeout`: Requested receive wait, or `Duration::MAX` for no deadline.
     /// - `started`: Beginning of this receive call.
     /// - `recovery_interval`: Delay between bounded recovery rounds.
+    /// - `initial_recovery_due`: Forces initial claim/pending work.
+    /// - `next_recovery_at`: Last complete round's next scan instant, if any.
     ///
     /// # Returns
     ///
-    /// A driver starting with the claim phase.
+    /// A driver starting with claim when recovery is due, otherwise with new
+    /// records.
     ///
     /// # Errors
     ///
@@ -48,12 +55,38 @@ impl ReceiveDriver {
         timeout: Duration,
         started: Instant,
         recovery_interval: Duration,
+        initial_recovery_due: bool,
+        next_recovery_at: Option<Instant>,
     ) -> Result<Self, RedisProviderError> {
+        let mut budget = RecoveryScanBudget::new(timeout, started, recovery_interval)?;
+        let due = initial_recovery_due || next_recovery_at.is_none_or(|next| started >= next);
+        if !due && let Some(next) = next_recovery_at {
+            budget.schedule_recovery_at(next);
+        }
         Ok(Self {
             timeout,
-            budget: RecoveryScanBudget::new(timeout, started, recovery_interval)?,
-            stage: ReceiveStage::Claim,
+            budget,
+            stage: if due {
+                ReceiveStage::Claim
+            } else {
+                ReceiveStage::ReadNew
+            },
+            claim_at_end: false,
+            completed_round: false,
         })
+    }
+
+    /// Persists a new scan deadline only after claim and own-pending phases
+    /// have both reached their end, preserving recovery duty on partial work.
+    ///
+    /// `now` is the completion instant; `Some` returns the next due instant and
+    /// consumes the completion signal. `None` leaves the previous deadline.
+    pub(crate) fn complete_recovery_round(&mut self, now: Instant) -> Option<Instant> {
+        if !self.completed_round {
+            return None;
+        }
+        self.completed_round = false;
+        Some(self.budget.schedule_after_completed_round(now))
     }
 
     /// Returns the mutable deadline and maintenance command budget.
@@ -81,13 +114,19 @@ impl ReceiveDriver {
         loop {
             match self.stage {
                 ReceiveStage::Claim => {
-                    if self.budget.take_recovery_command(RecoveryScanStage::Claim, now) {
+                    if self
+                        .budget
+                        .take_recovery_command(RecoveryScanStage::Claim, now)
+                    {
                         return ReceiveAction::Claim;
                     }
                     self.stage = ReceiveStage::Pending;
                 }
                 ReceiveStage::Pending => {
-                    if self.budget.take_recovery_command(RecoveryScanStage::Pending, now) {
+                    if self
+                        .budget
+                        .take_recovery_command(RecoveryScanStage::Pending, now)
+                    {
                         return ReceiveAction::Pending;
                     }
                     self.stage = ReceiveStage::ReadNew;
@@ -103,6 +142,8 @@ impl ReceiveDriver {
                     if self.budget.recovery_due(now) {
                         self.budget.start_recovery_round(now);
                         self.stage = ReceiveStage::Claim;
+                        self.claim_at_end = false;
+                        self.completed_round = false;
                         continue;
                     }
                     let Some(interval) = self.budget.block_interval(now) else {
@@ -134,11 +175,19 @@ impl ReceiveDriver {
     /// Panics if the reply does not belong to the current receive phase.
     pub(crate) fn reply(&mut self, reply: ReceiveReply) {
         match (self.stage, reply) {
-            (ReceiveStage::Claim, ReceiveReply::ClaimAtEnd) => self.stage = ReceiveStage::Pending,
+            (ReceiveStage::Claim, ReceiveReply::ClaimAtEnd) => {
+                self.claim_at_end = true;
+                self.stage = ReceiveStage::Pending;
+            }
             (ReceiveStage::Claim, ReceiveReply::ClaimHasMore) => {}
             (ReceiveStage::Pending, ReceiveReply::PendingEntry) => {}
-            (ReceiveStage::Pending, ReceiveReply::PendingEmpty) => self.stage = ReceiveStage::ReadNew,
-            (ReceiveStage::ReadNew, ReceiveReply::NewEntry | ReceiveReply::NewEmpty) if self.timeout.is_zero() => {
+            (ReceiveStage::Pending, ReceiveReply::PendingEmpty) => {
+                self.completed_round = self.claim_at_end;
+                self.stage = ReceiveStage::ReadNew;
+            }
+            (ReceiveStage::ReadNew, ReceiveReply::NewEntry | ReceiveReply::NewEmpty)
+                if self.timeout.is_zero() =>
+            {
                 self.stage = ReceiveStage::TimedOut;
             }
             (ReceiveStage::ReadNew, ReceiveReply::NewEntry | ReceiveReply::NewEmpty) => {}

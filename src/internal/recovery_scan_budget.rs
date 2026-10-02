@@ -84,12 +84,17 @@ impl RecoveryScanBudget {
             Some(
                 started
                     .checked_add(timeout)
-                    .ok_or(RedisProviderError::Configuration("receive timeout is out of range"))?,
+                    .ok_or(RedisProviderError::Configuration(
+                        "receive timeout is out of range",
+                    ))?,
             )
         };
-        let next_recovery = started
-            .checked_add(recovery_interval)
-            .ok_or(RedisProviderError::Configuration("recovery interval is out of range"))?;
+        let next_recovery =
+            started
+                .checked_add(recovery_interval)
+                .ok_or(RedisProviderError::Configuration(
+                    "recovery interval is out of range",
+                ))?;
         Ok(Self {
             deadline,
             zero_timeout: timeout.is_zero(),
@@ -120,6 +125,22 @@ impl RecoveryScanBudget {
     #[inline]
     pub(crate) fn recovery_due(&self, now: Instant) -> bool {
         !self.zero_timeout && now >= self.next_recovery
+    }
+
+    /// Restores a subscription's next recovery deadline for this receive.
+    ///
+    /// `next` is a monotonic instant saved only after a complete prior round.
+    pub(crate) fn schedule_recovery_at(&mut self, next: Instant) {
+        self.next_recovery = next;
+    }
+
+    /// Schedules the next scan after a complete claim and pending round.
+    ///
+    /// Returns the new deadline for persistence in the subscription. An
+    /// overflowing instant remains due immediately rather than losing recovery.
+    pub(crate) fn schedule_after_completed_round(&mut self, now: Instant) -> Instant {
+        self.next_recovery = now.checked_add(self.recovery_interval).unwrap_or(now);
+        self.next_recovery
     }
 
     /// Checks whether a new-message read may still be scheduled at `now`.
@@ -155,7 +176,9 @@ impl RecoveryScanBudget {
     #[must_use]
     #[inline]
     pub(crate) fn block_interval(&self, now: Instant) -> Option<Duration> {
-        let remaining = self.deadline.map(|deadline| deadline.saturating_duration_since(now));
+        let remaining = self
+            .deadline
+            .map(|deadline| deadline.saturating_duration_since(now));
         let recovery_delay = self.next_recovery.saturating_duration_since(now);
         match remaining {
             Some(remaining) if remaining.is_zero() => None,

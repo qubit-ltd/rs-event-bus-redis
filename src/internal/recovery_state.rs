@@ -8,6 +8,9 @@
 //! Per-subscription pending-entry cursors and active-delivery tracking.
 
 use std::collections::HashSet;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::time::Instant;
 
 use redis::streams::StreamId;
 
@@ -23,6 +26,44 @@ pub(crate) struct RecoveryState {
     deferred_claim: Option<StreamId>,
     /// Exclusive XPENDING cursor for bounded Redis 6.2 tombstone scans.
     tombstone_cursor: String,
+    /// Next periodic scan after the last complete recovery round.
+    next_recovery_at: Option<Instant>,
+    /// Failure, cancellation, retry, or partial work requires immediate scan.
+    force_recovery: bool,
+    /// Advances when retry, failure, or cancellation creates new recovery duty.
+    force_generation: u64,
+}
+
+/// Marks recovery due if an in-progress receive is cancelled or unwinds.
+pub(crate) struct RecoveryGuard {
+    /// Shared receiver state; this guard never retains its mutex across I/O.
+    state: Arc<Mutex<RecoveryState>>,
+    /// Cleared only after a receive returns normally.
+    armed: bool,
+}
+
+impl RecoveryGuard {
+    /// Arms cancellation recovery after a receive future has actually been
+    /// polled. The guard owns an `Arc`, not a mutex lock.
+    pub(crate) fn new(state: Arc<Mutex<RecoveryState>>) -> Self {
+        Self { state, armed: true }
+    }
+
+    /// Prevents normal completion from forcing an extra recovery round.
+    pub(crate) fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for RecoveryGuard {
+    /// Conservatively forces the next scan after cancellation or unwind.
+    fn drop(&mut self) {
+        if self.armed
+            && let Ok(mut state) = self.state.lock()
+        {
+            state.force_recovery();
+        }
+    }
 }
 
 impl RecoveryState {
@@ -39,6 +80,47 @@ impl RecoveryState {
             claim_cursor: "0-0".to_owned(),
             deferred_claim: None,
             tombstone_cursor: "0-0".to_owned(),
+            next_recovery_at: None,
+            force_recovery: true,
+            force_generation: 0,
+        }
+    }
+
+    /// Returns whether recovery is due, the next scan instant, and the current
+    /// external recovery generation.
+    ///
+    /// `now` is the start of a receive; no state is changed by inspection. The
+    /// generation must be supplied when that receive finishes its scan.
+    pub(crate) fn recovery_schedule(&self, now: Instant) -> (bool, Option<Instant>, u64) {
+        (
+            self.force_recovery || self.next_recovery_at.is_none_or(|next| now >= next),
+            self.next_recovery_at,
+            self.force_generation,
+        )
+    }
+
+    /// Marks a scan in progress without creating a new external recovery
+    /// generation. A retry during this scan will then remain distinguishable.
+    pub(crate) fn begin_recovery(&mut self) {
+        self.force_recovery = true;
+    }
+
+    /// Forces claim and pending scans on the next receive without discarding
+    /// existing cursors or active delivery state.
+    pub(crate) fn force_recovery(&mut self) {
+        self.force_recovery = true;
+        self.force_generation = self.force_generation.saturating_add(1);
+    }
+
+    /// Records the next scan instant only after a complete recovery round.
+    ///
+    /// `next` is calculated from the completion time, so normal short calls do
+    /// not continuously defer recovery. `observed_generation` prevents this
+    /// scan from clearing a retry or cancellation raised during its I/O.
+    pub(crate) fn complete_recovery_at(&mut self, next: Instant, observed_generation: u64) {
+        self.next_recovery_at = Some(next);
+        if self.force_generation == observed_generation {
+            self.force_recovery = false;
         }
     }
 
@@ -220,6 +302,7 @@ impl RecoveryState {
     pub(crate) fn mark_retry(&mut self, id: &str) {
         self.active.remove(id);
         self.pending_cursor = "0-0".to_owned();
+        self.force_recovery();
     }
 
     /// Releases the local active slot after terminal settlement is confirmed.

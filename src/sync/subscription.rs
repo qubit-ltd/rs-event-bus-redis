@@ -49,6 +49,7 @@ use crate::internal::PoisonOutcome;
 use crate::internal::ReceiveAction;
 use crate::internal::ReceiveDriver;
 use crate::internal::ReceiveReply;
+use crate::internal::RecoveryGuard;
 use crate::internal::RecoveryState;
 use crate::internal::SettlementAction;
 use crate::internal::SettlementProgress;
@@ -86,7 +87,7 @@ pub(crate) struct Subscription {
     pub(crate) closed: bool,
     /// Minimum pending idle milliseconds before another consumer may claim it.
     pub(crate) claim_min_idle_ms: usize,
-    /// Minimum delay between recovery rounds during one long receive.
+    /// Minimum delay between complete recovery rounds across receive calls.
     pub(crate) recovery_interval: Duration,
     /// Maximum unsettled record count before reads pause.
     pub(crate) max_unsettled: usize,
@@ -129,12 +130,14 @@ fn lock_state<'a, T>(
 impl EventSubscriptionSpi for Subscription {
     /// Recovers pending work without redelivering locally active entries.
     ///
-    /// The call scans reclaimable entries, this consumer's pending entries, and
-    /// then new group entries. Pending IDs already held by local handlers are
-    /// skipped. Malformed entries are copied to the group quarantine stream
-    /// and acknowledged by one serialized Lua invocation. Lua does not roll
-    /// back prior writes on failure, and a lost reply leaves the transfer
-    /// outcome unknown. Closing the receiver does not acknowledge valid work.
+    /// The first call and later calls after the recovery interval scan
+    /// reclaimable and own-pending entries before new group entries. Calls
+    /// before that deadline read new entries directly. Pending IDs already
+    /// held by local handlers are skipped. Malformed entries are copied to the
+    /// group quarantine stream and acknowledged by one serialized Lua
+    /// invocation. Lua does not roll back prior writes on failure, and a lost
+    /// reply leaves the transfer outcome unknown. Closing the receiver does
+    /// not acknowledge valid work.
     ///
     /// # Parameters
     ///
@@ -164,6 +167,10 @@ impl EventSubscriptionSpi for Subscription {
             return Ok(ReceiveOutcome::TimedOut);
         }
         let started = Instant::now();
+        let (initial_recovery_due, next_recovery_at, recovery_generation) =
+            lock_state(&self.recovery, &self.topic, "receive", "recovery lock")?
+                .recovery_schedule(started);
+        let mut recovery_guard = RecoveryGuard::new(Arc::clone(&self.recovery));
         let mut connection = match self.receive_connection.take() {
             Some(connection) => connection,
             None => self
@@ -172,8 +179,14 @@ impl EventSubscriptionSpi for Subscription {
                 .map_err(|error| spi_error("receive", Some(&self.topic), error))?,
         };
         let result = (|| {
-            let mut driver = ReceiveDriver::new(timeout, started, self.recovery_interval)
-                .map_err(|error| spi_error("receive", Some(&self.topic), error))?;
+            let mut driver = ReceiveDriver::new(
+                timeout,
+                started,
+                self.recovery_interval,
+                initial_recovery_due,
+                next_recovery_at,
+            )
+            .map_err(|error| spi_error("receive", Some(&self.topic), error))?;
             loop {
                 // Release the guard before read_entry acquires recovery state again.
                 let deferred = {
@@ -197,6 +210,8 @@ impl EventSubscriptionSpi for Subscription {
                     .map_err(|error| classified_spi_error("receive", Some(&self.topic), &error))?;
                 match driver.next_action(Instant::now()) {
                     ReceiveAction::Claim => {
+                        lock_state(&self.recovery, &self.topic, "receive", "recovery lock")?
+                            .begin_recovery();
                         let cursor =
                             lock_state(&self.recovery, &self.topic, "receive", "recovery lock")?
                                 .claim_cursor()
@@ -297,8 +312,17 @@ impl EventSubscriptionSpi for Subscription {
                             .and_then(|stream| stream.ids.into_iter().next());
                         let Some(entry) = entry else {
                             driver.reply(ReceiveReply::PendingEmpty);
-                            lock_state(&self.recovery, &self.topic, "receive", "recovery lock")?
-                                .reset_pending_scan();
+                            let next = driver.complete_recovery_round(Instant::now());
+                            let mut recovery = lock_state(
+                                &self.recovery,
+                                &self.topic,
+                                "receive",
+                                "recovery lock",
+                            )?;
+                            recovery.reset_pending_scan();
+                            if let Some(next) = next {
+                                recovery.complete_recovery_at(next, recovery_generation);
+                            }
                             continue;
                         };
                         driver.reply(ReceiveReply::PendingEntry);
@@ -369,6 +393,7 @@ impl EventSubscriptionSpi for Subscription {
             }
         })();
         if result.is_ok() {
+            recovery_guard.disarm();
             self.receive_connection = Some(connection);
         }
         result

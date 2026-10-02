@@ -46,6 +46,7 @@ use crate::internal::PoisonReason;
 use crate::internal::ReceiveAction;
 use crate::internal::ReceiveDriver;
 use crate::internal::ReceiveReply;
+use crate::internal::RecoveryGuard;
 use crate::internal::RecoveryState;
 use crate::internal::SettlementAction;
 use crate::internal::SettlementProgress;
@@ -87,7 +88,7 @@ pub(crate) struct Subscription {
     /// Minimum idle milliseconds before claiming another consumer's pending
     /// item.
     pub(crate) claim_min_idle_ms: usize,
-    /// Minimum delay between recovery rounds during one long receive.
+    /// Minimum delay between complete recovery rounds across receive calls.
     pub(crate) recovery_interval: Duration,
     /// Maximum unsettled records before reads pause.
     pub(crate) max_unsettled: usize,
@@ -130,10 +131,10 @@ fn lock_state<'a, T>(
 impl AsyncEventSubscriptionSpi for Subscription {
     /// Reads pending deliveries before new group entries using a finite block.
     ///
-    /// Cancellation leaves any Redis-delivered item in the pending entries
-    /// list. The next call first scans reclaimable entries, then this
-    /// consumer's pending entries, and finally waits for new group entries
-    /// up to `timeout`.
+    /// Normal calls before the next recovery deadline read new entries
+    /// directly. Cancellation leaves any Redis-delivered item in the pending
+    /// entries list and forces the next call to scan reclaimable and
+    /// own-pending entries before waiting for new group entries.
     ///
     /// # Parameters
     ///
@@ -169,6 +170,10 @@ impl AsyncEventSubscriptionSpi for Subscription {
                 return Ok(ReceiveOutcome::TimedOut);
             }
             let started = Instant::now();
+            let (initial_recovery_due, next_recovery_at, recovery_generation) =
+                lock_state(&self.recovery, &self.topic, "receive", "recovery lock")?
+                    .recovery_schedule(started);
+            let mut recovery_guard = RecoveryGuard::new(Arc::clone(&self.recovery));
             let mut connection = match self.receive_connection.take() {
                 Some(connection) => connection,
                 None => self
@@ -178,8 +183,14 @@ impl AsyncEventSubscriptionSpi for Subscription {
                     .map_err(|error| spi_error("receive", &self.topic, error))?,
             };
             let result = async {
-                let mut driver = ReceiveDriver::new(timeout, started, self.recovery_interval)
-                    .map_err(|error| spi_error("receive", &self.topic, error))?;
+                let mut driver = ReceiveDriver::new(
+                    timeout,
+                    started,
+                    self.recovery_interval,
+                    initial_recovery_due,
+                    next_recovery_at,
+                )
+                .map_err(|error| spi_error("receive", &self.topic, error))?;
                 loop {
                     let deferred = {
                         let mut recovery =
@@ -197,6 +208,8 @@ impl AsyncEventSubscriptionSpi for Subscription {
                     connection.set_response_timeout(self.client.command_timeout());
                     match driver.next_action(Instant::now()) {
                         ReceiveAction::Claim => {
+                            lock_state(&self.recovery, &self.topic, "receive", "recovery lock")?
+                                .begin_recovery();
                             let cursor = lock_state(
                                 &self.recovery,
                                 &self.topic,
@@ -325,13 +338,17 @@ impl AsyncEventSubscriptionSpi for Subscription {
                                 }
                             } else {
                                 driver.reply(ReceiveReply::PendingEmpty);
-                                lock_state(
+                                let next = driver.complete_recovery_round(Instant::now());
+                                let mut recovery = lock_state(
                                     &self.recovery,
                                     &self.topic,
                                     "receive",
                                     "recovery lock",
-                                )?
-                                .reset_pending_scan();
+                                )?;
+                                recovery.reset_pending_scan();
+                                if let Some(next) = next {
+                                    recovery.complete_recovery_at(next, recovery_generation);
+                                }
                                 continue;
                             }
                         }
@@ -381,6 +398,7 @@ impl AsyncEventSubscriptionSpi for Subscription {
             }
             .await;
             if result.is_ok() {
+                recovery_guard.disarm();
                 self.receive_connection = Some(connection);
             }
             result
