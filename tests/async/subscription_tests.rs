@@ -119,8 +119,8 @@ fn test_settle_cancelled_applied_xack_preserves_intent_and_same_retry_releases_s
     let proxy = ControlledRedis::start(server.url())?;
     let bus = create_bus(&proxy.url())?;
     block_on(async {
-        bus.publish(message("first")?).await?;
-        bus.publish(message("second")?).await?;
+        let _ = bus.publish(message("first")?).await?;
+        let _ = bus.publish(message("second")?).await?;
         let mut receiver = bus.subscribe(request()?).await?;
         let ReceiveOutcome::Message(received) = receiver.receive(Duration::from_secs(2)).await? else {
             return Err("first event missing".into());
@@ -168,7 +168,7 @@ fn test_settle_unpolled_future_and_first_explicit_rejection_allow_retry() -> Tes
     let server = RedisServer::start()?;
     let bus = create_bus(server.url())?;
     block_on(async {
-        bus.publish(message("rejected")?).await?;
+        let _ = bus.publish(message("rejected")?).await?;
         let mut receiver = bus.subscribe(request()?).await?;
         let ReceiveOutcome::Message(received) = receiver.receive(Duration::from_secs(2)).await? else {
             return Err("event missing".into());
@@ -192,7 +192,7 @@ fn test_settle_explicit_rejection_after_cancelled_xack_never_unlocks_intent() ->
     let proxy = ControlledRedis::start(server.url())?;
     let bus = create_bus(&proxy.url())?;
     block_on(async {
-        bus.publish(message("unknown")?).await?;
+        let _ = bus.publish(message("unknown")?).await?;
         let mut receiver = bus.subscribe(request()?).await?;
         let ReceiveOutcome::Message(received) = receiver.receive(Duration::from_secs(2)).await? else {
             return Err("event missing".into());
@@ -322,7 +322,7 @@ fn test_retry_settlement_is_idempotent_and_rejects_a_conflicting_disposition() -
     let server = RedisServer::start()?;
     let bus = create_bus(server.url())?;
     block_on(async {
-        bus.publish(message("retry-contract")?).await?;
+        let _ = bus.publish(message("retry-contract")?).await?;
         let mut receiver = bus.subscribe(request()?).await?;
         let ReceiveOutcome::Message(received) = receiver.receive(Duration::from_secs(2)).await? else {
             return Err("event missing".into());

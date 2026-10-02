@@ -180,8 +180,8 @@ async fn async_bus_with_claim(
 fn test_sync_skips_unsettled_id_and_delivers_next() -> Result<(), Box<dyn Error>> {
     let server = RedisServer::start()?;
     let bus = sync_bus(&server, "recovery-sync", 2)?;
-    bus.publish(event("events", "sync-first", b"first")?)?;
-    bus.publish(event("events", "sync-second", b"second")?)?;
+    let _ = bus.publish(event("events", "sync-first", b"first")?)?;
+    let _ = bus.publish(event("events", "sync-second", b"second")?)?;
     let mut receiver = bus.subscribe(request(
         "events",
         "sync-worker",
@@ -208,7 +208,7 @@ fn test_sync_skips_unsettled_id_and_delivers_next() -> Result<(), Box<dyn Error>
 fn test_sync_retry_releases_active_id_for_redelivery() -> Result<(), Box<dyn Error>> {
     let server = RedisServer::start()?;
     let bus = sync_bus(&server, "retry-sync", 2)?;
-    bus.publish(event("events", "retry-first", b"first")?)?;
+    let _ = bus.publish(event("events", "retry-first", b"first")?)?;
     let mut receiver = bus.subscribe(request(
         "events",
         "retry-worker",
@@ -232,7 +232,7 @@ fn test_sync_retry_releases_active_id_for_redelivery() -> Result<(), Box<dyn Err
 fn test_sync_rejects_foreign_settlement_and_is_idempotent_after_close() -> Result<(), Box<dyn Error>> {
     let server = RedisServer::start()?;
     let bus = sync_bus(&server, "token-sync", 2)?;
-    bus.publish(event("events", "token-event", b"payload")?)?;
+    let _ = bus.publish(event("events", "token-event", b"payload")?)?;
     let mut owner = bus.subscribe(request(
         "events",
         "token-owner",
@@ -263,7 +263,7 @@ fn test_async_retry_releases_active_id_for_redelivery() -> Result<(), Box<dyn Er
     block_on(async {
         let server = RedisServer::start()?;
         let bus = async_bus(&server, "retry-async", 2).await?;
-        bus.publish(event("events", "retry-first-async", b"first")?).await?;
+        let _ = bus.publish(event("events", "retry-first-async", b"first")?).await?;
         let mut receiver = bus
             .subscribe(request(
                 "events",
@@ -291,7 +291,7 @@ fn test_async_rejects_foreign_settlement_and_is_idempotent_after_close() -> Resu
     block_on(async {
         let server = RedisServer::start()?;
         let bus = async_bus(&server, "token-async", 2).await?;
-        bus.publish(event("events", "token-event-async", b"payload")?).await?;
+        let _ = bus.publish(event("events", "token-event-async", b"payload")?).await?;
         let mut owner = bus
             .subscribe(request(
                 "events",
@@ -330,7 +330,8 @@ fn test_async_reuses_standalone_short_command_connection() -> Result<(), Box<dyn
         let mut observer = Client::open(server.url())?.get_connection()?;
         let before = total_connections(&mut observer)?;
         for index in 0..10 {
-            bus.publish(event("events", &format!("connection-{index}"), b"payload")?)
+            let _ = bus
+                .publish(event("events", &format!("connection-{index}"), b"payload")?)
                 .await?;
         }
         let after = total_connections(&mut observer)?;
@@ -362,7 +363,7 @@ fn test_sync_reuses_standalone_short_command_connection() -> Result<(), Box<dyn 
     let mut observer = Client::open(server.url())?.get_connection()?;
     let before = total_connections(&mut observer)?;
     for index in 0..10 {
-        bus.publish(event("events", &format!("connection-{index}"), b"payload")?)?;
+        let _ = bus.publish(event("events", &format!("connection-{index}"), b"payload")?)?;
     }
     let after = total_connections(&mut observer)?;
     assert!(
@@ -378,7 +379,7 @@ fn test_sync_reuses_standalone_short_command_connection() -> Result<(), Box<dyn 
 fn test_sync_reuses_subscription_read_connection_across_timeouts() -> Result<(), Box<dyn Error>> {
     let server = RedisServer::start()?;
     let bus = sync_bus(&server, "read-connection-sync", 2)?;
-    bus.publish(event("warmup", "pool-warmup", b"payload")?)?;
+    let _ = bus.publish(event("warmup", "pool-warmup", b"payload")?)?;
     let mut observer = Client::open(server.url())?.get_connection()?;
     let before = total_connections(&mut observer)?;
     let mut receiver = bus.subscribe(request(
@@ -416,7 +417,7 @@ fn test_async_reuses_subscription_read_connection_across_timeouts() -> Result<()
     block_on(async {
         let server = RedisServer::start()?;
         let bus = async_bus(&server, "read-connection-async", 2).await?;
-        bus.publish(event("warmup", "pool-warmup", b"payload")?).await?;
+        let _ = bus.publish(event("warmup", "pool-warmup", b"payload")?).await?;
         let mut observer = Client::open(server.url())?.get_connection()?;
         let before = total_connections(&mut observer)?;
         let mut receiver = bus
@@ -499,8 +500,8 @@ fn test_async_skips_unsettled_id_and_delivers_next() -> Result<(), Box<dyn Error
     block_on(async {
         let server = RedisServer::start()?;
         let bus = async_bus(&server, "recovery-async", 2).await?;
-        bus.publish(event("events", "async-first", b"first")?).await?;
-        bus.publish(event("events", "async-second", b"second")?).await?;
+        let _ = bus.publish(event("events", "async-first", b"first")?).await?;
+        let _ = bus.publish(event("events", "async-second", b"second")?).await?;
         let mut receiver = bus
             .subscribe(request(
                 "events",
@@ -536,7 +537,7 @@ fn test_sync_poison_does_not_block_next() -> Result<(), Box<dyn Error>> {
     let stream = stream_key("poison-sync", "events");
     let mut connection = Client::open(server.url())?.get_connection()?;
     insert_poison_fixtures(&mut connection, &stream)?;
-    bus.publish(event("events", "sync-after-poison", b"valid")?)?;
+    let _ = bus.publish(event("events", "sync-after-poison", b"valid")?)?;
     let mut receiver = bus.subscribe(request(
         "events",
         "sync-poison-worker",
@@ -768,7 +769,7 @@ fn test_async_poison_does_not_block_next() -> Result<(), Box<dyn Error>> {
         let stream = stream_key("poison-async", "events");
         let mut connection = Client::open(server.url())?.get_connection()?;
         insert_poison_fixtures(&mut connection, &stream)?;
-        bus.publish(event("events", "async-after-poison", b"valid")?).await?;
+        let _ = bus.publish(event("events", "async-after-poison", b"valid")?).await?;
         let mut receiver = bus
             .subscribe(request(
                 "events",
@@ -991,7 +992,7 @@ fn test_sync_zero_timeout_progresses_past_active_pending_records() -> Result<(),
     let server = RedisServer::start()?;
     let bus = sync_bus(&server, "scan-budget-sync", 64)?;
     for index in 0..24 {
-        bus.publish(event("events", &format!("pending-{index}"), b"payload")?)?;
+        let _ = bus.publish(event("events", &format!("pending-{index}"), b"payload")?)?;
     }
     let mut receiver = bus.subscribe(request(
         "events",
@@ -1005,7 +1006,7 @@ fn test_sync_zero_timeout_progresses_past_active_pending_records() -> Result<(),
             ReceiveOutcome::Message(_)
         ));
     }
-    bus.publish(event("events", "after-pending", b"payload")?)?;
+    let _ = bus.publish(event("events", "after-pending", b"payload")?)?;
     let mut found = false;
     for _ in 0..24 {
         if let ReceiveOutcome::Message(message) = receiver.receive(Duration::ZERO)? {
@@ -1025,7 +1026,8 @@ fn test_async_zero_timeout_progresses_past_active_pending_records() -> Result<()
         let server = RedisServer::start()?;
         let bus = async_bus(&server, "scan-budget-async", 64).await?;
         for index in 0..24 {
-            bus.publish(event("events", &format!("pending-{index}"), b"payload")?)
+            let _ = bus
+                .publish(event("events", &format!("pending-{index}"), b"payload")?)
                 .await?;
         }
         let mut receiver = bus
@@ -1042,7 +1044,7 @@ fn test_async_zero_timeout_progresses_past_active_pending_records() -> Result<()
                 ReceiveOutcome::Message(_)
             ));
         }
-        bus.publish(event("events", "after-pending", b"payload")?).await?;
+        let _ = bus.publish(event("events", "after-pending", b"payload")?).await?;
         let mut found = false;
         for _ in 0..24 {
             if let ReceiveOutcome::Message(message) = receiver.receive(Duration::ZERO).await? {
@@ -1077,7 +1079,7 @@ fn test_sync_duration_max_waits_for_a_message() -> Result<(), Box<dyn Error>> {
         return Err("Duration::MAX receive returned before message arrival".into());
     };
     assert_eq!(message.id().as_str(), "max-timeout-event");
-    thread.join().map_err(|_| "publisher thread panicked")??;
+    let _ = thread.join().map_err(|_| "publisher thread panicked")??;
     Ok(())
 }
 
@@ -1086,7 +1088,7 @@ fn test_sync_duration_max_waits_for_a_message() -> Result<(), Box<dyn Error>> {
 fn test_sync_long_receive_reclaims_after_idle_threshold_without_new_messages() -> Result<(), Box<dyn Error>> {
     let server = RedisServer::start()?;
     let bus = sync_bus_with_claim(&server, "late-claim-sync", 2, 100)?;
-    bus.publish(event("events", "late-claim-sync", b"payload")?)?;
+    let _ = bus.publish(event("events", "late-claim-sync", b"payload")?)?;
     let mut first = bus.subscribe(request(
         "events",
         "first-worker",
@@ -1118,7 +1120,7 @@ fn test_async_long_receive_reclaims_after_idle_threshold_without_new_messages() 
     block_on(async {
         let server = RedisServer::start()?;
         let bus = async_bus_with_claim(&server, "late-claim-async", 2, 100).await?;
-        bus.publish(event("events", "late-claim-async", b"payload")?).await?;
+        let _ = bus.publish(event("events", "late-claim-async", b"payload")?).await?;
         let mut first = bus
             .subscribe(request(
                 "events",
@@ -1159,7 +1161,7 @@ fn test_sync_deleted_pending_entry_is_cleared_on_redis_6_2_and_7() -> Result<(),
         let key = stream_key(&namespace, "events");
         let group = group_name(&namespace, "events", "deleted-worker", Some("deleted-group"));
         let mut connection = Client::open(server.url())?.get_connection()?;
-        bus.publish(event("events", "deleted-sync", b"payload")?)?;
+        let _ = bus.publish(event("events", "deleted-sync", b"payload")?)?;
         let entries: StreamRangeReply = cmd("XRANGE")
             .arg(&key)
             .arg("-")
@@ -1212,7 +1214,7 @@ fn test_async_deleted_pending_entry_is_cleared_on_redis_6_2_and_7() -> Result<()
             let key = stream_key(&namespace, "events");
             let group = group_name(&namespace, "events", "deleted-worker", Some("deleted-group"));
             let mut connection = Client::open(server.url())?.get_connection()?;
-            bus.publish(event("events", "deleted-async", b"payload")?).await?;
+            let _ = bus.publish(event("events", "deleted-async", b"payload")?).await?;
             let entries: StreamRangeReply = cmd("XRANGE")
                 .arg(&key)
                 .arg("-")
@@ -1287,7 +1289,7 @@ fn test_async_duration_max_waits_for_a_message() -> Result<(), Box<dyn Error>> {
             return Err("Duration::MAX receive returned before message arrival".into());
         };
         assert_eq!(message.id().as_str(), "max-timeout-event");
-        thread.join().map_err(|_| "publisher thread panicked")??;
+        let _ = thread.join().map_err(|_| "publisher thread panicked")??;
         Ok::<(), Box<dyn Error>>(())
     })
 }
@@ -1298,7 +1300,7 @@ fn test_sync_xack_failure_keeps_token_retryable_and_slot_occupied() -> Result<()
     let server = RedisServer::start()?;
     let bus = sync_bus(&server, "settle-error-sync", 1)?;
     let key = stream_key("settle-error-sync", "events");
-    bus.publish(event("events", "settle-error-sync", b"payload")?)?;
+    let _ = bus.publish(event("events", "settle-error-sync", b"payload")?)?;
     let mut receiver = bus.subscribe(request(
         "events",
         "settle-error-worker",
@@ -1324,7 +1326,7 @@ fn test_async_xack_failure_keeps_token_retryable_and_slot_occupied() -> Result<(
         let server = RedisServer::start()?;
         let bus = async_bus(&server, "settle-error-async", 1).await?;
         let key = stream_key("settle-error-async", "events");
-        bus.publish(event("events", "settle-error-async", b"payload")?).await?;
+        let _ = bus.publish(event("events", "settle-error-async", b"payload")?).await?;
         let mut receiver = bus
             .subscribe(request(
                 "events",

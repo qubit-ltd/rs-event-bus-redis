@@ -365,7 +365,7 @@ mod durable {
         for (index, panic) in [false, true].into_iter().enumerate() {
             let namespace = format!("core-codec-recovery-{index}");
             let spi = bus(server.url(), &namespace, "redis.max_payload_bytes", 5);
-            spi.publish(message(5))?;
+            let _ = spi.publish(message(5))?;
             let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
             let handlers = Arc::new(std::sync::atomic::AtomicUsize::new(0));
             let mut codecs = CodecRegistry::new();
@@ -412,7 +412,7 @@ mod durable {
             );
             assert_eq!(handlers.load(std::sync::atomic::Ordering::SeqCst), 0);
             subscription.cancel()?;
-            facade.shutdown(ShutdownMode::Graceful {
+            let _ = facade.shutdown(ShutdownMode::Graceful {
                 timeout: Duration::from_secs(3),
             })?;
             let mut recovered = spi.subscribe(request(70 + index as u64))?;
@@ -525,7 +525,7 @@ mod durable {
                 _ => fields.headers_json.len(),
             };
             let spi = bus(server.url(), "exact-publish-limits", key, exact);
-            spi.publish(message(5))?;
+            let _ = spi.publish(message(5))?;
             let commands = server.finish();
             assert_eq!(commands.len(), 1);
             assert_eq!(commands[0][0], "XADD");

@@ -142,7 +142,7 @@ fn test_sync_payload_limit_is_inclusive_and_rejected_publish_writes_nothing() ->
     let bus = RedisEventBusProvider
         .create_configured(&config(&server, "size-sync-payload", 3, 4096))
         .map_err(|failure| failure.into_error())?;
-    bus.publish(message(&[0, 128, 255], Headers::new()))?;
+    let _ = bus.publish(message(&[0, 128, 255], Headers::new()))?;
     let error = bus
         .publish(message(&[0, 128, 255, 1], Headers::new()))
         .expect_err("max + 1 is rejected");
@@ -164,7 +164,7 @@ fn test_async_payload_limit_is_inclusive_and_rejected_publish_writes_nothing() -
             .create_configured(&config(&server, "size-async-payload", 3, 4096))
             .await
             .map_err(|failure| failure.into_error())?;
-        bus.publish(message(&[0, 128, 255], Headers::new())).await?;
+        let _ = bus.publish(message(&[0, 128, 255], Headers::new())).await?;
         assert_limit(
             bus.publish(message(&[0, 128, 255, 1], Headers::new()))
                 .await
@@ -190,7 +190,7 @@ fn test_sync_complete_wire_limit_is_inclusive_and_counts_escaped_headers() -> Te
     let accepted = RedisEventBusProvider
         .create_configured(&config(&server, "size-sync-exact", 1, exact))
         .map_err(|failure| failure.into_error())?;
-    accepted.publish(outbound)?;
+    let _ = accepted.publish(outbound)?;
     assert_eq!(stream_len(&server, "size-sync-exact")?, 1);
     let rejected = RedisEventBusProvider
         .create_configured(&config(&server, "size-sync-over", 1, exact - 1))
@@ -221,7 +221,7 @@ fn test_async_complete_wire_limit_is_inclusive_and_counts_escaped_headers() -> T
             .create_configured(&config(&server, "size-async-exact", 1, exact))
             .await
             .map_err(|failure| failure.into_error())?;
-        accepted.publish(outbound).await?;
+        let _ = accepted.publish(outbound).await?;
         assert_eq!(stream_len(&server, "size-async-exact")?, 1);
         let rejected = AsyncRedisEventBusProvider
             .create_configured(&config(&server, "size-async-over", 1, exact - 1))

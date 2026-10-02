@@ -109,7 +109,7 @@ fn test_nested_wrongtype_reply_retains_unknown_xack_intent() -> TestResult {
     let proxy = ControlledRedis::start(server.url())?;
     let bus = create_bus(&proxy.url())?;
 
-    bus.publish(message("nested")?)?;
+    let _ = bus.publish(message("nested")?)?;
     let mut receiver = bus.subscribe(request()?)?;
     let ReceiveOutcome::Message(received) = receiver.receive(Duration::from_secs(2))? else {
         return Err("event missing".into());

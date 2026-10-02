@@ -209,7 +209,7 @@ fn test_sync_malformed_block_read_rejects_quarantine_when_command_cap_is_held() 
     let observed_eval = eval_calls(&mut inspection);
     let observed_pending = pending_count(&mut inspection, key);
     publish_gate.release();
-    publishing
+    let _ = publishing
         .join()
         .expect("publish worker")
         .expect("held publish completes");
@@ -293,7 +293,7 @@ fn test_async_malformed_block_read_rejects_quarantine_when_command_cap_is_held()
     let observed_eval = eval_calls(&mut inspection);
     let observed_pending = pending_count(&mut inspection, key);
     publish_gate.release();
-    publishing
+    let _ = publishing
         .join()
         .expect("publish worker")
         .expect("held publish completes");

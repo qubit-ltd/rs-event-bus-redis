@@ -17,6 +17,12 @@ use libfuzzer_sys::fuzz_target;
 mod bounded_wire_decoder;
 #[path = "../../src/internal/wire_limits.rs"]
 mod wire_limits;
+mod redis_event_bus_config {
+    pub use qubit_event_bus_redis::config::RedisEventBusConfig;
+}
+mod redis_provider_error {
+    pub use qubit_event_bus_redis::error::RedisProviderError;
+}
 mod error {
     pub use qubit_event_bus_redis::error::RedisProviderError;
 }

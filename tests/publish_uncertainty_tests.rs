@@ -353,7 +353,7 @@ fn applied_dlq_xadd_lost_reply_stops_and_preserves_durable_source() -> Result<()
     let server = RedisServer::start()?;
     let proxy = ControlledRedis::start(server.url())?;
     let spi = bus(&proxy.url());
-    spi.publish(message())?;
+    let _ = spi.publish(message())?;
     let mut codecs = CodecRegistry::new();
     codecs.register::<Vec<u8>>(Arc::new(BytesCodec(ContentType::new("text/plain")?)));
     codecs.register::<DeadLetterEvent<Vec<u8>>>(Arc::new(DeadBytesCodec(ContentType::new("text/plain")?)));
@@ -398,7 +398,7 @@ fn applied_dlq_xadd_lost_reply_stops_and_preserves_durable_source() -> Result<()
         "uncertain DLQ forwarding stops the source subscription"
     );
     subscription.cancel()?;
-    facade.shutdown(ShutdownMode::Graceful {
+    let _ = facade.shutdown(ShutdownMode::Graceful {
         timeout: std::time::Duration::from_secs(3),
     })?;
     let count: usize = redis::cmd("XLEN").arg(&dead).query(&mut observer)?;
@@ -479,7 +479,7 @@ fn async_applied_dlq_reply_loss_preserves_durable_source() -> Result<(), Box<dyn
         AsyncRedisEventBusProvider.create_configured(&EventBusConfig::default().with_provider_options(options)),
     )
     .unwrap();
-    futures_lite::future::block_on(spi.publish(message()))?;
+    let _ = futures_lite::future::block_on(spi.publish(message()))?;
     let mut codecs = CodecRegistry::new();
     codecs.register::<Vec<u8>>(Arc::new(BytesCodec(ContentType::new("text/plain")?)));
     codecs.register::<DeadLetterEvent<Vec<u8>>>(Arc::new(DeadBytesCodec(ContentType::new("text/plain")?)));
@@ -517,7 +517,7 @@ fn async_applied_dlq_reply_loss_preserves_durable_source() -> Result<(), Box<dyn
                 .unwrap_err();
             assert!(matches!(failure, ReceiveError::DeadLetterForwardFailed { .. }));
             subscription.close().await.unwrap();
-            facade
+            let _ = facade
                 .shutdown(ShutdownMode::Graceful {
                     timeout: std::time::Duration::from_secs(3),
                 })

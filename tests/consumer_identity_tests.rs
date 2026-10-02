@@ -107,7 +107,7 @@ fn test_sync_separate_buses_do_not_share_consumer_identity() -> Result<(), Box<d
     let second_bus = RedisEventBusProvider
         .create_configured(&config)
         .map_err(|failure| failure.into_error())?;
-    first_bus.publish(message()?)?;
+    let _ = first_bus.publish(message()?)?;
     let mut first = first_bus.subscribe(request()?)?;
     let mut second = second_bus.subscribe(request()?)?;
 
@@ -144,7 +144,7 @@ fn test_async_separate_buses_do_not_share_consumer_identity() -> Result<(), Box<
             .create_configured(&config)
             .await
             .map_err(|failure| failure.into_error())?;
-        first_bus.publish(message()?).await?;
+        let _ = first_bus.publish(message()?).await?;
         let mut first = first_bus.subscribe(request()?).await?;
         let mut second = second_bus.subscribe(request()?).await?;
 

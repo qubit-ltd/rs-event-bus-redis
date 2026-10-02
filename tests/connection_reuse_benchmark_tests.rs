@@ -119,7 +119,7 @@ fn test_redis_connection_reuse_benchmark() -> Result<(), Box<dyn Error>> {
     for index in 0..MESSAGES {
         let message_id = format!("message-{index}");
         let sent = Instant::now();
-        bus.publish(message(&message_id)?)?;
+        let _ = bus.publish(message(&message_id)?)?;
         let ReceiveOutcome::Message(delivery) = receiver.receive(Duration::from_secs(3))? else {
             return Err(format!("message {message_id} was not received").into());
         };

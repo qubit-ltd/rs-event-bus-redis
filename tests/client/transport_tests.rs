@@ -122,7 +122,7 @@ fn test_async_cold_publish_singleflight_opens_one_connection() {
             let barrier = Arc::clone(&barrier);
             spawn(move || {
                 barrier.wait();
-                block_on(bus.publish(message())).expect("publish succeeds");
+                let _ = block_on(bus.publish(message())).expect("publish succeeds");
             })
         })
         .collect::<Vec<_>>();
@@ -170,7 +170,8 @@ fn test_async_cancelled_cold_setup_leaves_cache_empty() {
         assert_eq!(server.connections(), 1);
         drop(first);
         server.enable_setup_replies();
-        bus.publish(message())
+        let _ = bus
+            .publish(message())
             .await
             .expect("next call must initialize after cancelled setup");
         assert_eq!(
@@ -634,7 +635,7 @@ fn test_sync_sentinel_preserves_separate_acl_and_target_database() {
     let bus = RedisEventBusProvider
         .create_configured(&EventBusConfig::default().with_provider_options(settings))
         .expect("provider");
-    bus.publish(message()).expect("authenticated publish");
+    let _ = bus.publish(message()).expect("authenticated publish");
     assert_separate_acl_and_database(&sentinel, &target);
 }
 #[cfg(feature = "async")]
@@ -645,7 +646,7 @@ fn test_async_sentinel_preserves_separate_acl_and_target_database() {
         AsyncRedisEventBusProvider.create_configured(&EventBusConfig::default().with_provider_options(settings)),
     )
     .expect("provider");
-    block_on(bus.publish(message())).expect("authenticated publish");
+    let _ = block_on(bus.publish(message())).expect("authenticated publish");
     assert_separate_acl_and_database(&sentinel, &target);
 }
 

@@ -103,7 +103,7 @@ fn test_sync_command_cap_releases_after_pending_publish_completes() {
     assert_eq!(keys.len(), 1);
     let entries: usize = cmd("XLEN").arg(&keys[0]).query(&mut connection).expect("stream length");
     gate.release();
-    first.join().expect("first worker").expect("first publish");
+    let _ = first.join().expect("first worker").expect("first publish");
     second.join().expect("second worker");
     assert_error(
         rejected.expect("second publish fails fast").expect_err("command cap"),
@@ -111,7 +111,8 @@ fn test_sync_command_cap_releases_after_pending_publish_completes() {
         true,
     );
     assert_eq!(entries, 1, "rejected publish must not send XADD");
-    bus.publish(message())
+    let _ = bus
+        .publish(message())
         .expect("completed publish releases command permit");
     let entries: usize = cmd("XLEN").arg(&keys[0]).query(&mut connection).expect("stream length");
     assert_eq!(entries, 2);
@@ -172,7 +173,7 @@ fn test_sync_retained_message_does_not_hold_receiver_permit_after_close() {
     let bus = RedisEventBusProvider
         .create_configured(&EventBusConfig::default().with_provider_options(options(server.url(), 8)))
         .expect("provider");
-    bus.publish(message()).expect("publish");
+    let _ = bus.publish(message()).expect("publish");
     let mut first = bus.subscribe(request(1)).expect("first receiver");
     let ReceiveOutcome::Message(received) = first.receive(Duration::from_secs(1)).expect("receive") else {
         panic!("published message must be received");
@@ -253,7 +254,7 @@ fn test_async_retained_message_does_not_hold_receiver_permit_after_close() {
             .create_configured(&EventBusConfig::default().with_provider_options(options(server.url(), 8)))
             .await
             .expect("provider");
-        bus.publish(message()).await.expect("publish");
+        let _ = bus.publish(message()).await.expect("publish");
         let mut first = bus.subscribe(request(1)).await.expect("first receiver");
         let ReceiveOutcome::Message(received) = first.receive(Duration::from_secs(1)).await.expect("receive") else {
             panic!("published message must be received");

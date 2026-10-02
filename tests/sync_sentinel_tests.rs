@@ -63,7 +63,7 @@ fn test_sync_sentinel_reconnects_after_master_failover() -> Result<(), Box<dyn E
         .create_configured(&EventBusConfig::default().with_provider_options(options))
         .map_err(|failure| failure.into_error())?;
     let original_master_port = sentinel.master_port()?;
-    bus.publish(message("events", "pending-before-failover", b"pending")?)?;
+    let _ = bus.publish(message("events", "pending-before-failover", b"pending")?)?;
     let mut first = bus.subscribe(subscription_request(1001, "worker-one")?)?;
     let ReceiveOutcome::Message(received) = first.receive(Duration::from_secs(2))? else {
         return Err("initial consumer did not receive the event".into());
@@ -77,7 +77,7 @@ fn test_sync_sentinel_reconnects_after_master_failover() -> Result<(), Box<dyn E
     sentinel.stop_original_master()?;
     let promoted_port = sentinel.master_port()?;
     sentinel.wait_for_pending(promoted_port, &stream, &group, &pending_id, &old_owner)?;
-    bus.publish(message("events", "after-failover", b"after")?)?;
+    let _ = bus.publish(message("events", "after-failover", b"after")?)?;
     let promoted_client = Client::open(format!("redis://127.0.0.1:{}/", sentinel.master_port()?))?;
     let mut promoted_connection = promoted_client.get_connection()?;
     let stream_length: usize = cmd("XLEN")

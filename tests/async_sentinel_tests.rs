@@ -64,7 +64,8 @@ fn test_async_sentinel_reconnects_after_master_failover() -> Result<(), Box<dyn 
         block_on(AsyncRedisEventBusProvider.create_configured(&config)).map_err(|failure| failure.into_error())?;
     sentinel.stop_original_master()?;
     block_on(async {
-        bus.publish(message("events", "after-failover-async", b"after")?)
+        let _ = bus
+            .publish(message("events", "after-failover-async", b"after")?)
             .await?;
         let request = SpiSubscriptionRequest::new(
             Id::new(2002),
@@ -126,7 +127,7 @@ fn test_async_sentinel_claims_unsettled_record_after_promotion() -> Result<(), B
         block_on(AsyncRedisEventBusProvider.create_configured(&config)).map_err(|failure| failure.into_error())?;
     let original_port = sentinel.master_port()?;
     let pending_message = message("events", "pending-before-async-promotion", b"pending")?;
-    block_on(async { bus.publish(pending_message).await })?;
+    let _ = block_on(async { bus.publish(pending_message).await })?;
     let mut first = block_on(async {
         let request = SpiSubscriptionRequest::new(
             Id::new(2101),
