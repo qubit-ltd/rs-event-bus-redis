@@ -25,11 +25,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - name: Prepare local path dependencies
+        run: ./.infra/lib/prepare-local-path-dependencies.sh
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
         with:
           toolchain: 1.94
       - name: Check dependency baseline
-        run: ./dependency-update.sh --check
+        run: ./.infra/bin/dependency-update.sh --check
 
   verify:
     runs-on: ${{ matrix.os }}
@@ -42,6 +44,8 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - name: Prepare local path dependencies
+        run: ./.infra/lib/prepare-local-path-dependencies.sh
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
         with:
           toolchain: 1.94
@@ -49,22 +53,22 @@ jobs:
         if: runner.os == 'Linux'
         run: rustup toolchain install nightly-2026-06-05 --profile minimal --component rustfmt --component clippy
       - name: Run infrastructure CI orchestration
-        run: ./ci-check.sh --only=verify
-      - name: Run style and coverage Clippy
+        run: ./.infra/bin/ci-check.sh --only=verify
+      - name: Run style, hook, and coverage Clippy
         if: runner.os == 'Linux'
-        run: ./ci-check.sh --only=style,clippy,coverage-cfg-clippy
+        run: ./.infra/bin/ci-check.sh --only=style,clippy,coverage-cfg-clippy,project-hook
       - name: Install Clippy toolchain on additional platforms
         if: runner.os != 'Linux'
         run: rustup toolchain install nightly-2026-06-05 --profile minimal --component clippy
       - name: Run Clippy on additional platforms
         if: runner.os != 'Linux'
-        run: ./ci-check.sh --only=clippy
+        run: ./.infra/bin/ci-check.sh --only=clippy
       - name: Install legacy CI build toolchain
         run: rustup toolchain install 1.94.0 --profile minimal
       - name: Run documentation tests
         run: cargo +1.94.0 test --doc --verbose
       - name: Run README dependency-version check
-        run: ./.infra/tools/infra-tool.sh rs-infra-verify --project "$GITHUB_WORKSPACE" run --suite readme
+        run: ./.infra/bin/infra-tool.sh rs-infra-verify --project "$GITHUB_WORKSPACE" run --suite readme
       - name: Install documentation toolchain
         run: rustup toolchain install 1.94.0 --profile minimal
       - name: Generate strict all-features documentation
@@ -82,6 +86,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - name: Prepare local path dependencies
+        run: ./.infra/lib/prepare-local-path-dependencies.sh
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
         with:
           toolchain: 1.94
@@ -95,28 +101,7 @@ jobs:
           fi
       - name: Run configured feature and dependency matrix
         run: |
-          ./ci-check.sh --only=feature-matrix
-
-  documentation-examples:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
-        with:
-          toolchain: 1.94
-      - name: Prepare local path dependencies
-        run: bash ./ci/prepare-event-bus.sh
-      - name: Build all runnable provider examples
-        run: cargo +1.94.0 build --examples --all-features --locked
-      - name: Run examples against standalone Redis and Sentinel
-        run: cargo +1.94.0 test --test documentation_examples_tests --all-features --locked -- --test-threads=1
-      - name: Run applied-reply cancellation regressions
-        run: |
-          cargo +1.94.0 test --test controlled_redis_tests --all-features --locked -- --test-threads=1
-          cargo +1.94.0 test --test sync_standalone_tests test_sync_settlement_retry_after_applied_xack_reply_loss --all-features --locked -- --exact
-          cargo +1.94.0 test --test async_standalone_tests test_async_receive_cancellation_leaves_pending_message_recoverable --all-features --locked -- --exact
-          cargo +1.94.0 test --test async_standalone_tests test_async_claim_cancellation_after_owner_transfer_recovers_message --all-features --locked -- --exact
-          cargo +1.94.0 test --test async_standalone_tests test_async_settlement_cancellation_after_xack_is_idempotent --all-features --locked -- --exact
+          ./.infra/bin/ci-check.sh --only=feature-matrix
 
   coverage:
     needs: [verify]
@@ -126,6 +111,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - name: Prepare local path dependencies
+        run: ./.infra/lib/prepare-local-path-dependencies.sh
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
         with:
           toolchain: 1.94
@@ -135,7 +122,7 @@ jobs:
         env:
           # Rust 1.94 non-incremental coverage can lose counters for inline functions.
           CARGO_INCREMENTAL: "1"
-        run: ./coverage.sh
+        run: ./.infra/bin/coverage.sh
       - name: Build project (release)
         if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
         run: |
@@ -186,8 +173,10 @@ jobs:
       - name: Validate Pages configuration
         id: pages-config
         run: |
-          jq -e '.deploy | type == "boolean"' .infra/ci/pages.json >/dev/null
-          echo "deploy=$(jq -r .deploy .infra/ci/pages.json)" >> "$GITHUB_OUTPUT"
+          jq -e '.deploy | type == "boolean"' .infra/pages/pages.json >/dev/null
+          echo "deploy=$(jq -r .deploy .infra/pages/pages.json)" >> "$GITHUB_OUTPUT"
+      - name: Prepare local path dependencies
+        run: ./.infra/lib/prepare-local-path-dependencies.sh
       - uses: actions/download-artifact@v8
         with:
           name: coverage-reports
@@ -196,9 +185,9 @@ jobs:
         with:
           toolchain: 1.94
       - name: Build Pages site
-        run: ./.infra/tools/infra-tool.sh rs-infra-pages --project "$GITHUB_WORKSPACE" build
+        run: ./.infra/bin/infra-tool.sh rs-infra-pages --project "$GITHUB_WORKSPACE" build
       - name: Prepare Pages artifact
-        run: ./.infra/tools/infra-tool.sh rs-infra-pages --project "$GITHUB_WORKSPACE" artifact
+        run: ./.infra/bin/infra-tool.sh rs-infra-pages --project "$GITHUB_WORKSPACE" artifact
       - uses: actions/upload-pages-artifact@v3
         with:
           path: public
@@ -239,11 +228,11 @@ jobs:
       RS_INFRA_FUZZ_MAX_LEN: "4096"
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - name: Prepare local path dependencies
+        run: ./.infra/lib/prepare-local-path-dependencies.sh
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
         with:
           toolchain: 1.94
-      - name: Prepare pinned local path dependencies
-        run: bash ./ci/prepare-event-bus.sh
       - name: Detect optional suite configuration
         id: suite-config
         run: |
@@ -298,7 +287,7 @@ jobs:
           if [ "${{ matrix.suite }}" = "loom" ]; then
             export RUSTFLAGS="--cfg loom"
           fi
-          ./.infra/tools/infra-tool.sh rs-infra-verify --project "$GITHUB_WORKSPACE" run --suite "${{ matrix.suite }}"
+          ./.infra/bin/infra-tool.sh rs-infra-verify --project "$GITHUB_WORKSPACE" run --suite "${{ matrix.suite }}"
       - name: Skip unconfigured infrastructure suite
         if: ${{ steps.suite-config.outputs.enabled != 'true' }}
         run: echo "${{ matrix.suite }} is not configured; skipping."
@@ -310,3 +299,23 @@ jobs:
           path: fuzz/artifacts
           if-no-files-found: ignore
           retention-days: 14
+  documentation-examples:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: 1.94
+      - name: Prepare local path dependencies
+        run: bash ./ci/prepare-event-bus.sh
+      - name: Build all runnable provider examples
+        run: cargo +1.94.0 build --examples --all-features --locked
+      - name: Run examples against standalone Redis and Sentinel
+        run: cargo +1.94.0 test --test documentation_examples_tests --all-features --locked -- --test-threads=1
+      - name: Run applied-reply cancellation regressions
+        run: |
+          cargo +1.94.0 test --test controlled_redis_tests --all-features --locked -- --test-threads=1
+          cargo +1.94.0 test --test sync_standalone_tests test_sync_settlement_retry_after_applied_xack_reply_loss --all-features --locked -- --exact
+          cargo +1.94.0 test --test async_standalone_tests test_async_receive_cancellation_leaves_pending_message_recoverable --all-features --locked -- --exact
+          cargo +1.94.0 test --test async_standalone_tests test_async_claim_cancellation_after_owner_transfer_recovers_message --all-features --locked -- --exact
+          cargo +1.94.0 test --test async_standalone_tests test_async_settlement_cancellation_after_xack_is_idempotent --all-features --locked -- --exact

@@ -94,3 +94,28 @@ external/
 
 # Cargo build outputs in nested fixtures
 target/
+
+/.infra/*/bin/
+
+/.infra/*/.crates*
+
+/.infra/*/tool.revision*
+
+!/.infra/coverage/
+
+/.infra/coverage/*
+
+!/.infra/coverage/coverage.json
+
+!/.infra/coverage/tool.toml
+
+# Shared Rust project ignore entries (rs-infra)
+**/target/
+/fuzz/artifacts/
+/fuzz/target/
+*.profdata
+*.profraw
+.worktrees/
+/public/
+/pages-artifact.tar.gz
+__pycache__/

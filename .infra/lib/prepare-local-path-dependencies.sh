@@ -2,6 +2,8 @@
 set -euo pipefail
 
 project_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)
+source "$project_root/.infra/lib/cleanup-build-artifacts.sh"
+source "$project_root/.infra/lib/network-retry.sh"
 config="$project_root/.infra/ci/local-path-dependencies.tsv"
 [ -f "$config" ] || exit 0
 while IFS=$'\t' read -r relative_path repository_url branch; do
@@ -16,5 +18,7 @@ while IFS=$'\t' read -r relative_path repository_url branch; do
     target="$project_root/$relative_path"
     [ -e "$target/.git" ] && continue
     mkdir -p "$(dirname "$target")"
-    git clone --depth 1 --branch "$branch" "$repository_url" "$target"
+    infra_run_with_retry "clone $repository_url" \
+        git -c http.connectTimeout="${RS_INFRA_GIT_CONNECT_TIMEOUT_SECONDS:-30}" \
+        clone --depth 1 --branch "$branch" "$repository_url" "$target"
 done < "$config"
