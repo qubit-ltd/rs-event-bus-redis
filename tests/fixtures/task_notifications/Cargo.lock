@@ -1213,7 +1213,7 @@ dependencies = [
  "qubit-event-bus",
  "qubit-event-bus-redis",
  "qubit-id 0.6.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "qubit-model-metadata",
+ "qubit-model-id",
  "qubit-spi",
  "qubit-task",
  "serde_json",
