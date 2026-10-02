@@ -170,9 +170,11 @@ impl AsyncEventSubscriptionSpi for Subscription {
                 return Ok(ReceiveOutcome::TimedOut);
             }
             let started = Instant::now();
-            let (initial_recovery_due, next_recovery_at, recovery_generation) =
-                lock_state(&self.recovery, &self.topic, "receive", "recovery lock")?
-                    .recovery_schedule(started);
+            let (initial_recovery_due, next_recovery_at, recovery_generation, resume_pending) = {
+                let recovery = lock_state(&self.recovery, &self.topic, "receive", "recovery lock")?;
+                let (due, next, generation) = recovery.recovery_schedule(started);
+                (due, next, generation, recovery.claim_phase_complete())
+            };
             let mut recovery_guard = RecoveryGuard::new(Arc::clone(&self.recovery));
             let mut connection = match self.receive_connection.take() {
                 Some(connection) => connection,
@@ -191,6 +193,9 @@ impl AsyncEventSubscriptionSpi for Subscription {
                     next_recovery_at,
                 )
                 .map_err(|error| spi_error("receive", &self.topic, error))?;
+                if initial_recovery_due && resume_pending {
+                    driver.resume_pending();
+                }
                 loop {
                     let deferred = {
                         let mut recovery =
@@ -245,8 +250,18 @@ impl AsyncEventSubscriptionSpi for Subscription {
                             } else {
                                 ReceiveReply::ClaimHasMore
                             });
-                            lock_state(&self.recovery, &self.topic, "receive", "recovery lock")?
-                                .set_claim_cursor(claim.next_stream_id);
+                            {
+                                let mut recovery = lock_state(
+                                    &self.recovery,
+                                    &self.topic,
+                                    "receive",
+                                    "recovery lock",
+                                )?;
+                                recovery.set_claim_cursor(claim.next_stream_id);
+                                if at_end {
+                                    recovery.mark_claim_complete(recovery_generation);
+                                }
+                            }
                             let mut deleted_count = claim.deleted_ids.len() as u64;
                             if has_missing_entries {
                                 deleted_count +=

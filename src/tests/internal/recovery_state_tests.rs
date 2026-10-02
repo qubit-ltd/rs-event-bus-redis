@@ -16,6 +16,73 @@ use std::time::Instant;
 
 use crate::internal::RecoveryGuard;
 use crate::internal::RecoveryState;
+use crate::internal::ReceiveAction;
+use crate::internal::ReceiveDriver;
+use crate::internal::ReceiveReply;
+
+/// A short receive that finishes claim but runs out of time before pending
+/// must continue at pending on the next call, then enter the new-entry path.
+#[test]
+fn test_short_receive_continues_completed_claim_across_calls() {
+    let started = Instant::now();
+    let timeout = Duration::from_millis(1);
+    let interval = Duration::from_secs(1);
+    let mut state = RecoveryState::new();
+    let (due, next, generation) = state.recovery_schedule(started);
+    let mut first = ReceiveDriver::new(timeout, started, interval, due, next).unwrap();
+    assert_eq!(first.next_action(started), ReceiveAction::Claim);
+    first.reply(ReceiveReply::ClaimAtEnd);
+    state.mark_claim_complete(generation);
+    assert_eq!(
+        first.next_action(started + timeout),
+        ReceiveAction::TimedOut
+    );
+
+    let resumed_at = started + timeout + Duration::from_millis(1);
+    let (due, next, generation) = state.recovery_schedule(resumed_at);
+    assert!(due);
+    let mut second = ReceiveDriver::new(timeout, resumed_at, interval, due, next).unwrap();
+    if state.claim_phase_complete() {
+        second.resume_pending();
+    }
+    assert_eq!(second.next_action(resumed_at), ReceiveAction::Pending);
+    second.reply(ReceiveReply::PendingEmpty);
+    let next = second
+        .complete_recovery_round(resumed_at)
+        .expect("complete round");
+    state.complete_recovery_at(next, generation);
+    let next_call_at = resumed_at + Duration::from_nanos(1);
+    let (due, next, _) = state.recovery_schedule(next_call_at);
+    assert!(!due);
+    let mut third = ReceiveDriver::new(timeout, next_call_at, interval, due, next).unwrap();
+    assert!(matches!(
+        third.next_action(next_call_at),
+        ReceiveAction::ReadNew { .. }
+    ));
+}
+
+/// A retry or cancelled receive invalidates a saved claim-complete phase.
+#[test]
+fn test_retry_and_cancel_reset_saved_claim_phase() {
+    let state = Arc::new(Mutex::new(RecoveryState::new()));
+    {
+        let mut recovery = state.lock().unwrap();
+        recovery.mark_claim_complete(0);
+        assert!(recovery.claim_phase_complete());
+        recovery.mark_retry("1-0");
+        assert!(!recovery.claim_phase_complete());
+        recovery.mark_claim_complete(0);
+        assert!(
+            !recovery.claim_phase_complete(),
+            "a stale claim response cannot undo a concurrent retry"
+        );
+        let generation = recovery.recovery_schedule(Instant::now()).2;
+        recovery.mark_claim_complete(generation);
+        assert!(recovery.claim_phase_complete());
+    }
+    drop(RecoveryGuard::new(Arc::clone(&state)));
+    assert!(!state.lock().unwrap().claim_phase_complete());
+}
 
 #[test]
 fn test_complete_recovery_persists_next_due_and_retry_forces_scan() {

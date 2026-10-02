@@ -76,6 +76,13 @@ impl ReceiveDriver {
         })
     }
 
+    /// Resumes an unfinished recovery after a prior call reached the terminal
+    /// claim cursor but ran out of time before finishing own-pending reads.
+    pub(crate) fn resume_pending(&mut self) {
+        self.stage = ReceiveStage::Pending;
+        self.claim_at_end = true;
+    }
+
     /// Persists a new scan deadline only after claim and own-pending phases
     /// have both reached their end, preserving recovery duty on partial work.
     ///

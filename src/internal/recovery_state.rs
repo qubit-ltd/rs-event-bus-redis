@@ -32,6 +32,9 @@ pub(crate) struct RecoveryState {
     force_recovery: bool,
     /// Advances when retry, failure, or cancellation creates new recovery duty.
     force_generation: u64,
+    /// A terminal claim response has been observed, so the next receive may
+    /// continue with this consumer's pending entries.
+    claim_phase_complete: bool,
 }
 
 /// Marks recovery due if an in-progress receive is cancelled or unwinds.
@@ -83,6 +86,7 @@ impl RecoveryState {
             next_recovery_at: None,
             force_recovery: true,
             force_generation: 0,
+            claim_phase_complete: false,
         }
     }
 
@@ -103,6 +107,20 @@ impl RecoveryState {
     /// generation. A retry during this scan will then remain distinguishable.
     pub(crate) fn begin_recovery(&mut self) {
         self.force_recovery = true;
+        self.claim_phase_complete = false;
+    }
+
+    /// Returns whether an unfinished recovery may resume after claim.
+    pub(crate) fn claim_phase_complete(&self) -> bool {
+        self.claim_phase_complete
+    }
+
+    /// Persists a terminal claim response unless a retry or cancellation
+    /// forced a new scan while that Redis command was in flight.
+    pub(crate) fn mark_claim_complete(&mut self, observed_generation: u64) {
+        if self.force_generation == observed_generation {
+            self.claim_phase_complete = true;
+        }
     }
 
     /// Forces claim and pending scans on the next receive without discarding
@@ -110,6 +128,7 @@ impl RecoveryState {
     pub(crate) fn force_recovery(&mut self) {
         self.force_recovery = true;
         self.force_generation = self.force_generation.saturating_add(1);
+        self.claim_phase_complete = false;
     }
 
     /// Records the next scan instant only after a complete recovery round.
@@ -119,6 +138,7 @@ impl RecoveryState {
     /// scan from clearing a retry or cancellation raised during its I/O.
     pub(crate) fn complete_recovery_at(&mut self, next: Instant, observed_generation: u64) {
         self.next_recovery_at = Some(next);
+        self.claim_phase_complete = false;
         if self.force_generation == observed_generation {
             self.force_recovery = false;
         }

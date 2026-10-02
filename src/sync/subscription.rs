@@ -167,9 +167,11 @@ impl EventSubscriptionSpi for Subscription {
             return Ok(ReceiveOutcome::TimedOut);
         }
         let started = Instant::now();
-        let (initial_recovery_due, next_recovery_at, recovery_generation) =
-            lock_state(&self.recovery, &self.topic, "receive", "recovery lock")?
-                .recovery_schedule(started);
+        let (initial_recovery_due, next_recovery_at, recovery_generation, resume_pending) = {
+            let recovery = lock_state(&self.recovery, &self.topic, "receive", "recovery lock")?;
+            let (due, next, generation) = recovery.recovery_schedule(started);
+            (due, next, generation, recovery.claim_phase_complete())
+        };
         let mut recovery_guard = RecoveryGuard::new(Arc::clone(&self.recovery));
         let mut connection = match self.receive_connection.take() {
             Some(connection) => connection,
@@ -187,6 +189,9 @@ impl EventSubscriptionSpi for Subscription {
                 next_recovery_at,
             )
             .map_err(|error| spi_error("receive", Some(&self.topic), error))?;
+            if initial_recovery_due && resume_pending {
+                driver.resume_pending();
+            }
             loop {
                 // Release the guard before read_entry acquires recovery state again.
                 let deferred = {
@@ -243,8 +248,18 @@ impl EventSubscriptionSpi for Subscription {
                             ReceiveReply::ClaimHasMore
                         });
                         let claimed = claim.claimed.into_iter().next();
-                        lock_state(&self.recovery, &self.topic, "receive", "recovery lock")?
-                            .set_claim_cursor(claim.next_stream_id);
+                        {
+                            let mut recovery = lock_state(
+                                &self.recovery,
+                                &self.topic,
+                                "receive",
+                                "recovery lock",
+                            )?;
+                            recovery.set_claim_cursor(claim.next_stream_id);
+                            if at_end {
+                                recovery.mark_claim_complete(recovery_generation);
+                            }
+                        }
                         let deleted_count = receive_tombstones::scan(
                             self,
                             &mut connection,
