@@ -39,7 +39,8 @@ impl RedisSubscriptionProfile {
         }
     }
 
-    /// Assigns a validated Redis consumer group and returns the updated profile.
+    /// Assigns a validated Redis consumer group and returns the updated
+    /// profile.
     #[must_use = "Use the returned profile."]
     pub fn consumer_group(mut self, group: ConsumerGroup) -> Self {
         self.consumer_group = Some(group);

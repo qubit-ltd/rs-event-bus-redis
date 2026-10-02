@@ -423,8 +423,12 @@ fn test_async_retry_after_applied_xack_lost_reply() -> Result<(), Box<dyn Error>
         let calls = Arc::new(AtomicUsize::new(0));
         let counter = calls.clone();
         let mut subscription = bus.subscribe(fixture.request()?).await?;
+<<<<<<< HEAD
         let _ = bus
             .publish(PublishRequest::new(Topic::new(TOPIC)?, "acknowledged".to_owned())?)
+=======
+        bus.publish(PublishRequest::new(Topic::new(TOPIC)?, "acknowledged".to_owned())?)
+>>>>>>> 5b333b5 (style(redis): apply project formatting alignment)
             .await?;
         let observe = async {
             gate.wait_applied().await;
