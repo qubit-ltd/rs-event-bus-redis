@@ -1,5 +1,80 @@
 # Redis public API workload benchmark
 
+## 2026-10-03 final-source fixed matrix (`108d0ad`)
+
+This run measures the final provider source revision `108d0ad947f98e26a723adbc50878e58c9684cf9` with the same public-SPI harness. It ran on Rust 1.94.0 against an owned Redis 7.4.8 standalone fixture. The complete fixed matrix covers sync/async, raw payloads of 64/4,096/262,144 bytes, concurrency 1/8/32, default/limited admission, and idle receivers 10/100; every configuration has three rounds of 1,000 attempts. The process exited 0, emitted all 120 summary rows and 120,000 per-attempt samples. Exit 0 means the harness completed; it does not mean every attempt succeeded.
+
+Reproduction command:
+
+```sh
+REDIS_BENCH_LABEL=redesign-final-20261003 \
+REDIS_BENCH_OUTPUT=/tmp/redis-redesign-benchmark-final-20261003 \
+REDIS_BENCH_ROUNDS=3 REDIS_BENCH_SAMPLES=1000 \
+REDIS_BENCH_SCENARIOS=round_trip,idle \
+cargo bench --locked --all-features --bench redis_workloads
+```
+
+Across 108,000 business attempts, 105,436 succeeded and 2,564 failed; 197 failures had an unknown outcome. The raw sample classifications were 1,243 `publish:resource_limit`, 950 `event_id_mismatch`, 174 transport errors, and 197 unknown outcomes. The mismatch samples are consistent with the harness cascade: an uncertain publish/settle can leave an older pending entry, while each subsequent attempt publishes once and does not recover the old token first. They are not evidence of Redis event corruption. The 12,000 idle polls all timed out without errors or unknown outcomes. Idle command deltas total 680 `XAUTOCLAIM` and 11,943 `XREADGROUP`.
+
+### Business matrix
+
+Each row aggregates three rounds (3,000 attempts). Throughput is the median of per-round events/second; p95/p99 are medians of per-round successful-sample percentiles. `unknown` is a subset of errors. Command counts are summed over the three rounds.
+
+| Mode | Admission | Payload B | Concurrency | Success / attempts | Errors (unknown) | Median events/s | p95 / p99 ms | Σ XAUTOCLAIM | Σ XREADGROUP |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| async | default | 64 | 1 | 3000/3000 | 0 (0) | 6280.3 | 0.3/0.4 | 3 | 3003 |
+| async | default | 64 | 8 | 3000/3000 | 0 (0) | 27853.9 | 0.4/0.8 | 24 | 3024 |
+| async | default | 64 | 32 | 3000/3000 | 0 (0) | 28889.8 | 2.4/5.6 | 96 | 3096 |
+| async | default | 4,096 | 1 | 3000/3000 | 0 (0) | 2073.4 | 0.6/1.0 | 3 | 3003 |
+| async | default | 4,096 | 8 | 3000/3000 | 0 (0) | 5899.8 | 1.9/17.4 | 24 | 3024 |
+| async | default | 4,096 | 32 | 3000/3000 | 0 (0) | 8094.7 | 4.9/49.6 | 96 | 3096 |
+| async | default | 262,144 | 1 | 3000/3000 | 0 (0) | 30.6 | 70.2/192.9 | 93 | 3093 |
+| async | default | 262,144 | 8 | 3000/3000 | 0 (0) | 39.1 | 830.0/1163.4 | 448 | 3448 |
+| async | default | 262,144 | 32 | 2547/3000 | 453 (55) | 51.9 | 1866.9/2501.3 | 995 | 4646 |
+| async | limited | 64 | 1 | 3000/3000 | 0 (0) | 1305.9 | 0.9/1.8 | 4 | 3004 |
+| async | limited | 64 | 8 | 3000/3000 | 0 (0) | 7722.4 | 2.9/5.0 | 24 | 3024 |
+| async | limited | 64 | 32 | 2538/3000 | 462 (0) | 11742.8 | 4.2/6.7 | 83 | 2621 |
+| async | limited | 4,096 | 1 | 3000/3000 | 0 (0) | 1911.5 | 0.7/2.4 | 3 | 3003 |
+| async | limited | 4,096 | 8 | 3000/3000 | 0 (0) | 6301.2 | 1.6/18.1 | 24 | 3024 |
+| async | limited | 4,096 | 32 | 3000/3000 | 0 (0) | 8147.9 | 4.1/47.1 | 96 | 3096 |
+| async | limited | 262,144 | 1 | 3000/3000 | 0 (0) | 29.7 | 47.6/690.4 | 87 | 3087 |
+| async | limited | 262,144 | 8 | 2907/3000 | 93 (10) | 47.4 | 882.6/1711.1 | 340 | 3423 |
+| async | limited | 262,144 | 32 | 2336/3000 | 664 (78) | 62.1 | 1172.2/1694.0 | 704 | 3382 |
+| sync | default | 64 | 1 | 3000/3000 | 0 (0) | 7209.1 | 0.2/0.4 | 3 | 3003 |
+| sync | default | 64 | 8 | 3000/3000 | 0 (0) | 8614.9 | 1.6/2.6 | 24 | 3024 |
+| sync | default | 64 | 32 | 3000/3000 | 0 (0) | 11250.9 | 4.7/14.5 | 96 | 3096 |
+| sync | default | 4,096 | 1 | 3000/3000 | 0 (0) | 2290.8 | 0.7/1.6 | 3 | 3003 |
+| sync | default | 4,096 | 8 | 3000/3000 | 0 (0) | 3504.7 | 3.8/10.4 | 24 | 3024 |
+| sync | default | 4,096 | 32 | 3000/3000 | 0 (0) | 6919.4 | 10.5/20.7 | 96 | 3096 |
+| sync | default | 262,144 | 1 | 3000/3000 | 0 (0) | 34.0 | 65.8/125.4 | 85 | 3085 |
+| sync | default | 262,144 | 8 | 3000/3000 | 0 (0) | 50.1 | 676.5/957.2 | 401 | 3401 |
+| sync | default | 262,144 | 32 | 2736/3000 | 264 (35) | 48.4 | 1822.4/2390.9 | 991 | 4122 |
+| sync | limited | 64 | 1 | 3000/3000 | 0 (0) | 7731.4 | 0.3/0.4 | 5 | 3005 |
+| sync | limited | 64 | 8 | 3000/3000 | 0 (0) | 11348.9 | 1.3/3.0 | 24 | 3024 |
+| sync | limited | 64 | 32 | 2795/3000 | 205 (0) | 10506.6 | 4.9/7.0 | 92 | 2887 |
+| sync | limited | 4,096 | 1 | 3000/3000 | 0 (0) | 1988.2 | 1.0/2.3 | 3 | 3003 |
+| sync | limited | 4,096 | 8 | 3000/3000 | 0 (0) | 1412.5 | 4.2/13.6 | 31 | 3031 |
+| sync | limited | 4,096 | 32 | 2976/3000 | 24 (0) | 4569.7 | 21.4/28.6 | 96 | 3072 |
+| sync | limited | 262,144 | 1 | 3000/3000 | 0 (0) | 22.1 | 94.0/800.3 | 113 | 3113 |
+| sync | limited | 262,144 | 8 | 2910/3000 | 90 (4) | 55.5 | 897.9/1482.0 | 309 | 3406 |
+| sync | limited | 262,144 | 32 | 2691/3000 | 309 (15) | 72.8 | 1687.0/2169.7 | 676 | 3573 |
+
+### Idle receiver matrix
+
+| Mode | Idle receivers | Timed out / attempts | Errors (unknown) | Median polls/s | p95 / p99 ms | Σ XAUTOCLAIM | Σ XREADGROUP |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| async | 10 | 3000/3000 | 0 (0) | 1808.3 | 7.0/9.0 | 40 | 3017 |
+| async | 100 | 3000/3000 | 0 (0) | 16226.5 | 7.2/8.6 | 300 | 2757 |
+| sync | 10 | 3000/3000 | 0 (0) | 1733.0 | 6.5/8.1 | 40 | 3038 |
+| sync | 100 | 3000/3000 | 0 (0) | 15323.9 | 7.0/7.2 | 300 | 3131 |
+
+### Fresh-fixture diagnostics
+
+The original matrix CSV remains unchanged. A separate invocation created a fresh owned Redis fixture and reran sync c32, 64 B and 256 KiB, default and limited, three rounds each (12,000 attempts; exit 0). The default 256 KiB group had 2,977/3,000 successes, 23 errors and 2 unknown outcomes, versus 2,736/3,000 successes, 264 errors and 35 unknown outcomes in the original matrix; two of the three fresh rounds were clean. This variability points to transport/unknown pressure under the shared host rather than a repeatable provider-data failure. The limited 64 B group had 2,805/3,000 successes and 195 errors, all `publish:resource_limit`, both in the original matrix and fresh fixture (fresh per-round failures: 90, 61, 44). This repeats the admission limit behavior when 32 publishers contend for a 24-command general lane (32 total minus 8 reserved settlement commands). The separate limited 256 KiB group had 233 errors, all `publish:resource_limit`, with no unknown or mismatch; default 64 B had none. The default 256 KiB recheck had 7 mismatch samples following its transport/unknown outcomes, matching the same harness cascade described above.
+
+All original and diagnostic samples are retained under `/tmp/redis-redesign-benchmark-final-20261003/` and `/tmp/redis-redesign-benchmark-final-recheck-20261003/`; no failed round was dropped or replaced. The executable SHA-256 was `1e65a56af9fd4f737ec8d81765060af29114cc65fdbf4739ab0733c80e274e4a`. Redis was 7.4.8. The host exposed 6 CPUs; the post-run load snapshot was 38.97/41.64/44.62 after the separate diagnostic run and is not per-round attribution. Treat throughput and transport failures as descriptive single-host observations, not stable capacity claims.
+
+
 ## 2026-10-03 pre-fix redesign run (`b61dd8b`)
 
 This run uses the checked-in public SPI harness from source revision
