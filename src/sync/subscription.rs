@@ -15,6 +15,7 @@ mod receive_command;
 mod receive_tombstones;
 
 use std::io::Error as IoError;
+use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
@@ -344,7 +345,12 @@ impl EventSubscriptionSpi for Subscription {
                         if let Some(entry) = entry
                             && let Some(outcome) = read_entry(self, &mut connection, entry, &mut driver)?
                         {
-                            return Ok(outcome);
+                            return Ok(match outcome {
+                                ReceiveOutcome::Message(message) => {
+                                    ReceiveOutcome::Message(message.with_provider_attempt(NonZeroU32::MIN))
+                                }
+                                other => other,
+                            });
                         }
                     }
                     ReceiveAction::TimedOut => return Ok(ReceiveOutcome::TimedOut),

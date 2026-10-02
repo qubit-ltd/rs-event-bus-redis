@@ -51,10 +51,16 @@ type TestResult = Result<(), Box<dyn Error>>;
 /// Creates a lazy single-slot bus for `url`; returns configuration/provider
 /// validation errors without connecting to the controlled endpoint.
 fn create_bus(url: &str) -> Result<Arc<dyn EventBusSpi>, Box<dyn Error>> {
+    create_bus_with_claim_min_idle(url, 0)
+}
+
+/// Creates a lazy bus with the requested claim delay; returns configuration
+/// errors before connecting to Redis.
+fn create_bus_with_claim_min_idle(url: &str, claim_min_idle_ms: usize) -> Result<Arc<dyn EventBusSpi>, Box<dyn Error>> {
     let options: ProviderOptions = [
         ("redis.url".into(), url.into()),
         ("redis.namespace".into(), "settlement-tests".into()),
-        ("redis.claim_min_idle_ms".into(), "0".into()),
+        ("redis.claim_min_idle_ms".into(), claim_min_idle_ms.to_string()),
         ("redis.max_unsettled_per_subscription".into(), "1".into()),
     ]
     .into();
@@ -63,6 +69,44 @@ fn create_bus(url: &str) -> Result<Arc<dyn EventBusSpi>, Box<dyn Error>> {
         .create_configured(&config)
         .map_err(|failure| failure.into_error())
         .map_err(Into::into)
+}
+
+/// A new stream delivery has one known provider attempt, while recovery paths
+/// retain unknown attempt counts.
+#[test]
+fn test_receive_provider_attempt_distinguishes_new_pending_and_claimed() -> TestResult {
+    let pending_server = RedisServer::start()?;
+    let pending_bus = create_bus_with_claim_min_idle(pending_server.url(), 60_000)?;
+    let _ = pending_bus.publish(message("pending-attempt")?)?;
+    let mut pending_receiver = pending_bus.subscribe(request()?)?;
+    let ReceiveOutcome::Message(new_message) = pending_receiver.receive(Duration::from_secs(2))? else {
+        return Err("new message missing".into());
+    };
+    assert_eq!(new_message.provider_attempt().map(|attempt| attempt.get()), Some(1));
+    pending_receiver.settle(
+        new_message.settlement().ok_or("new message settlement token missing")?,
+        DeliveryDisposition::Retry,
+    )?;
+    let ReceiveOutcome::Message(pending_message) = pending_receiver.receive(Duration::from_secs(2))? else {
+        return Err("pending message missing".into());
+    };
+    assert_eq!(pending_message.provider_attempt(), None);
+
+    let claim_server = RedisServer::start()?;
+    let claim_bus = create_bus(claim_server.url())?;
+    let _ = claim_bus.publish(message("claimed-attempt")?)?;
+    let mut first_receiver = claim_bus.subscribe(request()?)?;
+    let ReceiveOutcome::Message(first_message) = first_receiver.receive(Duration::from_secs(2))? else {
+        return Err("first claimed message delivery missing".into());
+    };
+    assert_eq!(first_message.provider_attempt().map(|attempt| attempt.get()), Some(1));
+    drop(first_receiver);
+    let mut claiming_receiver = claim_bus.subscribe(request()?)?;
+    let ReceiveOutcome::Message(claimed_message) = claiming_receiver.receive(Duration::from_secs(2))? else {
+        return Err("claimed message missing".into());
+    };
+    assert_eq!(claimed_message.provider_attempt(), None);
+    Ok(())
 }
 /// Builds the settlement event for `id` without I/O; returns invalid event
 /// identifier or fixed metadata validation errors.
