@@ -31,7 +31,6 @@ impl RedisSubscriptionProfile {
     /// consumer group.
     ///
     /// `start_position` is passed unchanged to every options builder.
-    #[must_use]
     pub fn new(start_position: StartPosition) -> Self {
         Self {
             start_position,
