@@ -137,7 +137,7 @@ fn applied_xadd_reply_loss(policy: DuplicateRiskPolicy) -> Result<(), Box<dyn st
     let proxy = ControlledRedis::start(server.url())?;
     let spi = bus(&proxy.url());
     let mut codecs = CodecRegistry::new();
-    codecs.register::<Vec<u8>>(Arc::new(BytesCodec(ContentType::new("text/plain")?)));
+    codecs.register::<Vec<u8>>(Arc::new(BytesCodec(ContentType::new("text/plain")?)))?;
     let facade = EventBus::with_config(
         ProviderId::new("redis-streams")?,
         spi,
@@ -252,7 +252,7 @@ fn async_applied_xadd_reply_loss_covers_both_duplicate_policies() -> Result<(), 
         )
         .unwrap();
         let mut codecs = CodecRegistry::new();
-        codecs.register::<Vec<u8>>(Arc::new(BytesCodec(ContentType::new("text/plain")?)));
+        codecs.register::<Vec<u8>>(Arc::new(BytesCodec(ContentType::new("text/plain")?)))?;
         let facade = AsyncEventBus::with_config(
             ProviderId::new("redis-streams")?,
             spi,
@@ -355,8 +355,8 @@ fn applied_dlq_xadd_lost_reply_stops_and_preserves_durable_source() -> Result<()
     let spi = bus(&proxy.url());
     let _ = spi.publish(message())?;
     let mut codecs = CodecRegistry::new();
-    codecs.register::<Vec<u8>>(Arc::new(BytesCodec(ContentType::new("text/plain")?)));
-    codecs.register::<DeadLetterEvent<Vec<u8>>>(Arc::new(DeadBytesCodec(ContentType::new("text/plain")?)));
+    codecs.register::<Vec<u8>>(Arc::new(BytesCodec(ContentType::new("text/plain")?)))?;
+    codecs.register::<DeadLetterEvent<Vec<u8>>>(Arc::new(DeadBytesCodec(ContentType::new("text/plain")?)))?;
     let facade = EventBus::with_config(
         ProviderId::new("redis-streams")?,
         Arc::clone(&spi),
@@ -481,8 +481,8 @@ fn async_applied_dlq_reply_loss_preserves_durable_source() -> Result<(), Box<dyn
     .unwrap();
     let _ = futures_lite::future::block_on(spi.publish(message()))?;
     let mut codecs = CodecRegistry::new();
-    codecs.register::<Vec<u8>>(Arc::new(BytesCodec(ContentType::new("text/plain")?)));
-    codecs.register::<DeadLetterEvent<Vec<u8>>>(Arc::new(DeadBytesCodec(ContentType::new("text/plain")?)));
+    codecs.register::<Vec<u8>>(Arc::new(BytesCodec(ContentType::new("text/plain")?)))?;
+    codecs.register::<DeadLetterEvent<Vec<u8>>>(Arc::new(DeadBytesCodec(ContentType::new("text/plain")?)))?;
     let facade = AsyncEventBus::with_config(
         ProviderId::new("redis-streams")?,
         Arc::clone(&spi),

@@ -17,17 +17,15 @@ use std::time::Duration;
 
 use qubit_event_bus::DeliveryError;
 use qubit_event_bus::EventBusRegistry;
-use qubit_event_bus::SubscriberId;
 use qubit_event_bus::model::ConsumerGroup;
 use qubit_event_bus::model::PublishRequest;
 use qubit_event_bus::model::StartPosition;
 use qubit_event_bus::model::SubscribeRequest;
-use qubit_event_bus::model::SubscriptionDurability;
 use qubit_event_bus::model::Topic;
 use qubit_event_bus::registry::EventBusConfig;
 use qubit_event_bus::spi::ShutdownMode;
 use qubit_event_bus::spi::ShutdownOutcome;
-use qubit_event_bus_redis as _;
+use qubit_event_bus_redis::RedisSubscriptionProfile;
 use qubit_spi::ProviderSelection;
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -47,13 +45,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     let topic = Topic::<String>::new("orders.created")?;
     let (sender, receiver) = mpsc::channel();
     let subscription = bus.subscribe(
-        SubscribeRequest::builder()
-            .subscriber_id(SubscriberId::new("sentinel-orders-example")?)
-            .topic(topic.clone())
-            .consumer_group(ConsumerGroup::new("billing")?)
-            .durability(SubscriptionDurability::Durable)
-            .start_position(StartPosition::Earliest)
-            .build()?,
+        SubscribeRequest::new("sentinel-orders-example", topic.clone())?.with_options(
+            RedisSubscriptionProfile::new(StartPosition::Earliest)
+                .consumer_group(ConsumerGroup::new("billing")?)
+                .options()
+                .build(),
+        ),
         move |delivery| {
             sender
                 .send(delivery.payload().clone())

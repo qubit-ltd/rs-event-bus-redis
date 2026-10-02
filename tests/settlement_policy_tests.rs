@@ -108,7 +108,7 @@ impl EventCodec<String> for Utf8Codec {
 
 fn facade_config() -> Result<EventBusFacadeConfig, Box<dyn Error>> {
     let mut codecs = CodecRegistry::new();
-    codecs.register::<String>(Arc::new(Utf8Codec(ContentType::new("text/plain")?)));
+    codecs.register::<String>(Arc::new(Utf8Codec(ContentType::new("text/plain")?)))?;
     let config = EventBusFacadeConfig::new().with_codec_registry(Arc::new(codecs));
     let scheduling = config.delivery_scheduling();
     assert_eq!(scheduling.max_running_handlers().get(), 4);

@@ -377,7 +377,7 @@ mod durable {
                 })?,
                 calls: Arc::clone(&calls),
                 panic,
-            }));
+            }))?;
             let facade = EventBus::with_config(
                 ProviderId::new("redis-streams")?,
                 Arc::clone(&spi),

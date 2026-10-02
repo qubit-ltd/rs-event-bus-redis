@@ -84,7 +84,7 @@ fn test_sync_registry_discovers_and_creates_redis_provider() -> Result<(), Box<d
     let registry = EventBusRegistry::discover()?;
     assert!(registry.provider_ids().iter().any(|id| id.as_str() == "redis-streams"));
     let mut codecs = CodecRegistry::new();
-    codecs.register::<String>(Arc::new(Utf8Codec(ContentType::new("text/plain")?)));
+    codecs.register::<String>(Arc::new(Utf8Codec(ContentType::new("text/plain")?)))?;
     let facade = EventBusFacadeConfig::new().with_codec_registry(Arc::new(codecs));
     let config = redis_config(server.url())
         .with_selection(ProviderSelection::named("redis-streams")?)

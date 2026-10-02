@@ -20,17 +20,15 @@ use std::time::Duration;
 use futures_channel::oneshot;
 use futures_lite::future;
 use qubit_event_bus::AsyncEventBusRegistry;
-use qubit_event_bus::SubscriberId;
 use qubit_event_bus::model::ConsumerGroup;
 use qubit_event_bus::model::PublishRequest;
 use qubit_event_bus::model::StartPosition;
 use qubit_event_bus::model::SubscribeRequest;
-use qubit_event_bus::model::SubscriptionDurability;
 use qubit_event_bus::model::Topic;
 use qubit_event_bus::registry::EventBusConfig;
 use qubit_event_bus::spi::ShutdownMode;
 use qubit_event_bus::spi::ShutdownOutcome;
-use qubit_event_bus_redis as _;
+use qubit_event_bus_redis::RedisSubscriptionProfile;
 use qubit_spi::ProviderSelection;
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -46,13 +44,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         let topic = Topic::<String>::new("orders.created")?;
         let mut subscription = bus
             .subscribe(
-                SubscribeRequest::builder()
-                    .subscriber_id(SubscriberId::new("async-orders-example")?)
-                    .topic(topic.clone())
-                    .consumer_group(ConsumerGroup::new("billing")?)
-                    .durability(SubscriptionDurability::Durable)
-                    .start_position(StartPosition::Earliest)
-                    .build()?,
+                SubscribeRequest::new("async-orders-example", topic.clone())?.with_options(
+                    RedisSubscriptionProfile::new(StartPosition::Earliest)
+                        .consumer_group(ConsumerGroup::new("billing")?)
+                        .options()
+                        .build(),
+                ),
             )
             .await?;
         let _ = bus.publish(PublishRequest::new(topic, "order-43".to_owned())?).await?;

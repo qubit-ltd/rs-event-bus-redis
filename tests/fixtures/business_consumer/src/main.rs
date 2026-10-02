@@ -49,7 +49,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     ]
     .into();
     let mut codecs = CodecRegistry::new();
-    codecs.register::<String>(Arc::new(Utf8Codec(ContentType::new("text/plain")?)));
+    codecs.register::<String>(Arc::new(Utf8Codec(ContentType::new("text/plain")?)))?;
     let facade = EventBusFacadeConfig::new().with_codec_registry(Arc::new(codecs));
     let config = EventBusConfig::default()
         .with_provider_options(options)

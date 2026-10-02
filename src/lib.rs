@@ -40,6 +40,8 @@ mod poison;
 mod redis_event_bus_config;
 /// Redis provider failures.
 mod redis_provider_error;
+/// Explicit durable subscription settings for Redis Streams.
+mod redis_subscription_profile;
 /// Redis Streams response normalization shared by both receiver modes.
 #[cfg(any(feature = "sync", feature = "async"))]
 mod stream_protocol;
@@ -49,6 +51,8 @@ pub mod wire;
 mod wire_fields;
 #[cfg(any(feature = "sync", feature = "async"))]
 mod wire_limits;
+
+pub use redis_subscription_profile::RedisSubscriptionProfile;
 
 /// Synchronous SPI implementation.
 #[cfg(feature = "sync")]

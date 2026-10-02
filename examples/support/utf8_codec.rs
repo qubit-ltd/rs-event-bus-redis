@@ -46,7 +46,7 @@ impl EventCodec<String> for Utf8Codec {
 
 pub(crate) fn facade_config() -> Result<EventBusFacadeConfig, Box<dyn Error>> {
     let mut codecs = CodecRegistry::new();
-    codecs.register::<String>(Arc::new(Utf8Codec(ContentType::new("text/plain")?)));
+    codecs.register::<String>(Arc::new(Utf8Codec(ContentType::new("text/plain")?)))?;
     Ok(EventBusFacadeConfig::new().with_codec_registry(Arc::new(codecs)))
 }
 // END DOC UTF8 CODEC
