@@ -8,6 +8,10 @@
 `PayloadLimits` 的迁移见[核心迁移指南](https://github.com/qubit-ltd/rs-event-bus/blob/main/doc/migration.zh_CN.md)。
 codec 应精确验证元数据；需要读取历史 schema 时，明确记录并实现允许的版本集合。
 
+## 迁移 Redis 命令准入设置
+
+短命令总额度现在默认 64，其中 8 个名额保留给结算。专用 receiver 连接使用独立的 256 个默认上限，不占短命令额度。配置 `redis.max_concurrent_commands=1` 将被拒绝；没有保留旧行为的开关。总额度至少为 2；降低时须将 `redis.reserved_settlement_commands` 设为正数且小于总额度。省略保留数时默认 `min(8, 总额 - 1)`。命令限制属于每个已创建的 provider 实例，因此还须单独核算多个实例和其他 Redis 客户端。
+
 ## 替换调度配置并明确结算策略
 
 旧的 `SyncDeliverySchedulerConfig` / `DeliveryAdmissionConfig` 及对应 facade setter/getter 已删除。原来的执行与队列预算不能直接当成新的持有预算，应明确选择四个正数限额：

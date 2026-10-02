@@ -32,6 +32,14 @@ A complete top-level Redis rejection on the first XACK attempt can restore Open.
 
 Each dispatch obtains one action exactly once and reports a normalized reply only after a real response. Claim and own-pending scan quotas are independent: eight commands each per recovery round. Tombstone maintenance permits one XPENDING probe, four XRANGE checks and four total quarantine EVAL commands per round. Shared cursors and deferred records survive receive calls; the clock budget belongs to one call.
 
+Recovery scheduling is subscription state shared across receive calls. A new
+subscription's first receive scans pending work immediately. After a complete
+round the next round is due after `redis.recovery_interval_ms` (default 1,000
+ms); calls before that deadline skip claim and own-pending scans and read new
+entries. Retry, a failed receive, or cancellation after an async receive has
+started marks recovery due for the next call. Dropping a never-polled future
+does not change the schedule. An incomplete round does not advance the deadline.
+
 Zero timeout permits at most one claim, one own-pending read and one new-message read, all without BLOCK, with early delivery/Gap allowed; it skips tombstone scans and may quarantine one malformed record. `Duration::MAX` uses finite BLOCK intervals of at most one second. Finite deadlines stop additional recovery work and bound the chosen BLOCK; they do not force an already-started command to stop. Recovery preserves active deduplication, live records deferred behind gaps and Redis 6.2 tombstone repair.
 
 ## Connection policy and resource lifecycle
@@ -40,20 +48,21 @@ Zero timeout permits at most one claim, one own-pending read and one new-message
 | --- | ---: | --- |
 | `redis.connect_timeout_ms` | 2000 | 1–60,000 |
 | `redis.command_timeout_ms` | 2000 | 1–60,000 |
-| `redis.max_concurrent_commands` | 64 | 1–4,096 |
+| `redis.max_concurrent_commands` | 64 | 2–4,096 |
+| `redis.reserved_settlement_commands` | 8 | 1–(total commands − 1) |
 | `redis.max_active_receivers` | 256 | 1–4,096 |
 | `redis.max_idle_connections` | 8 | 1–64; at most concurrent commands |
 | `redis.max_payload_bytes` | 1,048,576 | 1–67,108,864 |
 | `redis.max_wire_bytes` | 8,388,608 | 1–268,435,456; at least payload limit |
 | `redis.sentinel.nodes` | unset | At most 16 valid host/port endpoints |
 
-The [guide](user_guide.md) lists the other existing options. New finite limits reject zero, signs, overflow and invalid decimal text. Lowering command concurrency below eight requires lowering idle retention as well.
+The [guide](user_guide.md) lists the other existing options. New finite limits reject zero, signs, overflow and invalid decimal text. Total command concurrency must be at least 2; the default settlement reservation is 8 when the total is 64, and for smaller configured totals defaults to `min(8, total − 1)`. Set the reservation explicitly when tuning total concurrency. Lowering command concurrency below eight requires lowering idle retention as well. Existing `redis.max_concurrent_commands=1` configurations are rejected and require migration; there is no compatibility mode.
 
 Standalone sync short operations take fail-fast RAII command permits and reuse idle connections outside network I/O locks. Every checkout restores read/write command waits; I/O/protocol/timeout failures discard the connection. Async standalone short operations share a multiplexed connection. An async mutex spans cold initialization for single-flight publication; cancellation leaves an empty cache. Monotonic generations ensure a failing old lease invalidates only its own generation, with overflow rejected rather than reused. Receiver reads use dedicated connections and response budgets of actual BLOCK plus command timeout.
 
 Sentinel discovery tries each configured node once, prioritizing the last successful node, queries `SENTINEL get-master-addr-by-name`, validates host/port and verifies candidate ROLE=master. Sentinel and master ACLs remain independent. Setup, probe and target command waits all use the transport policy. These master sockets are not pooled/cached as standalone command sockets. ROLE cannot prevent a later promotion; XADD is not transparently replayed after a write error.
 
-Command and receiver admission is shared by one created SPI instance and its Arc clones; a new `create_configured` call receives an independent budget. Registries do not merge these budgets and Redis has no global provider admission cap. There is no unbounded provider wait queue. Receivers reserve admission before setup and release it on close/drop even while tokens survive. Failure/cancellation releases local command permits, but a multiplexed driver or Redis may finish an in-flight request later. Caps do not count every server task/socket or bound all clients in a process. Closing resources does not require new receiver admission.
+Command admission is split into general and settlement lanes under one total budget; reserved settlement slots keep XACK eligible while general capacity is full. Receiver connections do not consume short-command permits. Command and receiver admission is shared by one created SPI instance and its Arc clones; a new `create_configured` call receives an independent budget. Registries do not merge these budgets and Redis has no global provider admission cap. There is no unbounded provider wait queue. Receivers reserve admission before setup and release it on close/drop even while tokens survive. Failure/cancellation releases local command permits, but a multiplexed driver or Redis may finish an in-flight request later. Caps do not count every server task/socket or bound all clients in a process. Closing resources does not require new receiver admission.
 
 Sync timeouts are soft per-stage/per-I/O waits. DNS, multiple address attempts, setup and sustained small packets can exceed the overall caller budget. The receive deadline is a scheduling constraint, not an absolute wall-clock deadline. This design does not add uncancellable helper threads to promise a sync hard deadline.
 
@@ -87,7 +96,7 @@ Accept/Reject ACK Redis PEL; Retry is local and leaves PEL pending. Closing does
 
 Accepted XADD does not prove fsync, replica durability or business completion. WAIT on a new observer connection does not fence a provider connection's writes. Sentinel tests must observe replicated group cursor, PEL IDs and owners rather than infer durability from that WAIT. Obsolete consumer cleanup requires stopping it and confirming empty PEL plus business retention requirements; no automatic DELCONSUMER is introduced.
 
-Task notification consumers deduplicate by TaskId and highest `state_version`, reject older versions and consult task service state. Failed notifications do not roll back committed task/business state. No transactional outbox is implemented here; applications needing joint state/notification commit must provide it.
+Task notification consumers deduplicate by TaskId and highest `state_version`, reject older versions and consult task service state. Failed notifications do not roll back committed task/business state. The Redis provider does not supply transactional outbox semantics; the typed SQLite task service has an optional outbox integration for its own task lifecycle transitions.
 
 This unreleased change adds finite timeout/resource/byte defaults, new public error variants and unknown-outcome rules. Review limits before deployment, adjust idle/concurrency together, stop blindly retrying unknown publish, and preserve unknown ACK intent. Wire v1 is retained. If a future release chooses a breaking version, publication is a separate operation; this tree does not claim a published `0.5.0`.
 

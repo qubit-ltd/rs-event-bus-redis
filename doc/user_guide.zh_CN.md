@@ -288,7 +288,10 @@ REDIS_SENTINEL_SERVICE_NAME=qeventbus \
 | `redis.url` | `redis://127.0.0.1/` | 单实例 Redis URL；不允许在 URL 中直接写 username/password。 |
 | `redis.namespace` | `qubit` | 用于生成 stream 和消费组 key 的命名空间。 |
 | `redis.claim_min_idle_ms` | `30000` | 其他 consumer 可以认领 pending entry 前所需的空闲毫秒数。 |
-| `redis.recovery_interval_ms` | `1000` | 长时间 receive 期间的恢复扫描间隔，可设为 50 至 60,000 毫秒。 |
+| `redis.recovery_interval_ms` | `1000` | 恢复扫描间隔，也适用于连续 receive 调用；范围为 50 至 60,000 毫秒。第一次 receive 会立即扫描。 |
+| `redis.max_concurrent_commands` | `64` | 短命令总准入上限，范围为 2 至 4,096。 |
+| `redis.reserved_settlement_commands` | `8` | 专供结算的短命令名额；必须大于零且小于总命令上限。总命令数低于 9 且未显式配置时，默认值为总额减 1。 |
+| `redis.max_active_receivers` | `256` | 专用活跃 receiver 连接上限，范围为 1 至 4,096。 |
 | `redis.max_unsettled_per_subscription` | `100` | 每个订阅已投递但未结算的消息上限；达到上限后 receive 会等待。 |
 | `redis.max_wire_bytes` | `8388608` | 序列化 wire 总字节上限。 |
 | `redis.max_payload_bytes` | `1048576` | 解码后 payload 字节上限。 |
@@ -322,7 +325,7 @@ Redis 提供至少一次投递，因此 handler 应具备幂等性。如果 hand
 
 每个订阅的未结算消息达到 `redis.max_unsettled_per_subscription` 后会暂停接收新记录。结算或 retry 后会释放容量。该设置限制进程内的投递压力，不会限制 Redis stream 增长。
 
-长时间等待的 `receive` 会每隔 `redis.recovery_interval_ms` 毫秒重新扫描恢复记录，默认 1,000 毫秒，可设为 50–60,000 毫秒。调小间隔能更快接管达到 idle threshold 的 pending 消息，同时会增加 Redis 扫描命令。
+每个订阅第一次 `receive` 都会立即检查 pending。后续 receive 调用共享恢复截止时间：在 `redis.recovery_interval_ms`（默认 1,000 毫秒，范围 50–60,000）到期前只读新记录，不重复扫描；长时间等待的 receive 仍会在间隔到期时继续恢复扫描。Retry、receive 错误或已 poll 的 async receive 被取消时，会强制下一次调用执行恢复。调小间隔能更快接管达到 idle threshold 的 pending 消息，同时会增加 Redis 扫描命令。
 
 `StartPosition::New` 会在当前 stream 尾部创建 group；`Earliest` 会从 `0-0` 开始创建新 group；`At("milliseconds-sequence")` 使用 Redis Stream ID。group 一旦创建，读取游标由 Redis 保留；之后更改请求的 start position 不会重置现有 group。
 
@@ -418,9 +421,9 @@ SPI 的结算状态只约束当前 receiver/token：
 
 ## 10. 怎样限制资源和消息尺寸
 
-同一个已创建 SPI 实例及其共享 Arc clone 共用预算。每次新的 `create_configured` 调用都会建立独立 client 预算；不同 registry 选出的实例不会共用整个进程或 Redis server 的全局准入限制。`max_concurrent_commands` 约束已准入的短操作；`max_active_receivers` 在 setup 前取得名额并约束活跃 receiver。失败、取消会释放本地命令名额；close/drop 释放 receiver 名额，token 继续存活也不会占用该名额。取消**不保证** multiplexed driver 停止请求，也不保证 Redis server 上已无在途命令。provider 不维护无界准入等待队列；专用阻塞读取与共享短命令通道分开。
+同一个已创建 SPI 实例及其共享 Arc clone 共用预算。每次新的 `create_configured` 调用都会建立独立 client 预算；不同 registry 选出的实例不会共用整个进程或 Redis server 的全局准入限制。`max_concurrent_commands` 约束已准入的短操作，默认总额度为 64；其中 `reserved_settlement_commands`（默认 8）在普通命令额度耗尽时仍留给结算。专用 receiver 连接使用独立的 `max_active_receivers` 限制（默认 256），不占短命令名额。总命令数至少为 2；旧值 1 属于不兼容配置，会被拒绝。降低总额度时，应显式调整低于总额的结算保留数。失败、取消会释放本地命令名额；close/drop 释放 receiver 名额，token 继续存活也不会占用该名额。取消**不保证** multiplexed driver 停止请求，也不保证 Redis server 上已无在途命令。provider 不维护无界准入等待队列；专用阻塞读取与共享短命令通道分开。
 
-活跃 receiver 上限不保证并发 poll 的每轮恢复工作都能准入；claim 等短恢复命令也共用命令预算。高并发 poll 应处理可重试的 `resource_limit`，可限制 poll 并发或调整预算；提高预算不保证消除拒绝，也不是服务端连接硬总上限。
+活跃 receiver 上限不保证并发 poll 的每轮恢复工作都能准入；claim 等短恢复命令共用普通命令通道。高并发 poll 应处理可重试的 `resource_limit`，可限制 poll 并发或调整预算；提高预算不保证消除拒绝，也不是服务端连接硬总上限。准入按 provider 实例隔离，observer、Sentinel 和其他服务连接不一定计入这些限制。
 
 `max_idle_connections` 默认为 8，且不得超过 `max_concurrent_commands`。短操作上限设为 8 以下时，应同时降低空闲保留数，例如同时设置 `redis.max_concurrent_commands=4` 和 `redis.max_idle_connections=4`；只降低前者会被配置校验拒绝。新增字节、时间、数量配置均为有限范围内的正十进制数，不能用 0 关闭限制。
 
@@ -430,11 +433,11 @@ SPI 的结算状态只约束当前 receiver/token：
 
 ## 11. 怎样维护消费组和处理下游通知
 
-通过 `XINFO CONSUMERS`、`XPENDING`、`XINFO GROUPS`、源 stream/隔离流 `XLEN` 和隔离流 `XRANGE` 检查处理停滞。随机 consumer 名称会随重启积累，provider 不自动执行 `DELCONSUMER`。清理旧 consumer 前须停止对应实例，确认其 PEL 已清空并满足业务保留要求。close 不确认消息、不删除 group 或 stream。未读历史被裁剪时可能静默丢失；pending 历史被裁剪可能产生 Gap，且无法重建 payload。
+使用命令准入错误和 `INFO commandstats` 查看命令活动；用 `XPENDING`、`XINFO CONSUMERS` 查看 pending 所有者/空闲时长，用 `XINFO GROUPS` 查看消费组游标，并通过源 stream/隔离流 `XLEN` 与隔离流 `XRANGE` 查看保留和隔离的记录。随机 consumer 名称会随重启积累，provider 不自动执行 `DELCONSUMER`。清理旧 consumer 前须停止对应实例，确认其 PEL 已清空并满足业务保留要求。close 不确认消息、不删除 group 或 stream。未读历史被裁剪时可能静默丢失；pending 历史被裁剪可能产生 Gap，且无法重建 payload。provider 没有内置指标 exporter，也不会自动保留或清理 stream/隔离流。
 
 Redis 持久化和复制由部署负责。`Accepted` 只证明 XADD 被接受，不证明 fsync、副本持久化、handler 成功或账单提交。在新 observer 连接执行 `WAIT`，不能为另一条 provider 连接的写入提供 fencing 保证。Sentinel 提升可能丢失尚未复制的写入或消费组状态；恢复验收须检查实际游标、pending ID 和 owner。
 
-对 `qubit-task` 通知，consumer 应按 `TaskId` 去重并保留最高 `state_version`，忽略重复、旧版本通知，并查询任务服务取得权威状态。通知失败不回滚已提交的任务或业务状态，通知可能丢失、迟到或重复。provider 和任务通知集成都不提供事务性 outbox。业务事务必须与持久通知一起提交时，应用须实现 outbox 及其发布器。
+处理 typed `qubit-task` 通知时，consumer 应按 `TaskId` 去重并保留最高 `state_version`，忽略重复、旧版本通知，并查询任务服务取得权威状态。typed SQLite task service 可启用可选 outbox，在自己的状态事务中捕获生命周期变更，并重试向 Redis 发布。投递仍是至少一次；这不会令无关的应用业务事务与任务状态或 Redis 原子提交。
 
 ## 12. 从 provider 0.5 升级
 

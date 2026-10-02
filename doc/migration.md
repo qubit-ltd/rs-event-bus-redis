@@ -10,6 +10,18 @@ explains the `decode(&EncodedPayload)`, `PublishFailure`, and `PayloadLimits`
 API changes. Register migrated codecs with exact metadata validation, or an
 explicit documented historical schema allowlist.
 
+## Migrate Redis command admission settings
+
+The short-command budget now defaults to 64 total slots, of which 8 are reserved
+for settlement. Dedicated receiver connections use a separate default cap of
+256 and do not consume this short-command budget. Configurations that set
+`redis.max_concurrent_commands=1` are rejected; there is no legacy behavior
+switch. Set the total to at least 2 and, when lowering it, set
+`redis.reserved_settlement_commands` to a positive value below the total. The
+omitted reservation defaults to `min(8, total - 1)`. Command limits remain
+local to each created provider instance, so account for multiple instances and
+other Redis clients separately.
+
 ## Replace scheduling configuration and choose a settlement policy
 
 The old `SyncDeliverySchedulerConfig` / `DeliveryAdmissionConfig` types and their facade setters/getters are removed. Their old execution and queue budgets are not interchangeable with the new ownership budget. Choose all four positive limits deliberately:

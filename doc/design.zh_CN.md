@@ -32,6 +32,8 @@ token 保存 Redis 坐标、receiver 身份和共享进度。终结路径为 Ope
 
 每次 dispatch 只取一次动作，仅在得到真实回复后提交归一反馈。每轮 claim 和本 consumer pending 扫描各最多 8 条命令；tombstone 维护最多执行一次 XPENDING、四次 XRANGE 和总计四次隔离 EVAL。共享游标及为 Gap 保留的记录跨 receive 调用延续，时钟预算属于单次调用。
 
+恢复调度状态属于订阅，并跨 receive 调用共享。新订阅第一次 receive 会立即扫描 pending。完整恢复轮次结束后，下一轮在 `redis.recovery_interval_ms`（默认 1,000 毫秒）后到期；截止前的调用跳过 claim 与本 consumer pending 扫描，直接读取新记录。Retry、receive 失败或已开始执行的 async receive 被取消时，会标记下一次调用立即恢复。未 poll 的 future 被丢弃不会改变调度。未完成的恢复轮次不会推进截止时间。
+
 零超时最多进行一次 claim、一次本 consumer pending 查询和一次新消息查询，均不带 BLOCK，可因 Message/Gap 提前返回；跳过 tombstone 扫描，允许隔离一条畸形记录。`Duration::MAX` 通过不超过一秒的有限 BLOCK 循环等待。有限截止时间停止新增恢复工作并限制所选 BLOCK，不能强制终止已发出的命令。恢复保留活跃去重、Gap 后延后交付的有效记录及 Redis 6.2 tombstone 修复。
 
 ## 连接策略与资源生命周期
@@ -40,7 +42,8 @@ token 保存 Redis 坐标、receiver 身份和共享进度。终结路径为 Ope
 | --- | ---: | --- |
 | `redis.connect_timeout_ms` | 2000 | 1–60,000 |
 | `redis.command_timeout_ms` | 2000 | 1–60,000 |
-| `redis.max_concurrent_commands` | 64 | 1–4,096 |
+| `redis.max_concurrent_commands` | 64 | 2–4,096 |
+| `redis.reserved_settlement_commands` | 8 | 1–总命令数减 1 |
 | `redis.max_active_receivers` | 256 | 1–4,096 |
 | `redis.max_idle_connections` | 8 | 1–64，且不超过并发命令上限 |
 | `redis.max_payload_bytes` | 1,048,576 | 1–67,108,864 |
@@ -53,7 +56,7 @@ standalone 同步短操作立即获取 RAII 命令名额，连接池锁不跨网
 
 Sentinel 每次解析对配置节点各尝试一次，优先探测上次成功节点，查询 `SENTINEL get-master-addr-by-name`，校验 host/port，再验证候选 ROLE=master。Sentinel/master ACL 分开，setup、探测及目标命令均受等待策略约束。master socket 不进入 standalone 连接池/cache。ROLE 后仍可能切换，写入失败后不会透明重放 XADD。
 
-同一个已创建 SPI 实例及其 Arc clone 共用命令、receiver 预算，新的 `create_configured` 调用获得独立预算。registry 不会合并各实例预算，Redis 也没有全局 provider 准入上限；provider 不维护无界等待队列。receiver 在 setup 前取得名额，close/drop 释放，token 存活不会延长占用。失败、取消释放本地命令名额，multiplexed driver 或 Redis 仍可能随后完成在途请求。限额不能约束所有 server 任务/socket，也不是整个进程全部 client 的总上限。关闭资源不需要新增 receiver 名额。
+短命令总额度分为普通与结算通道；普通命令耗尽时，保留名额仍允许 XACK 准入。receiver 连接不占用短命令名额。同一个已创建 SPI 实例及其 Arc clone 共用命令、receiver 预算，新的 `create_configured` 调用获得独立预算。registry 不会合并各实例预算，Redis 也没有全局 provider 准入上限；provider 不维护无界等待队列。receiver 在 setup 前取得名额，close/drop 释放，token 存活不会延长占用。失败、取消释放本地命令名额，multiplexed driver 或 Redis 仍可能随后完成在途请求。限额不能约束所有 server 任务/socket，也不是整个进程全部 client 的总上限。关闭资源不需要新增 receiver 名额。
 
 同步超时只是每阶段、每次 I/O 等待的软限制。DNS、多地址尝试、setup 和持续小包都可能使整体调用超出预算。receive 截止时间约束调度，不是绝对墙钟期限。本设计不通过无法取消的辅助线程承诺同步硬截止时间。
 
@@ -87,7 +90,7 @@ Accept/Reject 确认 Redis PEL，Retry 只释放本地占用并保留 PEL。关�
 
 XADD Accepted 不证明 fsync、副本持久化或业务完成。新 observer 连接上的 WAIT 无法为 provider 连接写入提供 fencing；Sentinel 验收应观察实际复制的消费组游标、PEL ID 和 owner。旧 consumer 清理须先停实例、确认 PEL 清空并满足业务保留要求，不引入自动 DELCONSUMER。
 
-任务通知 consumer 按 TaskId 和最高 `state_version` 去重，拒绝旧版本，并查询任务服务的权威状态。通知失败不回滚已提交的任务或业务状态。这里没有实现事务性 outbox，要求状态与通知一起提交的应用须自行提供。
+任务通知 consumer 按 TaskId 和最高 `state_version` 去重，拒绝旧版本，并查询任务服务的权威状态。通知失败不回滚已提交的任务或业务状态。Redis provider 本身不提供事务性 outbox；typed SQLite task service 为自身的任务生命周期转换提供可选 outbox 集成。
 
 当前未发布变更引入有限超时、资源/字节默认值、新公开错误变体和未知结果规则。部署前检查限额，同时调整 idle/concurrency，停止盲目重试未知 publish，并保留未知 ACK 原意图；wire v1 不变。未来破坏性版本的发布属于另一步操作，本文不表示已经发布 `0.5.0`。
 
