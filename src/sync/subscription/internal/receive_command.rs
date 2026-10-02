@@ -13,16 +13,13 @@ use redis::FromRedisValue;
 use redis::RedisError;
 use redis::Value;
 
-use crate::client::Client;
 use crate::client::PooledConnection;
 use crate::error::RedisProviderError;
 use crate::redis_provider_error::from_redis_error;
 
-/// Dedicated receiver commands reserve only short-command admission; BLOCK is
-/// exempt.
+/// Dedicated receiver commands are covered by the receiver permit.
 pub(super) trait ReceiveCommand {
-    /// Sends a receiver command with controlled socket waits and optional
-    /// admission.
+    /// Sends a receiver command on a dedicated socket with bounded socket waits.
     ///
     /// # Type Parameters
     ///
@@ -33,9 +30,6 @@ pub(super) trait ReceiveCommand {
     ///
     /// - `connection`: Dedicated receiver socket, discarded after uncertain
     ///   failures.
-    /// - `client`: Shared command admission and waiting-budget policy.
-    /// - `short`: Reserves short-command admission when true; BLOCK reads are
-    ///   exempt.
     ///
     /// # Returns
     ///
@@ -43,14 +37,11 @@ pub(super) trait ReceiveCommand {
     ///
     /// # Errors
     ///
-    /// Returns exhaustion before sending, sanitized setup/top-level rejection,
-    /// or an unknown receive outcome for I/O or malformed conversion
-    /// replies.
+    /// Returns sanitized setup/top-level rejection or an unknown receive
+    /// outcome for I/O or malformed conversion replies.
     fn query_receive<T: FromRedisValue>(
         &self,
         connection: &mut PooledConnection,
-        client: &Client,
-        short: bool,
     ) -> Result<T, RedisProviderError>;
 }
 impl ReceiveCommand for Cmd {
@@ -63,44 +54,33 @@ impl ReceiveCommand for Cmd {
     /// # Parameters
     ///
     /// - `connection`: Dedicated socket with finite waits.
-    /// - `client`: Admission and timeout policy shared by this receiver.
-    /// - `short`: Whether the request consumes one short-command permit.
     ///
     /// # Returns
     ///
-    /// The converted owned reply; the permit is released before returning.
+    /// The converted owned reply.
     ///
     /// # Errors
     ///
-    /// Returns pre-send exhaustion/setup errors, classified top-level
-    /// rejections, or outcome-unknown after uncertain I/O or
-    /// nested/protocol failures.
+    /// Returns setup errors, classified top-level rejections, or
+    /// outcome-unknown after uncertain I/O or nested/protocol failures.
     fn query_receive<T: FromRedisValue>(
         &self,
         connection: &mut PooledConnection,
-        client: &Client,
-        short: bool,
     ) -> Result<T, RedisProviderError> {
-        let _permit = if short { Some(client.try_command()?) } else { None };
-        if short {
-            let timeout = client.command_timeout();
-            connection
-                .set_read_timeout(Some(timeout))
-                .map_err(|error| from_redis_error("receive", &error))?;
-            connection
-                .set_write_timeout(Some(timeout))
-                .map_err(|error| from_redis_error("receive", &error))?;
-        }
         let raw = connection
             .req_command(self)
-            .map_err(|_| RedisProviderError::OutcomeUnknown { operation: "receive" })?;
+            .map_err(|_| RedisProviderError::OutcomeUnknown {
+                operation: "receive",
+            })?;
         if let Value::ServerError(error) = raw {
             let error: RedisError = error.into();
             return Err(from_redis_error("receive", &error));
         }
         T::from_owned_redis_value(raw).map_err(|_| {
             connection.discard();
-            RedisProviderError::OutcomeUnknown { operation: "receive" }
+            RedisProviderError::OutcomeUnknown {
+                operation: "receive",
+            }
         })
     }
 }
@@ -113,13 +93,14 @@ mod tests {
 
     use super::ReceiveCommand;
     use crate::client::Client;
+    use crate::client::CommandClass;
     use crate::config::RedisEventBusConfig;
     use crate::error::RedisProviderError;
     use crate::tests::support::redis_support::scripted_redis::ScriptedRedis;
     use crate::tests::support::redis_support::scripted_redis::Step;
 
     #[test]
-    fn test_sync_typed_receive_conversion_failure_releases_admission() {
+    fn test_sync_typed_receive_conversion_ignores_general_saturation() {
         // The public receiver currently requests Value. This deliberately tests
         // the private helper's generic conversion contract with u64 instead.
         let server = ScriptedRedis::start(vec![
@@ -132,58 +113,75 @@ mod tests {
         .expect("scripted Redis");
         let options: ProviderOptions = [
             ("redis.url".into(), format!("{}3", server.url())),
-            ("redis.max_concurrent_commands".into(), "1".into()),
+            ("redis.max_concurrent_commands".into(), "2".into()),
             ("redis.max_idle_connections".into(), "1".into()),
             ("redis.connect_timeout_ms".into(), "100".into()),
             ("redis.command_timeout_ms".into(), "100".into()),
         ]
         .into();
         let client =
-            Client::new(&RedisEventBusConfig::from_provider_options(&options).expect("settings")).expect("client");
+            Client::new(&RedisEventBusConfig::from_provider_options(&options).expect("settings"))
+                .expect("client");
         let mut command = cmd("ECHO");
         command.arg("bad");
-        // A pre-admitted pooled lease uses the helper's admission-exempt
-        // branch. A complete malformed reply must discard even an open socket.
-        let mut pooled = client.get_connection().expect("pooled lease");
+        // A complete malformed reply must discard even an open socket.
+        let mut pooled = client
+            .get_connection(CommandClass::General)
+            .expect("pooled lease");
         let error = command
-            .query_receive::<u64>(&mut pooled, &client, false)
+            .query_receive::<u64>(&mut pooled)
             .expect_err("invalid integer reply");
         assert!(matches!(
             error,
-            RedisProviderError::OutcomeUnknown { operation: "receive" }
+            RedisProviderError::OutcomeUnknown {
+                operation: "receive"
+            }
         ));
-        assert!(pooled.is_open(), "full malformed response leaves the socket open");
+        assert!(
+            pooled.is_open(),
+            "full malformed response leaves the socket open"
+        );
         drop(pooled);
         drop(
             client
-                .get_connection()
-                .expect("conversion failure discards idle lease and releases cap-one permit"),
+                .get_connection(CommandClass::General)
+                .expect("conversion failure discards idle lease and releases general permit"),
         );
-        let mut dedicated = client.get_dedicated_connection().expect("dedicated receiver socket");
-        let held = client.try_command().expect("occupy the single short-command slot");
-        assert!(matches!(
-            command.query_receive::<u64>(&mut dedicated, &client, true),
-            Err(RedisProviderError::ResourceLimit { .. })
-        ));
-        drop(held);
+        let mut dedicated = client
+            .get_dedicated_connection()
+            .expect("dedicated receiver socket");
+        let held = client
+            .try_command(CommandClass::General)
+            .expect("occupy general slot");
         let error = command
-            .query_receive::<u64>(&mut dedicated, &client, true)
+            .query_receive::<u64>(&mut dedicated)
             .expect_err("typed conversion fails");
         assert!(matches!(
             error,
-            RedisProviderError::OutcomeUnknown { operation: "receive" }
+            RedisProviderError::OutcomeUnknown {
+                operation: "receive"
+            }
         ));
-        drop(
-            client
-                .try_command()
-                .expect("conversion failure releases short-command admission"),
-        );
+        assert!(matches!(
+            client.try_command(CommandClass::General),
+            Err(RedisProviderError::ResourceLimit { .. })
+        ));
+        drop(held);
         let observed = server.finish();
-        assert_eq!(observed.iter().filter(|command| command[0] == "SELECT").count(), 3);
         assert_eq!(
-            observed.iter().filter(|command| command[0] == "ECHO").count(),
+            observed
+                .iter()
+                .filter(|command| command[0] == "SELECT")
+                .count(),
+            3
+        );
+        assert_eq!(
+            observed
+                .iter()
+                .filter(|command| command[0] == "ECHO")
+                .count(),
             2,
-            "contention must fail before sending"
+            "dedicated receiver sends despite general saturation"
         );
     }
 }

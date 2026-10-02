@@ -62,9 +62,14 @@ pub(super) fn scan(
         return Ok(deleted_count);
     }
 
-    let tombstone_cursor = lock_state(&subscription.recovery, &subscription.topic, "receive", "recovery lock")?
-        .tombstone_cursor()
-        .to_owned();
+    let tombstone_cursor = lock_state(
+        &subscription.recovery,
+        &subscription.topic,
+        "receive",
+        "recovery lock",
+    )?
+    .tombstone_cursor()
+    .to_owned();
     let pending_start = if tombstone_cursor == "0-0" {
         "-".to_owned()
     } else {
@@ -76,21 +81,28 @@ pub(super) fn scan(
         .arg(pending_start)
         .arg("+")
         .arg(4)
-        .query_receive(connection, &subscription.client, true)
+        .query_receive(connection)
         .map_err(|error| spi_error("receive", Some(&subscription.topic), error))?;
     let pending_rows = parse_pending_entries(pending_reply).map_err(|_| {
         spi_error(
             "receive",
             Some(&subscription.topic),
-            RedisProviderError::OutcomeUnknown { operation: "receive" },
+            RedisProviderError::OutcomeUnknown {
+                operation: "receive",
+            },
         )
     })?;
     let pending_row_count = pending_rows.len();
     let mut scan_complete = true;
     for (id, owner, idle_ms) in pending_rows {
         if idle_ms < subscription.claim_min_idle_ms as u64 {
-            lock_state(&subscription.recovery, &subscription.topic, "receive", "recovery lock")?
-                .set_tombstone_cursor(id);
+            lock_state(
+                &subscription.recovery,
+                &subscription.topic,
+                "receive",
+                "recovery lock",
+            )?
+            .set_tombstone_cursor(id);
             continue;
         }
         if !driver.budget_mut().take_tombstone_range(Instant::now()) {
@@ -101,31 +113,36 @@ pub(super) fn scan(
             .arg(&subscription.key)
             .arg(&id)
             .arg(&id)
-            .query_receive(connection, &subscription.client, true)
+            .query_receive(connection)
             .map_err(|error| spi_error("receive", Some(&subscription.topic), error))?;
         let rows = parse_range(raw_rows).map_err(|_| {
             spi_error(
                 "receive",
                 Some(&subscription.topic),
-                RedisProviderError::OutcomeUnknown { operation: "receive" },
+                RedisProviderError::OutcomeUnknown {
+                    operation: "receive",
+                },
             )
         })?;
         if rows.ids.is_empty() {
-            if !driver.budget_mut().take_maintenance_evaluation(Instant::now()) {
+            if !driver
+                .budget_mut()
+                .take_maintenance_evaluation(Instant::now())
+            {
                 scan_complete = false;
                 break;
             }
-            let _permit = subscription
-                .client
-                .try_command()
-                .map_err(|error| spi_error("receive", Some(&subscription.topic), error))?;
             let timeout = subscription.client.command_timeout();
             connection
                 .set_read_timeout(Some(timeout))
-                .map_err(|error| classified_spi_error("receive", Some(&subscription.topic), &error))?;
+                .map_err(|error| {
+                    classified_spi_error("receive", Some(&subscription.topic), &error)
+                })?;
             connection
                 .set_write_timeout(Some(timeout))
-                .map_err(|error| classified_spi_error("receive", Some(&subscription.topic), &error))?;
+                .map_err(|error| {
+                    classified_spi_error("receive", Some(&subscription.topic), &error)
+                })?;
             match quarantine(
                 connection,
                 &subscription.key,
@@ -149,10 +166,22 @@ pub(super) fn scan(
                 PoisonOutcome::Quarantined => {}
             }
         }
-        lock_state(&subscription.recovery, &subscription.topic, "receive", "recovery lock")?.set_tombstone_cursor(id);
+        lock_state(
+            &subscription.recovery,
+            &subscription.topic,
+            "receive",
+            "recovery lock",
+        )?
+        .set_tombstone_cursor(id);
     }
     if scan_complete && pending_row_count < 4 {
-        lock_state(&subscription.recovery, &subscription.topic, "receive", "recovery lock")?.reset_tombstone_cursor();
+        lock_state(
+            &subscription.recovery,
+            &subscription.topic,
+            "receive",
+            "recovery lock",
+        )?
+        .reset_tombstone_cursor();
     }
     Ok(deleted_count)
 }

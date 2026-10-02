@@ -21,13 +21,13 @@ use qubit_event_bus::spi::OutboundMessage;
 use qubit_event_bus::spi::TopicAddress;
 use qubit_event_bus::spi::TransportPayload;
 
-/// Uses finite 50ms transport waits and configurable admission caps.
+/// Uses finite 200ms transport waits and configurable admission caps.
 pub(crate) fn options(url: &str, cap: usize) -> ProviderOptions {
     [
         ("redis.url".into(), url.into()),
         ("redis.namespace".into(), "transport-tests".into()),
-        ("redis.connect_timeout_ms".into(), "50".into()),
-        ("redis.command_timeout_ms".into(), "50".into()),
+        ("redis.connect_timeout_ms".into(), "200".into()),
+        ("redis.command_timeout_ms".into(), "200".into()),
         ("redis.max_concurrent_commands".into(), cap.to_string()),
         ("redis.max_idle_connections".into(), "1".into()),
         ("redis.max_active_receivers".into(), "1".into()),
@@ -53,7 +53,9 @@ pub(crate) fn message() -> OutboundMessage {
 /// Asserts stable sanitized SPI kind and retry semantics.
 pub(crate) fn assert_error(error: SpiError, expected_kind: &str, expected_retryable: bool) {
     match error {
-        SpiError::Operation { kind, retryable, .. } => {
+        SpiError::Operation {
+            kind, retryable, ..
+        } => {
             assert_eq!(kind, expected_kind);
             assert_eq!(retryable, Some(expected_retryable));
         }

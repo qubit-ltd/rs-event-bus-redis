@@ -69,6 +69,8 @@ pub struct RedisEventBusConfig {
     command_timeout: Duration,
     /// The maximum concurrently admitted short commands per client.
     max_concurrent_commands: usize,
+    /// Short-command slots reserved for terminal XACK operations.
+    reserved_settlement_commands: usize,
     /// The maximum active receivers per client.
     max_active_receivers: usize,
     /// The maximum raw encoded payload size in bytes.
@@ -106,11 +108,18 @@ impl Debug for RedisEventBusConfig {
             .field("sentinel_credentials", &self.sentinel_credentials)
             .field("claim_min_idle_ms", &self.claim_min_idle_ms)
             .field("recovery_interval_ms", &self.recovery_interval_ms)
-            .field("max_unsettled_per_subscription", &self.max_unsettled_per_subscription)
+            .field(
+                "max_unsettled_per_subscription",
+                &self.max_unsettled_per_subscription,
+            )
             .field("max_idle_connections", &self.max_idle_connections)
             .field("connect_timeout", &self.connect_timeout)
             .field("command_timeout", &self.command_timeout)
             .field("max_concurrent_commands", &self.max_concurrent_commands)
+            .field(
+                "reserved_settlement_commands",
+                &self.reserved_settlement_commands,
+            )
             .field("max_active_receivers", &self.max_active_receivers)
             .field("max_payload_bytes", &self.max_payload_bytes)
             .field("max_wire_bytes", &self.max_wire_bytes)
@@ -142,6 +151,7 @@ impl Default for RedisEventBusConfig {
             connect_timeout: Duration::from_millis(2_000),
             command_timeout: Duration::from_millis(2_000),
             max_concurrent_commands: 64,
+            reserved_settlement_commands: 8,
             max_active_receivers: 256,
             max_payload_bytes: 1_048_576,
             max_wire_bytes: 8_388_608,
@@ -216,6 +226,7 @@ impl RedisEventBusConfig {
             "redis.connect_timeout_ms",
             "redis.command_timeout_ms",
             "redis.max_concurrent_commands",
+            "redis.reserved_settlement_commands",
             "redis.max_active_receivers",
             "redis.max_payload_bytes",
             "redis.max_wire_bytes",
@@ -227,13 +238,18 @@ impl RedisEventBusConfig {
             .keys()
             .any(|key| key.starts_with("redis.") && !KNOWN_OPTIONS.contains(&key.as_str()))
         {
-            return Err(RedisProviderError::Configuration("unknown Redis provider option"));
+            return Err(RedisProviderError::Configuration(
+                "unknown Redis provider option",
+            ));
         }
         let connection_url = options
             .get("redis.url")
             .map(String::as_str)
             .unwrap_or("redis://127.0.0.1/");
-        let namespace = options.get("redis.namespace").map(String::as_str).unwrap_or("qubit");
+        let namespace = options
+            .get("redis.namespace")
+            .map(String::as_str)
+            .unwrap_or("qubit");
         validate_url(connection_url)?;
         validate_namespace(namespace)?;
         let sentinel_nodes = options
@@ -242,13 +258,14 @@ impl RedisEventBusConfig {
             .transpose()?;
         let sentinel_service = options.get("redis.sentinel.service_name").cloned();
         let credentials = RedisCredentials::from_env_references(options, "redis")?;
-        let sentinel_credentials = RedisCredentials::from_env_references(options, "redis.sentinel")?;
+        let sentinel_credentials =
+            RedisCredentials::from_env_references(options, "redis.sentinel")?;
         let claim_min_idle_ms = options
             .get("redis.claim_min_idle_ms")
             .map(|value| {
-                value
-                    .parse::<usize>()
-                    .map_err(|_| RedisProviderError::Configuration("invalid redis.claim_min_idle_ms"))
+                value.parse::<usize>().map_err(|_| {
+                    RedisProviderError::Configuration("invalid redis.claim_min_idle_ms")
+                })
             })
             .transpose()?
             .unwrap_or(30_000);
@@ -259,7 +276,9 @@ impl RedisEventBusConfig {
                     .parse::<usize>()
                     .ok()
                     .filter(|value| (50..=60_000).contains(value))
-                    .ok_or(RedisProviderError::Configuration("invalid redis.recovery_interval_ms"))
+                    .ok_or(RedisProviderError::Configuration(
+                        "invalid redis.recovery_interval_ms",
+                    ))
             })
             .transpose()?
             .unwrap_or(1_000);
@@ -283,21 +302,40 @@ impl RedisEventBusConfig {
                     .parse::<usize>()
                     .ok()
                     .filter(|value| (1..=64).contains(value))
-                    .ok_or(RedisProviderError::Configuration("invalid redis.max_idle_connections"))
+                    .ok_or(RedisProviderError::Configuration(
+                        "invalid redis.max_idle_connections",
+                    ))
             })
             .transpose()?
             .unwrap_or(8);
         let connect_timeout = parse_limit(options, "redis.connect_timeout_ms", 2000, 60000)?;
-        let connect_timeout = Duration::from_millis(
-            u64::try_from(connect_timeout)
-                .map_err(|_| RedisProviderError::Configuration("invalid redis.connect_timeout_ms"))?,
-        );
+        let connect_timeout =
+            Duration::from_millis(u64::try_from(connect_timeout).map_err(|_| {
+                RedisProviderError::Configuration("invalid redis.connect_timeout_ms")
+            })?);
         let command_timeout = parse_limit(options, "redis.command_timeout_ms", 2000, 60000)?;
-        let command_timeout = Duration::from_millis(
-            u64::try_from(command_timeout)
-                .map_err(|_| RedisProviderError::Configuration("invalid redis.command_timeout_ms"))?,
-        );
-        let max_concurrent_commands = parse_limit(options, "redis.max_concurrent_commands", 64, 4096)?;
+        let command_timeout =
+            Duration::from_millis(u64::try_from(command_timeout).map_err(|_| {
+                RedisProviderError::Configuration("invalid redis.command_timeout_ms")
+            })?);
+        let max_concurrent_commands =
+            parse_limit(options, "redis.max_concurrent_commands", 64, 4096)?;
+        if max_concurrent_commands < 2 {
+            return Err(RedisProviderError::Configuration(
+                "invalid redis.max_concurrent_commands",
+            ));
+        }
+        let reserved_settlement_commands = parse_limit(
+            options,
+            "redis.reserved_settlement_commands",
+            8.min(max_concurrent_commands - 1),
+            4095,
+        )?;
+        if reserved_settlement_commands >= max_concurrent_commands {
+            return Err(RedisProviderError::Configuration(
+                "redis.reserved_settlement_commands must be less than redis.max_concurrent_commands",
+            ));
+        }
         let max_active_receivers = parse_limit(options, "redis.max_active_receivers", 256, 4096)?;
         let max_payload_bytes = parse_limit(options, "redis.max_payload_bytes", 1048576, 67108864)?;
         let max_wire_bytes = parse_limit(options, "redis.max_wire_bytes", 8388608, 268435456)?;
@@ -319,13 +357,22 @@ impl RedisEventBusConfig {
                     .parse::<usize>()
                     .ok()
                     .and_then(NonZeroUsize::new)
-                    .ok_or(RedisProviderError::Configuration("invalid redis.stream_maxlen_approx"))
+                    .ok_or(RedisProviderError::Configuration(
+                        "invalid redis.stream_maxlen_approx",
+                    ))
             })
             .transpose()?;
-        let allow_lossy_retention = match options.get("redis.allow_lossy_retention").map(String::as_str) {
+        let allow_lossy_retention = match options
+            .get("redis.allow_lossy_retention")
+            .map(String::as_str)
+        {
             None | Some("false") => false,
             Some("true") => true,
-            Some(_) => return Err(RedisProviderError::Configuration("invalid redis.allow_lossy_retention")),
+            Some(_) => {
+                return Err(RedisProviderError::Configuration(
+                    "invalid redis.allow_lossy_retention",
+                ));
+            }
         };
         if stream_maxlen_approx.is_some() != allow_lossy_retention {
             return Err(RedisProviderError::Configuration(
@@ -356,6 +403,7 @@ impl RedisEventBusConfig {
             connect_timeout,
             command_timeout,
             max_concurrent_commands,
+            reserved_settlement_commands,
             max_active_receivers,
             max_payload_bytes,
             max_wire_bytes,
@@ -483,11 +531,20 @@ impl RedisEventBusConfig {
     ///
     /// # Returns
     ///
-    /// The validated admission limit from 1 through 4,096 commands.
+    /// The validated total admission limit from 2 through 4,096 commands.
     #[must_use]
     #[inline]
     pub const fn max_concurrent_commands(&self) -> usize {
         self.max_concurrent_commands
+    }
+
+    /// Returns the short-command slots reserved for terminal acknowledgements.
+    ///
+    /// The value is at least one and strictly below the total command limit.
+    #[must_use]
+    #[inline]
+    pub const fn reserved_settlement_commands(&self) -> usize {
+        self.reserved_settlement_commands
     }
 
     /// Returns the maximum active receivers per client.
@@ -583,7 +640,10 @@ impl RedisEventBusConfig {
     #[must_use]
     #[inline]
     pub(crate) fn sentinel_credentials(&self) -> (&Option<String>, &Option<String>) {
-        (&self.sentinel_credentials.username, &self.sentinel_credentials.password)
+        (
+            &self.sentinel_credentials.username,
+            &self.sentinel_credentials.password,
+        )
     }
 
     /// Returns the per-subscription bound for delivered, unsettled records.
@@ -654,11 +714,15 @@ fn parse_limit(
 fn parse_sentinel_nodes(nodes: &str) -> Result<Vec<String>, RedisProviderError> {
     let endpoints: Vec<_> = nodes.split(',').map(str::trim).collect();
     if endpoints.len() > 16 {
-        return Err(RedisProviderError::Configuration("invalid redis.sentinel.nodes"));
+        return Err(RedisProviderError::Configuration(
+            "invalid redis.sentinel.nodes",
+        ));
     }
     for endpoint in &endpoints {
         let Some((host, port)) = endpoint.rsplit_once(':') else {
-            return Err(RedisProviderError::Configuration("invalid redis.sentinel.nodes"));
+            return Err(RedisProviderError::Configuration(
+                "invalid redis.sentinel.nodes",
+            ));
         };
         let valid_host = !host.is_empty()
             && !host
@@ -674,7 +738,9 @@ fn parse_sentinel_nodes(nodes: &str) -> Result<Vec<String>, RedisProviderError> 
             || !port.bytes().all(|byte| byte.is_ascii_digit())
             || port.parse::<u16>().ok().is_none_or(|port| port == 0)
         {
-            return Err(RedisProviderError::Configuration("invalid redis.sentinel.nodes"));
+            return Err(RedisProviderError::Configuration(
+                "invalid redis.sentinel.nodes",
+            ));
         }
     }
     Ok(endpoints.into_iter().map(str::to_owned).collect())
@@ -698,8 +764,8 @@ fn parse_sentinel_nodes(nodes: &str) -> Result<Vec<String>, RedisProviderError> 
 /// Returns a generic configuration error for malformed URLs or embedded
 /// credentials, without preserving the parser diagnostic.
 fn validate_url(connection_url: &str) -> Result<(), RedisProviderError> {
-    let client =
-        RedisClient::open(connection_url).map_err(|_| RedisProviderError::Configuration("invalid redis.url"))?;
+    let client = RedisClient::open(connection_url)
+        .map_err(|_| RedisProviderError::Configuration("invalid redis.url"))?;
     let parsed = client.get_connection_info();
     if parsed.redis.password.is_some() || parsed.redis.username.is_some() {
         return Err(RedisProviderError::Configuration(

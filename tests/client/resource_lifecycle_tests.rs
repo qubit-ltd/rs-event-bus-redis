@@ -78,7 +78,7 @@ fn assert_receiver_limit<T>(result: Result<T, SpiError>) {
 fn test_sync_command_cap_releases_after_pending_publish_completes() {
     let server = RedisServer::start().expect("isolated Redis");
     let proxy = ControlledRedis::start(server.url()).expect("proxy");
-    let mut settings = options(&proxy.url(), 1);
+    let mut settings = options(&proxy.url(), 2);
     settings.insert("redis.command_timeout_ms".into(), "2000".into());
     let bus = RedisEventBusProvider
         .create_configured(&EventBusConfig::default().with_provider_options(settings))
@@ -93,20 +93,32 @@ fn test_sync_command_cap_releases_after_pending_publish_completes() {
     assert!(reached, "first XADD must be pending at reply gate");
     let (sender, receiver) = channel();
     let second_bus = Arc::clone(&bus);
-    let second = spawn(move || sender.send(second_bus.publish(message())).expect("watchdog"));
+    let second = spawn(move || {
+        sender
+            .send(second_bus.publish(message()))
+            .expect("watchdog")
+    });
     let rejected = receiver.recv_timeout(Duration::from_millis(250));
     let mut connection = Client::open(server.url())
         .expect("Redis client")
         .get_connection()
         .expect("inspection connection");
-    let keys: Vec<String> = cmd("KEYS").arg("*").query(&mut connection).expect("stream keys");
+    let keys: Vec<String> = cmd("KEYS")
+        .arg("*")
+        .query(&mut connection)
+        .expect("stream keys");
     assert_eq!(keys.len(), 1);
-    let entries: usize = cmd("XLEN").arg(&keys[0]).query(&mut connection).expect("stream length");
+    let entries: usize = cmd("XLEN")
+        .arg(&keys[0])
+        .query(&mut connection)
+        .expect("stream length");
     gate.release();
     let _ = first.join().expect("first worker").expect("first publish");
     second.join().expect("second worker");
     assert_error(
-        rejected.expect("second publish fails fast").expect_err("command cap"),
+        rejected
+            .expect("second publish fails fast")
+            .expect_err("command cap"),
         "resource_limit",
         true,
     );
@@ -114,7 +126,10 @@ fn test_sync_command_cap_releases_after_pending_publish_completes() {
     let _ = bus
         .publish(message())
         .expect("completed publish releases command permit");
-    let entries: usize = cmd("XLEN").arg(&keys[0]).query(&mut connection).expect("stream length");
+    let entries: usize = cmd("XLEN")
+        .arg(&keys[0])
+        .query(&mut connection)
+        .expect("stream length");
     assert_eq!(entries, 2);
 }
 
@@ -128,7 +143,9 @@ fn test_sync_receiver_cap_close_and_drop_release_exactly_once() {
     ])
     .expect("scripted Redis");
     let bus = RedisEventBusProvider
-        .create_configured(&EventBusConfig::default().with_provider_options(options(server.url(), 8)))
+        .create_configured(
+            &EventBusConfig::default().with_provider_options(options(server.url(), 8)),
+        )
         .expect("provider");
     let mut first = bus.subscribe(request(1)).expect("first receiver");
     assert_receiver_limit(bus.subscribe(request(2)));
@@ -153,7 +170,9 @@ fn test_sync_failed_subscribe_releases_receiver_permit() {
     ])
     .expect("scripted Redis");
     let bus = RedisEventBusProvider
-        .create_configured(&EventBusConfig::default().with_provider_options(options(server.url(), 8)))
+        .create_configured(
+            &EventBusConfig::default().with_provider_options(options(server.url(), 8)),
+        )
         .expect("provider");
     match bus.subscribe(request(1)) {
         Err(error) => assert_error(error, "wrong_type", false),
@@ -171,11 +190,14 @@ fn test_sync_failed_subscribe_releases_receiver_permit() {
 fn test_sync_retained_message_does_not_hold_receiver_permit_after_close() {
     let server = RedisServer::start().expect("isolated Redis");
     let bus = RedisEventBusProvider
-        .create_configured(&EventBusConfig::default().with_provider_options(options(server.url(), 8)))
+        .create_configured(
+            &EventBusConfig::default().with_provider_options(options(server.url(), 8)),
+        )
         .expect("provider");
     let _ = bus.publish(message()).expect("publish");
     let mut first = bus.subscribe(request(1)).expect("first receiver");
-    let ReceiveOutcome::Message(received) = first.receive(Duration::from_secs(1)).expect("receive") else {
+    let ReceiveOutcome::Message(received) = first.receive(Duration::from_secs(1)).expect("receive")
+    else {
         panic!("published message must be received");
     };
     first.close().expect("close");
@@ -201,18 +223,26 @@ fn test_async_receiver_cap_close_and_drop_release_exactly_once() {
         ])
         .expect("scripted Redis");
         let bus = AsyncRedisEventBusProvider
-            .create_configured(&EventBusConfig::default().with_provider_options(options(server.url(), 8)))
+            .create_configured(
+                &EventBusConfig::default().with_provider_options(options(server.url(), 8)),
+            )
             .await
             .expect("provider");
         let mut first = bus.subscribe(request(1)).await.expect("first receiver");
         assert_receiver_limit(bus.subscribe(request(2)).await);
         first.close().await.expect("close releases receiver permit");
         first.close().await.expect("close is idempotent");
-        let second = bus.subscribe(request(2)).await.expect("close restores admission");
+        let second = bus
+            .subscribe(request(2))
+            .await
+            .expect("close restores admission");
         drop(first);
         assert_receiver_limit(bus.subscribe(request(3)).await);
         drop(second);
-        let third = bus.subscribe(request(3)).await.expect("drop restores admission");
+        let third = bus
+            .subscribe(request(3))
+            .await
+            .expect("drop restores admission");
         drop(third);
         let commands = server.finish();
         assert_eq!(commands.len(), 3, "only admitted subscriptions send XGROUP");
@@ -229,7 +259,9 @@ fn test_async_failed_subscribe_releases_receiver_permit() {
         ])
         .expect("scripted Redis");
         let bus = AsyncRedisEventBusProvider
-            .create_configured(&EventBusConfig::default().with_provider_options(options(server.url(), 8)))
+            .create_configured(
+                &EventBusConfig::default().with_provider_options(options(server.url(), 8)),
+            )
             .await
             .expect("provider");
         match bus.subscribe(request(1)).await {
@@ -251,12 +283,18 @@ fn test_async_retained_message_does_not_hold_receiver_permit_after_close() {
     block_on(async {
         let server = RedisServer::start().expect("isolated Redis");
         let bus = AsyncRedisEventBusProvider
-            .create_configured(&EventBusConfig::default().with_provider_options(options(server.url(), 8)))
+            .create_configured(
+                &EventBusConfig::default().with_provider_options(options(server.url(), 8)),
+            )
             .await
             .expect("provider");
         let _ = bus.publish(message()).await.expect("publish");
         let mut first = bus.subscribe(request(1)).await.expect("first receiver");
-        let ReceiveOutcome::Message(received) = first.receive(Duration::from_secs(1)).await.expect("receive") else {
+        let ReceiveOutcome::Message(received) = first
+            .receive(Duration::from_secs(1))
+            .await
+            .expect("receive")
+        else {
             panic!("published message must be received");
         };
         first.close().await.expect("close");
@@ -284,7 +322,7 @@ fn test_sync_short_connection_setup_failure_releases_subscribe_resources() {
         Step::reply("XGROUP", b"+OK\r\n"),
     ])
     .expect("scripted Redis");
-    let settings = options(&format!("{}3", server.url()), 1);
+    let settings = options(&format!("{}3", server.url()), 2);
     let bus = RedisEventBusProvider
         .create_configured(&EventBusConfig::default().with_provider_options(settings))
         .expect("provider");
@@ -312,7 +350,10 @@ fn test_sync_short_connection_setup_failure_releases_subscribe_resources() {
     receiver.close().expect("close recovered receiver");
     let observed = server.finish();
     assert_eq!(
-        observed.iter().map(|command| command[0].as_str()).collect::<Vec<_>>(),
+        observed
+            .iter()
+            .map(|command| command[0].as_str())
+            .collect::<Vec<_>>(),
         ["SELECT", "SELECT", "SELECT", "SELECT", "XGROUP"],
         "failed short setup must not send XGROUP or publish a reusable connection"
     );
@@ -334,7 +375,7 @@ fn test_async_short_connection_setup_failure_releases_subscribe_resources() {
         Step::reply("XGROUP", b"+OK\r\n"),
     ])
     .expect("scripted Redis");
-    let settings = options(&format!("{}3", server.url()), 1);
+    let settings = options(&format!("{}3", server.url()), 2);
     block_on(async {
         let bus = AsyncRedisEventBusProvider
             .create_configured(&EventBusConfig::default().with_provider_options(settings))
@@ -358,15 +399,17 @@ fn test_async_short_connection_setup_failure_releases_subscribe_resources() {
             Err(error) => panic!("unexpected setup error: {error}"),
             Ok(_) => panic!("short connection setup must fail after dedicated setup succeeds"),
         }
-        let mut receiver = bus
-            .subscribe(request(2))
-            .await
-            .expect("failed initialization leaves cache empty and releases receiver/command permits");
+        let mut receiver = bus.subscribe(request(2)).await.expect(
+            "failed initialization leaves cache empty and releases receiver/command permits",
+        );
         receiver.close().await.expect("close recovered receiver");
     });
     let observed = server.finish();
     assert_eq!(
-        observed.iter().map(|command| command[0].as_str()).collect::<Vec<_>>(),
+        observed
+            .iter()
+            .map(|command| command[0].as_str())
+            .collect::<Vec<_>>(),
         ["SELECT", "SELECT", "SELECT", "SELECT", "XGROUP"],
         "failed short setup must not send XGROUP or publish a reusable connection"
     );

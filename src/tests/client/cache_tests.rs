@@ -33,6 +33,7 @@ use redis::aio::ConnectionLike;
 use redis::pipe;
 
 use crate::client::Client;
+use crate::client::CommandClass;
 use crate::config::RedisEventBusConfig;
 
 /// Owns setup/ECHO workers and records database/pipeline traffic for generation
@@ -101,7 +102,10 @@ impl SetupEndpoint {
                                 }
                                 let reply = match command[0].as_str() {
                                     "CLIENT" | "SELECT" => b"+OK\r\n".to_vec(),
-                                    "ECHO" => format!("${}\r\n{}\r\n", command[1].len(), command[1]).into_bytes(),
+                                    "ECHO" => {
+                                        format!("${}\r\n{}\r\n", command[1].len(), command[1])
+                                            .into_bytes()
+                                    }
                                     other => panic!("unexpected fixture command {other}"),
                                 };
                                 if reader.get_mut().write_all(&reply).is_err() {
@@ -110,7 +114,9 @@ impl SetupEndpoint {
                             }
                         }));
                     }
-                    Err(error) if error.kind() == ErrorKind::WouldBlock => sleep(Duration::from_millis(1)),
+                    Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                        sleep(Duration::from_millis(1))
+                    }
                     Err(_) => break,
                 }
             }
@@ -154,13 +160,19 @@ fn test_stale_generation_failure_preserves_new_connection() {
     let settings = RedisEventBusConfig::new(&server.url, "generation").expect("settings");
     let client = Client::new(&settings).expect("client");
     block_on(async {
-        let old = client.get_async_connection().await.expect("first generation");
+        let old = client
+            .get_async_connection(CommandClass::General)
+            .await
+            .expect("first generation");
         client.invalidate_async_connection(old.generation).await;
-        let replacement = client.get_async_connection().await.expect("replacement generation");
+        let replacement = client
+            .get_async_connection(CommandClass::General)
+            .await
+            .expect("replacement generation");
         assert!(replacement.generation > old.generation);
         client.invalidate_async_connection(old.generation).await;
         let still_current = client
-            .get_async_connection()
+            .get_async_connection(CommandClass::General)
             .await
             .expect("replacement survives stale failure");
         assert_eq!(still_current.generation, replacement.generation);
@@ -223,16 +235,20 @@ fn test_async_pipeline_database_and_disconnect_generation_replacement() {
     let server = SetupEndpoint::new();
     let settings: ProviderOptions = [
         ("redis.url".into(), format!("{}3", server.url)),
-        ("redis.max_concurrent_commands".into(), "1".into()),
+        ("redis.max_concurrent_commands".into(), "2".into()),
         ("redis.max_idle_connections".into(), "1".into()),
         ("redis.connect_timeout_ms".into(), "100".into()),
         ("redis.command_timeout_ms".into(), "100".into()),
     ]
     .into();
     let client =
-        Client::new(&RedisEventBusConfig::from_provider_options(&settings).expect("settings")).expect("client");
+        Client::new(&RedisEventBusConfig::from_provider_options(&settings).expect("settings"))
+            .expect("client");
     block_on(async {
-        let mut old = client.get_async_connection().await.expect("first generation");
+        let mut old = client
+            .get_async_connection(CommandClass::General)
+            .await
+            .expect("first generation");
         assert_eq!(old.get_db(), 3);
         let mut pipeline = pipe();
         pipeline
@@ -255,7 +271,13 @@ fn test_async_pipeline_database_and_disconnect_generation_replacement() {
         );
         let observed = server.commands.lock().expect("commands").clone();
         assert!(observed.contains(&vec!["SELECT".into(), "3".into()]));
-        assert_eq!(observed.iter().filter(|command| command[0] == "ECHO").count(), 3);
+        assert_eq!(
+            observed
+                .iter()
+                .filter(|command| command[0] == "ECHO")
+                .count(),
+            3
+        );
         server.disconnect_echo.store(true, Ordering::SeqCst);
         let error = old
             .req_packed_commands(&pipeline, 1, 2)
@@ -267,7 +289,7 @@ fn test_async_pipeline_database_and_disconnect_generation_replacement() {
         drop(old);
         server.disconnect_echo.store(false, Ordering::SeqCst);
         let replacement = client
-            .get_async_connection()
+            .get_async_connection(CommandClass::General)
             .await
             .expect("failed lease releases cap-one permit");
         assert!(replacement.generation > failed_generation);
@@ -276,7 +298,7 @@ fn test_async_pipeline_database_and_disconnect_generation_replacement() {
         client.invalidate_async_connection(failed_generation).await;
         drop(replacement);
         let current = client
-            .get_async_connection()
+            .get_async_connection(CommandClass::General)
             .await
             .expect("stale invalidation preserves replacement");
         assert_eq!(current.generation, replacement_generation);

@@ -28,10 +28,11 @@ use super::support::blackhole_redis::BlackholeRedis;
 #[test]
 fn test_async_command_cap_fails_before_second_xadd_and_cancel_releases() {
     let server = BlackholeRedis::start(true, None);
-    let mut settings = options(server.url(), 1);
+    let mut settings = options(server.url(), 2);
     settings.insert("redis.command_timeout_ms".into(), "2000".into());
     let bus = block_on(
-        AsyncRedisEventBusProvider.create_configured(&EventBusConfig::default().with_provider_options(settings)),
+        AsyncRedisEventBusProvider
+            .create_configured(&EventBusConfig::default().with_provider_options(settings)),
     )
     .expect("provider");
     block_on(async {
@@ -46,12 +47,18 @@ fn test_async_command_cap_fails_before_second_xadd_and_cancel_releases() {
         let (sender, receiver) = channel();
         let concurrent = Arc::clone(&bus);
         spawn(move || {
-            sender.send(block_on(concurrent.publish(message()))).expect("watchdog");
+            sender
+                .send(block_on(concurrent.publish(message())))
+                .expect("watchdog");
         });
         let result = receiver
             .recv_timeout(Duration::from_millis(250))
             .expect("cap must fail fast");
-        assert_error(result.expect_err("second command rejected"), "resource_limit", true);
+        assert_error(
+            result.expect_err("second command rejected"),
+            "resource_limit",
+            true,
+        );
         assert_eq!(server.commands(), 1);
         drop(first);
         let mut next = bus.publish(message());

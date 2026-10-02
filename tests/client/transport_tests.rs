@@ -54,24 +54,31 @@ use super::support::blackhole_redis::BlackholeRedis;
 fn test_sync_setup_blackhole_returns_within_watchdog() {
     let server = BlackholeRedis::start(false, None);
     let bus = RedisEventBusProvider
-        .create_configured(&EventBusConfig::default().with_provider_options(options(server.url(), 64)))
+        .create_configured(
+            &EventBusConfig::default().with_provider_options(options(server.url(), 64)),
+        )
         .expect("provider");
     let (sender, receiver) = channel();
     spawn(move || {
-        sender.send(bus.publish(message())).expect("watchdog receiver");
+        sender
+            .send(bus.publish(message()))
+            .expect("watchdog receiver");
     });
     let result = receiver.recv_timeout(Duration::from_secs(2));
     drop(server);
-    assert!(result.expect("50ms setup timeout must beat 2s watchdog").is_err());
+    assert!(
+        result
+            .expect("200ms setup timeout must beat 2s watchdog")
+            .is_err()
+    );
 }
 #[cfg(feature = "async")]
 #[test]
 fn test_async_setup_blackhole_returns_within_watchdog() {
     let server = BlackholeRedis::start(false, None);
-    let bus = block_on(
-        AsyncRedisEventBusProvider
-            .create_configured(&EventBusConfig::default().with_provider_options(options(server.url(), 64))),
-    )
+    let bus = block_on(AsyncRedisEventBusProvider.create_configured(
+        &EventBusConfig::default().with_provider_options(options(server.url(), 64)),
+    ))
     .expect("provider");
     let (sender, receiver) = channel();
     spawn(move || {
@@ -81,25 +88,33 @@ fn test_async_setup_blackhole_returns_within_watchdog() {
     });
     let result = receiver.recv_timeout(Duration::from_secs(2));
     drop(server);
-    assert!(result.expect("50ms setup timeout must beat 2s watchdog").is_err());
+    assert!(
+        result
+            .expect("200ms setup timeout must beat 2s watchdog")
+            .is_err()
+    );
 }
 #[cfg(feature = "sync")]
 #[test]
 fn test_sync_publish_blackhole_is_unknown_and_no_replay() {
     let server = BlackholeRedis::start(true, None);
     let bus = RedisEventBusProvider
-        .create_configured(&EventBusConfig::default().with_provider_options(options(server.url(), 64)))
+        .create_configured(
+            &EventBusConfig::default().with_provider_options(options(server.url(), 64)),
+        )
         .expect("provider");
     let (sender, receiver) = channel();
     spawn(move || {
-        sender.send(bus.publish(message())).expect("watchdog receiver");
+        sender
+            .send(bus.publish(message()))
+            .expect("watchdog receiver");
     });
     let result = receiver.recv_timeout(Duration::from_secs(2));
     let commands = server.commands();
     drop(server);
     assert_error(
         result
-            .expect("50ms command timeout must beat watchdog")
+            .expect("200ms command timeout must beat watchdog")
             .expect_err("reply missing"),
         "outcome_unknown",
         false,
@@ -110,10 +125,9 @@ fn test_sync_publish_blackhole_is_unknown_and_no_replay() {
 #[test]
 fn test_async_cold_publish_singleflight_opens_one_connection() {
     let server = BlackholeRedis::start(true, Some(b"$3\r\n1-0\r\n"));
-    let bus = block_on(
-        AsyncRedisEventBusProvider
-            .create_configured(&EventBusConfig::default().with_provider_options(options(server.url(), 64))),
-    )
+    let bus = block_on(AsyncRedisEventBusProvider.create_configured(
+        &EventBusConfig::default().with_provider_options(options(server.url(), 64)),
+    ))
     .expect("provider");
     let barrier = Arc::new(Barrier::new(16));
     let workers = (0..16)
@@ -140,10 +154,9 @@ fn test_async_cold_publish_singleflight_opens_one_connection() {
 #[test]
 fn test_async_invalid_publish_reply_is_unknown() {
     let server = BlackholeRedis::start(true, Some(b"*1\r\n-WRONGTYPE nested\r\n"));
-    let bus = block_on(
-        AsyncRedisEventBusProvider
-            .create_configured(&EventBusConfig::default().with_provider_options(options(server.url(), 64))),
-    )
+    let bus = block_on(AsyncRedisEventBusProvider.create_configured(
+        &EventBusConfig::default().with_provider_options(options(server.url(), 64)),
+    ))
     .expect("provider");
     let error = block_on(bus.publish(message())).expect_err("invalid ID");
     assert_error(error, "outcome_unknown", false);
@@ -154,10 +167,11 @@ fn test_async_invalid_publish_reply_is_unknown() {
 #[test]
 fn test_async_cancelled_cold_setup_leaves_cache_empty() {
     let server = BlackholeRedis::start(false, Some(b"$3\r\n1-0\r\n"));
-    let mut settings = options(server.url(), 1);
+    let mut settings = options(server.url(), 2);
     settings.insert("redis.connect_timeout_ms".into(), "2000".into());
     let bus = block_on(
-        AsyncRedisEventBusProvider.create_configured(&EventBusConfig::default().with_provider_options(settings)),
+        AsyncRedisEventBusProvider
+            .create_configured(&EventBusConfig::default().with_provider_options(settings)),
     )
     .expect("provider");
     block_on(async {
@@ -201,7 +215,9 @@ fn sentinel_options(url: &str) -> ProviderOptions {
 fn test_sync_sentinel_setup_blackhole_is_bounded() {
     let server = BlackholeRedis::start(false, None);
     let bus = RedisEventBusProvider
-        .create_configured(&EventBusConfig::default().with_provider_options(sentinel_options(server.url())))
+        .create_configured(
+            &EventBusConfig::default().with_provider_options(sentinel_options(server.url())),
+        )
         .expect("provider");
     let (sender, receiver) = channel();
     spawn(move || {
@@ -215,10 +231,9 @@ fn test_sync_sentinel_setup_blackhole_is_bounded() {
 #[test]
 fn test_async_sentinel_setup_blackhole_is_bounded() {
     let server = BlackholeRedis::start(false, None);
-    let bus = block_on(
-        AsyncRedisEventBusProvider
-            .create_configured(&EventBusConfig::default().with_provider_options(sentinel_options(server.url()))),
-    )
+    let bus = block_on(AsyncRedisEventBusProvider.create_configured(
+        &EventBusConfig::default().with_provider_options(sentinel_options(server.url())),
+    ))
     .expect("provider");
     let (sender, receiver) = channel();
     spawn(move || {
@@ -238,8 +253,13 @@ fn sentinel_for_target(target_url: &str) -> crate::support::scripted_redis::Scri
         .expect("target URL")
         .trim_end_matches('/');
     let (host, port) = address.rsplit_once(':').expect("TCP address");
-    let reply = format!("*2\r\n${}\r\n{host}\r\n${}\r\n{port}\r\n", host.len(), port.len());
-    ScriptedRedis::start(vec![Step::reply("SENTINEL", reply.as_bytes())]).expect("Sentinel endpoint")
+    let reply = format!(
+        "*2\r\n${}\r\n{host}\r\n${}\r\n{port}\r\n",
+        host.len(),
+        port.len()
+    );
+    ScriptedRedis::start(vec![Step::reply("SENTINEL", reply.as_bytes())])
+        .expect("Sentinel endpoint")
 }
 #[cfg(feature = "sync")]
 #[test]
@@ -247,17 +267,25 @@ fn test_sync_sentinel_target_role_blackhole_is_bounded_without_xadd() {
     let target = BlackholeRedis::start(true, None);
     let sentinel = sentinel_for_target(target.url());
     let bus = RedisEventBusProvider
-        .create_configured(&EventBusConfig::default().with_provider_options(sentinel_options(sentinel.url())))
+        .create_configured(
+            &EventBusConfig::default().with_provider_options(sentinel_options(sentinel.url())),
+        )
         .expect("provider");
     let (sender, receiver) = channel();
     spawn(move || {
         let _ = sender.send(bus.publish(message()));
     });
     let result = receiver.recv_timeout(Duration::from_secs(2));
-    assert_eq!(sentinel.finish().len(), 1, "each endpoint is probed only once");
+    assert_eq!(
+        sentinel.finish().len(),
+        1,
+        "each endpoint is probed only once"
+    );
     let commands = target.commands();
     drop(target);
-    let error = result.expect("bounded ROLE").expect_err("ROLE reply missing");
+    let error = result
+        .expect("bounded ROLE")
+        .expect_err("ROLE reply missing");
     assert_error(error, "transport", true);
     assert_eq!(
         commands, 1,
@@ -269,10 +297,9 @@ fn test_sync_sentinel_target_role_blackhole_is_bounded_without_xadd() {
 fn test_async_sentinel_target_role_blackhole_is_bounded_without_xadd() {
     let target = BlackholeRedis::start(true, None);
     let sentinel = sentinel_for_target(target.url());
-    let bus = block_on(
-        AsyncRedisEventBusProvider
-            .create_configured(&EventBusConfig::default().with_provider_options(sentinel_options(sentinel.url()))),
-    )
+    let bus = block_on(AsyncRedisEventBusProvider.create_configured(
+        &EventBusConfig::default().with_provider_options(sentinel_options(sentinel.url())),
+    ))
     .expect("provider");
     let (sender, receiver) = channel();
     spawn(move || {
@@ -283,7 +310,9 @@ fn test_async_sentinel_target_role_blackhole_is_bounded_without_xadd() {
     let commands = target.commands();
     drop(target);
     assert_error(
-        result.expect("bounded ROLE").expect_err("ROLE reply missing"),
+        result
+            .expect("bounded ROLE")
+            .expect_err("ROLE reply missing"),
         "transport",
         true,
     );
@@ -393,11 +422,16 @@ fn test_sync_receive_disconnect_is_unknown_and_recoverable() {
     ])
     .expect("endpoint");
     let bus = RedisEventBusProvider
-        .create_configured(&EventBusConfig::default().with_provider_options(options(server.url(), 64)))
+        .create_configured(
+            &EventBusConfig::default().with_provider_options(options(server.url(), 64)),
+        )
         .expect("provider");
     let mut receiver = bus.subscribe(read_request()).expect("subscribe");
     assert_error(
-        receiver.receive(Duration::ZERO).err().expect("receive reply lost"),
+        receiver
+            .receive(Duration::ZERO)
+            .err()
+            .expect("receive reply lost"),
         "outcome_unknown",
         true,
     );
@@ -415,7 +449,9 @@ fn test_async_receive_disconnect_is_unknown_and_recoverable() {
     .expect("endpoint");
     block_on(async {
         let bus = AsyncRedisEventBusProvider
-            .create_configured(&EventBusConfig::default().with_provider_options(options(server.url(), 64)))
+            .create_configured(
+                &EventBusConfig::default().with_provider_options(options(server.url(), 64)),
+            )
             .await
             .expect("provider");
         let mut receiver = bus.subscribe(read_request()).await.expect("subscribe");
@@ -446,11 +482,16 @@ fn test_sync_quarantine_reply_loss_is_unknown_without_safe_replay() {
     ])
     .expect("endpoint");
     let bus = RedisEventBusProvider
-        .create_configured(&EventBusConfig::default().with_provider_options(options(server.url(), 64)))
+        .create_configured(
+            &EventBusConfig::default().with_provider_options(options(server.url(), 64)),
+        )
         .expect("provider");
     let mut receiver = bus.subscribe(read_request()).expect("subscribe");
     assert_error(
-        receiver.receive(Duration::ZERO).err().expect("quarantine reply lost"),
+        receiver
+            .receive(Duration::ZERO)
+            .err()
+            .expect("quarantine reply lost"),
         "outcome_unknown",
         false,
     );
@@ -472,7 +513,9 @@ fn test_async_quarantine_reply_loss_is_unknown_without_safe_replay() {
     .expect("endpoint");
     block_on(async {
         let bus = AsyncRedisEventBusProvider
-            .create_configured(&EventBusConfig::default().with_provider_options(options(server.url(), 64)))
+            .create_configured(
+                &EventBusConfig::default().with_provider_options(options(server.url(), 64)),
+            )
             .await
             .expect("provider");
         let mut receiver = bus.subscribe(read_request()).await.expect("subscribe");
@@ -498,7 +541,9 @@ fn test_sync_publish_rejects_zero_or_overflow_stream_id_as_unknown() {
     ] {
         let server = BlackholeRedis::start(true, Some(reply));
         let bus = RedisEventBusProvider
-            .create_configured(&EventBusConfig::default().with_provider_options(options(server.url(), 64)))
+            .create_configured(
+                &EventBusConfig::default().with_provider_options(options(server.url(), 64)),
+            )
             .expect("provider");
         assert_error(
             bus.publish(message()).expect_err("invalid publish ID"),
@@ -515,10 +560,9 @@ fn test_async_publish_rejects_zero_or_overflow_stream_id_as_unknown() {
         b"$22\r\n18446744073709551616-0\r\n".as_slice(),
     ] {
         let server = BlackholeRedis::start(true, Some(reply));
-        let bus = block_on(
-            AsyncRedisEventBusProvider
-                .create_configured(&EventBusConfig::default().with_provider_options(options(server.url(), 64))),
-        )
+        let bus = block_on(AsyncRedisEventBusProvider.create_configured(
+            &EventBusConfig::default().with_provider_options(options(server.url(), 64)),
+        ))
         .expect("provider");
         assert_error(
             block_on(bus.publish(message())).expect_err("invalid publish ID"),
@@ -533,7 +577,9 @@ fn test_async_publish_rejects_zero_or_overflow_stream_id_as_unknown() {
 fn test_sync_sentinel_query_blackhole_is_bounded_and_attempted_once() {
     let sentinel = BlackholeRedis::start(true, None);
     let bus = RedisEventBusProvider
-        .create_configured(&EventBusConfig::default().with_provider_options(sentinel_options(sentinel.url())))
+        .create_configured(
+            &EventBusConfig::default().with_provider_options(sentinel_options(sentinel.url())),
+        )
         .expect("provider");
     let (sender, receiver) = channel();
     spawn(move || {
@@ -555,10 +601,9 @@ fn test_sync_sentinel_query_blackhole_is_bounded_and_attempted_once() {
 #[test]
 fn test_async_sentinel_query_blackhole_is_bounded_and_attempted_once() {
     let sentinel = BlackholeRedis::start(true, None);
-    let bus = block_on(
-        AsyncRedisEventBusProvider
-            .create_configured(&EventBusConfig::default().with_provider_options(sentinel_options(sentinel.url()))),
-    )
+    let bus = block_on(AsyncRedisEventBusProvider.create_configured(
+        &EventBusConfig::default().with_provider_options(sentinel_options(sentinel.url())),
+    ))
     .expect("provider");
     let (sender, receiver) = channel();
     spawn(move || {
@@ -599,7 +644,11 @@ fn authenticated_sentinel_fixture() -> (
         .expect("URL")
         .trim_end_matches('/');
     let (host, port) = address.rsplit_once(':').expect("address");
-    let response = format!("*2\r\n${}\r\n{host}\r\n${}\r\n{port}\r\n", host.len(), port.len());
+    let response = format!(
+        "*2\r\n${}\r\n{host}\r\n${}\r\n{port}\r\n",
+        host.len(),
+        port.len()
+    );
     let sentinel = ScriptedRedis::start(vec![
         Step::reply("AUTH", b"+OK\r\n"),
         Step::reply("SENTINEL", response.as_bytes()),
@@ -643,7 +692,8 @@ fn test_sync_sentinel_preserves_separate_acl_and_target_database() {
 fn test_async_sentinel_preserves_separate_acl_and_target_database() {
     let (sentinel, target, settings) = authenticated_sentinel_fixture();
     let bus = block_on(
-        AsyncRedisEventBusProvider.create_configured(&EventBusConfig::default().with_provider_options(settings)),
+        AsyncRedisEventBusProvider
+            .create_configured(&EventBusConfig::default().with_provider_options(settings)),
     )
     .expect("provider");
     let _ = block_on(bus.publish(message())).expect("authenticated publish");
@@ -659,8 +709,8 @@ fn sentinel_rejection_fixture(
 ) {
     use crate::support::scripted_redis::ScriptedRedis;
     use crate::support::scripted_redis::Step;
-    let target =
-        ScriptedRedis::start(vec![Step::reply("ROLE", b"-NOPERM role rejected\r\n")]).expect("target endpoint");
+    let target = ScriptedRedis::start(vec![Step::reply("ROLE", b"-NOPERM role rejected\r\n")])
+        .expect("target endpoint");
     let address = target
         .url()
         .strip_prefix("redis://")
@@ -670,9 +720,15 @@ fn sentinel_rejection_fixture(
     let reply = if query_error {
         b"-NOPERM sentinel rejected\r\n".to_vec()
     } else {
-        format!("*2\r\n${}\r\n{host}\r\n${}\r\n{port}\r\n", host.len(), port.len()).into_bytes()
+        format!(
+            "*2\r\n${}\r\n{host}\r\n${}\r\n{port}\r\n",
+            host.len(),
+            port.len()
+        )
+        .into_bytes()
     };
-    let sentinel = ScriptedRedis::start(vec![Step::reply("SENTINEL", &reply)]).expect("sentinel endpoint");
+    let sentinel =
+        ScriptedRedis::start(vec![Step::reply("SENTINEL", &reply)]).expect("sentinel endpoint");
     (sentinel, target)
 }
 #[cfg(feature = "sync")]
@@ -682,12 +738,17 @@ fn test_sync_sentinel_explicit_permission_rejection_keeps_authentication_categor
     for query_error in [true, false] {
         let (sentinel, target) = sentinel_rejection_fixture(query_error);
         let bus = RedisEventBusProvider
-            .create_configured(&EventBusConfig::default().with_provider_options(sentinel_options(sentinel.url())))
+            .create_configured(
+                &EventBusConfig::default().with_provider_options(sentinel_options(sentinel.url())),
+            )
             .expect("provider");
         match bus.publish(message()).expect_err("explicit rejection") {
-            SpiError::Operation { kind, retryable, .. } | SpiError::Publish { kind, retryable, .. } => {
-                classifications.push((kind, retryable))
+            SpiError::Operation {
+                kind, retryable, ..
             }
+            | SpiError::Publish {
+                kind, retryable, ..
+            } => classifications.push((kind, retryable)),
             other => panic!("unexpected error: {other}"),
         }
         assert_eq!(sentinel.finish().len(), 1);
@@ -709,15 +770,17 @@ fn test_async_sentinel_explicit_permission_rejection_keeps_authentication_catego
     let mut classifications = Vec::new();
     for query_error in [true, false] {
         let (sentinel, target) = sentinel_rejection_fixture(query_error);
-        let bus = block_on(
-            AsyncRedisEventBusProvider
-                .create_configured(&EventBusConfig::default().with_provider_options(sentinel_options(sentinel.url()))),
-        )
+        let bus = block_on(AsyncRedisEventBusProvider.create_configured(
+            &EventBusConfig::default().with_provider_options(sentinel_options(sentinel.url())),
+        ))
         .expect("provider");
         match block_on(bus.publish(message())).expect_err("explicit rejection") {
-            SpiError::Operation { kind, retryable, .. } | SpiError::Publish { kind, retryable, .. } => {
-                classifications.push((kind, retryable))
+            SpiError::Operation {
+                kind, retryable, ..
             }
+            | SpiError::Publish {
+                kind, retryable, ..
+            } => classifications.push((kind, retryable)),
             other => panic!("unexpected error: {other}"),
         }
         assert_eq!(sentinel.finish().len(), 1);

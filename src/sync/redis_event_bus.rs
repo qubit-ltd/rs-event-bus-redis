@@ -40,6 +40,7 @@ use redis::cmd;
 
 use super::subscription::Subscription;
 use crate::client::Client;
+use crate::client::CommandClass;
 use crate::config::RedisEventBusConfig;
 use crate::consumer_identity::new_consumer_name;
 use crate::error::RedisProviderError;
@@ -95,13 +96,17 @@ impl EventBusSpi for RedisEventBus {
     /// `XADD`. A missing or malformed reply after send returns
     /// outcome-unknown without replay.
     fn publish(&self, message: OutboundMessage) -> Result<PublishAcknowledgement, SpiError> {
-        let payload = encode_bounded(&message, WireLimits::from_config(&self.settings))
-            .map_err(|error| to_publish_error(message.topic(), error, PublishEffect::NotAccepted))?;
+        let payload =
+            encode_bounded(&message, WireLimits::from_config(&self.settings)).map_err(|error| {
+                to_publish_error(message.topic(), error, PublishEffect::NotAccepted)
+            })?;
         let key = stream_key(self.settings.namespace(), message.topic().as_str());
-        let mut connection = self
-            .client
-            .get_connection()
-            .map_err(|error| to_publish_error(message.topic(), error, PublishEffect::NotAccepted))?;
+        let mut connection =
+            self.client
+                .get_connection(CommandClass::General)
+                .map_err(|error| {
+                    to_publish_error(message.topic(), error, PublishEffect::NotAccepted)
+                })?;
         let mut command = cmd("XADD");
         command.arg(&key);
         if let Some(maxlen) = self.settings.stream_maxlen_approx() {
@@ -155,7 +160,10 @@ impl EventBusSpi for RedisEventBus {
     ///
     /// Returns an SPI error if Redis cannot connect or create the consumer
     /// group.
-    fn subscribe(&self, request: SpiSubscriptionRequest) -> Result<Box<dyn EventSubscriptionSpi>, SpiError> {
+    fn subscribe(
+        &self,
+        request: SpiSubscriptionRequest,
+    ) -> Result<Box<dyn EventSubscriptionSpi>, SpiError> {
         let topic = request.topic().clone();
         if request.durability() != SubscriptionDurability::Durable {
             return Err(SpiError::Operation {
@@ -203,7 +211,7 @@ impl EventBusSpi for RedisEventBus {
             .map_err(|error| spi_error("subscribe", Some(&topic), error))?;
         let mut connection = self
             .client
-            .get_connection()
+            .get_connection(CommandClass::General)
             .map_err(|error| spi_error("subscribe", Some(&topic), error))?;
         let result: Result<(), RedisError> = cmd("XGROUP")
             .arg("CREATE")
@@ -220,7 +228,7 @@ impl EventBusSpi for RedisEventBus {
             drop(connection);
             let mut retry_connection = self
                 .client
-                .get_connection()
+                .get_connection(CommandClass::General)
                 .map_err(|error| spi_error("subscribe", Some(&topic), error))?;
             cmd("XGROUP")
                 .arg("CREATE")
@@ -348,7 +356,11 @@ pub(super) const fn redis_capabilities() -> EventBusCapabilities {
 /// reflects both the failure category and whether that operation can safely
 /// recover.
 #[inline]
-pub(super) fn spi_error(operation: &'static str, topic: Option<&TopicAddress>, source: RedisProviderError) -> SpiError {
+pub(super) fn spi_error(
+    operation: &'static str,
+    topic: Option<&TopicAddress>,
+    source: RedisProviderError,
+) -> SpiError {
     crate::error::to_spi_error(operation, topic, source)
 }
 
@@ -372,16 +384,21 @@ mod tests {
     fn test_stream_id_validation_rejects_malformed_components() {
         assert!(super::valid_stream_id("123-0"));
         for value in ["", "123", "-0", "123-", "a-0", "1-b", "1-2-3"] {
-            assert!(!super::valid_stream_id(value), "accepted malformed ID {value:?}");
+            assert!(
+                !super::valid_stream_id(value),
+                "accepted malformed ID {value:?}"
+            );
         }
     }
 
     #[test]
     fn test_receiver_connection_failure_is_returned_before_delivery() {
-        let settings =
-            RedisEventBusConfig::new("redis://127.0.0.1:1/", "connection-errors").expect("valid test configuration");
+        let settings = RedisEventBusConfig::new("redis://127.0.0.1:1/", "connection-errors")
+            .expect("valid test configuration");
         let bus = RedisEventBus {
-            client: Arc::new(Client::new(&settings).expect("unreachable Redis URL is syntactically valid")),
+            client: Arc::new(
+                Client::new(&settings).expect("unreachable Redis URL is syntactically valid"),
+            ),
             settings,
         };
         let mut receiver = super::Subscription {

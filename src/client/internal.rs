@@ -25,10 +25,12 @@ mod sync_connection_pool;
 pub(crate) use async_command_connection::AsyncCommandConnection;
 #[cfg(feature = "async")]
 pub(crate) use async_connection_cache::AsyncConnectionCache;
+#[cfg(test)]
 pub(crate) use command_permit::CommandPermit;
 #[cfg(feature = "sync")]
 pub(crate) use pooled_connection::PooledConnection;
 pub(crate) use receiver_permit::ReceiverPermit;
+pub(crate) use resource_budget::CommandClass;
 pub(crate) use resource_budget::ResourceBudget;
 pub(crate) use sentinel_resolver::SentinelResolver;
 #[cfg(feature = "sync")]
