@@ -7,18 +7,19 @@
 // =============================================================================
 //! Active delivery bounds and cross-call recovery cursor state.
 
-use redis::Value;
-use redis::streams::StreamId;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 use std::time::Instant;
 
-use crate::internal::RecoveryGuard;
-use crate::internal::RecoveryState;
+use redis::Value;
+use redis::streams::StreamId;
+
 use crate::internal::ReceiveAction;
 use crate::internal::ReceiveDriver;
 use crate::internal::ReceiveReply;
+use crate::internal::RecoveryGuard;
+use crate::internal::RecoveryState;
 
 /// A short receive that finishes claim but runs out of time before pending
 /// must continue at pending on the next call, then enter the new-entry path.
@@ -33,10 +34,7 @@ fn test_short_receive_continues_completed_claim_across_calls() {
     assert_eq!(first.next_action(started), ReceiveAction::Claim);
     first.reply(ReceiveReply::ClaimAtEnd);
     state.mark_claim_complete(generation);
-    assert_eq!(
-        first.next_action(started + timeout),
-        ReceiveAction::TimedOut
-    );
+    assert_eq!(first.next_action(started + timeout), ReceiveAction::TimedOut);
 
     let resumed_at = started + timeout + Duration::from_millis(1);
     let (due, next, generation) = state.recovery_schedule(resumed_at);
@@ -47,18 +45,13 @@ fn test_short_receive_continues_completed_claim_across_calls() {
     }
     assert_eq!(second.next_action(resumed_at), ReceiveAction::Pending);
     second.reply(ReceiveReply::PendingEmpty);
-    let next = second
-        .complete_recovery_round(resumed_at)
-        .expect("complete round");
+    let next = second.complete_recovery_round(resumed_at).expect("complete round");
     state.complete_recovery_at(next, generation);
     let next_call_at = resumed_at + Duration::from_nanos(1);
     let (due, next, _) = state.recovery_schedule(next_call_at);
     assert!(!due);
     let mut third = ReceiveDriver::new(timeout, next_call_at, interval, due, next).unwrap();
-    assert!(matches!(
-        third.next_action(next_call_at),
-        ReceiveAction::ReadNew { .. }
-    ));
+    assert!(matches!(third.next_action(next_call_at), ReceiveAction::ReadNew { .. }));
 }
 
 /// A retry or cancelled receive invalidates a saved claim-complete phase.
@@ -109,10 +102,7 @@ fn test_retry_during_recovery_cannot_be_cleared_by_stale_completion() {
     state.mark_retry("concurrent-retry");
     state.complete_recovery_at(started + Duration::from_secs(1), generation);
     let (due, _, _) = state.recovery_schedule(started);
-    assert!(
-        due,
-        "new retry obligation survives an older scan completion"
-    );
+    assert!(due, "new retry obligation survives an older scan completion");
 }
 
 #[test]
@@ -179,9 +169,7 @@ fn test_gap_preserves_one_claimed_entry_for_the_next_receive() {
     };
     state.defer_claim(entry);
     assert_eq!(
-        state
-            .take_deferred_claim()
-            .map(|entry| entry.id.as_str().to_owned()),
+        state.take_deferred_claim().map(|entry| entry.id.as_str().to_owned()),
         Some("4-0".to_owned())
     );
     assert!(state.take_deferred_claim().is_none());

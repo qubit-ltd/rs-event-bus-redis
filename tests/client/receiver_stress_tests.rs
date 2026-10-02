@@ -26,16 +26,10 @@ use qubit_event_bus_redis::sync::RedisEventBusProvider;
 use qubit_id::Id;
 use qubit_spi::ServiceProvider;
 
-#[path = "client/support/helpers.rs"]
-#[allow(dead_code)]
-mod helpers;
-#[path = "support/mod.rs"]
-mod support;
-
-use helpers::message;
-use helpers::options;
-use support::controlled_redis::proxy::ControlledRedis;
-use support::redis_server::RedisServer;
+use super::message;
+use super::options;
+use crate::support::controlled_redis::proxy::ControlledRedis;
+use crate::support::redis_server::RedisServer;
 
 /// Creates one receiver request for the controlled shared consumer group.
 fn request() -> SpiSubscriptionRequest {
@@ -80,20 +74,11 @@ fn test_one_hundred_sync_receivers_poll_without_general_command_admission() {
         Vec::new()
     };
     gate.release();
-    assert!(
-        reached,
-        "publish reply must be paused after Redis accepted XADD"
-    );
-    let _ = publishing
-        .join()
-        .expect("publish worker")
-        .expect("publish reply");
+    assert!(reached, "publish reply must be paused after Redis accepted XADD");
+    let _ = publishing.join().expect("publish worker").expect("publish reply");
     for (index, observation) in observations.into_iter().enumerate() {
         assert!(
-            matches!(
-                observation,
-                Ok(ReceiveOutcome::Message(_) | ReceiveOutcome::TimedOut)
-            ),
+            matches!(observation, Ok(ReceiveOutcome::Message(_) | ReceiveOutcome::TimedOut)),
             "receiver {index} must poll without a command resource limit"
         );
     }

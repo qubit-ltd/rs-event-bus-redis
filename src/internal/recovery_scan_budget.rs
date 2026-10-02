@@ -84,17 +84,12 @@ impl RecoveryScanBudget {
             Some(
                 started
                     .checked_add(timeout)
-                    .ok_or(RedisProviderError::Configuration(
-                        "receive timeout is out of range",
-                    ))?,
+                    .ok_or(RedisProviderError::Configuration("receive timeout is out of range"))?,
             )
         };
-        let next_recovery =
-            started
-                .checked_add(recovery_interval)
-                .ok_or(RedisProviderError::Configuration(
-                    "recovery interval is out of range",
-                ))?;
+        let next_recovery = started
+            .checked_add(recovery_interval)
+            .ok_or(RedisProviderError::Configuration("recovery interval is out of range"))?;
         Ok(Self {
             deadline,
             zero_timeout: timeout.is_zero(),
@@ -176,9 +171,7 @@ impl RecoveryScanBudget {
     #[must_use]
     #[inline]
     pub(crate) fn block_interval(&self, now: Instant) -> Option<Duration> {
-        let remaining = self
-            .deadline
-            .map(|deadline| deadline.saturating_duration_since(now));
+        let remaining = self.deadline.map(|deadline| deadline.saturating_duration_since(now));
         let recovery_delay = self.next_recovery.saturating_duration_since(now);
         match remaining {
             Some(remaining) if remaining.is_zero() => None,

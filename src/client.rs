@@ -121,10 +121,7 @@ impl Client {
     /// reached.
     #[inline]
     #[cfg(test)]
-    pub(crate) fn try_command(
-        &self,
-        class: CommandClass,
-    ) -> Result<CommandPermit, RedisProviderError> {
+    pub(crate) fn try_command(&self, class: CommandClass) -> Result<CommandPermit, RedisProviderError> {
         self.budget.try_command(class)
     }
     /// Reserves receiver capacity before subscription setup I/O.
@@ -167,10 +164,7 @@ impl Client {
     ///
     /// Returns a configuration error if milliseconds or checked duration
     /// addition overflow.
-    pub(crate) fn response_timeout(
-        &self,
-        block_ms: Option<usize>,
-    ) -> Result<Duration, RedisProviderError> {
+    pub(crate) fn response_timeout(&self, block_ms: Option<usize>) -> Result<Duration, RedisProviderError> {
         let block = block_ms
             .map(|ms| u64::try_from(ms).map(Duration::from_millis))
             .transpose()
@@ -192,10 +186,7 @@ impl Client {
     /// Returns resource exhaustion, pool poisoning, or a sanitized
     /// endpoint/setup failure.
     #[cfg(feature = "sync")]
-    pub(crate) fn get_connection(
-        &self,
-        class: CommandClass,
-    ) -> Result<PooledConnection, RedisProviderError> {
+    pub(crate) fn get_connection(&self, class: CommandClass) -> Result<PooledConnection, RedisProviderError> {
         let permit = self.budget.try_command(class)?;
         if self.standalone.is_some() {
             let idle = self
@@ -278,9 +269,7 @@ impl Client {
     /// Returns sanitized endpoint discovery, connection, or setup timeout
     /// failures.
     #[cfg(feature = "async")]
-    pub(crate) async fn get_async_dedicated_connection(
-        &self,
-    ) -> Result<MultiplexedConnection, RedisProviderError> {
+    pub(crate) async fn get_async_dedicated_connection(&self) -> Result<MultiplexedConnection, RedisProviderError> {
         self.open_async().await
     }
 
@@ -413,14 +402,12 @@ mod tests {
                     b"+OK\r\n".as_slice()
                 };
                 for _ in 0..commands {
-                    stream
-                        .write_all(response)
-                        .expect("reply to Redis setup command");
+                    stream.write_all(response).expect("reply to Redis setup command");
                 }
             }
         });
-        let settings = RedisEventBusConfig::new(&format!("redis://{address}/"), "pool-test")
-            .expect("valid test configuration");
+        let settings =
+            RedisEventBusConfig::new(&format!("redis://{address}/"), "pool-test").expect("valid test configuration");
         let client = Client::new(&settings).expect("standalone client configuration is valid");
 
         let first = client
@@ -464,9 +451,7 @@ mod tests {
         .join();
         assert!(matches!(
             client.get_connection(CommandClass::General),
-            Err(RedisProviderError::Operation(
-                "connection pool lock poisoned"
-            ))
+            Err(RedisProviderError::Operation("connection pool lock poisoned"))
         ));
     }
     #[test]
@@ -481,12 +466,7 @@ mod tests {
         }
         #[cfg(feature = "async")]
         block_on(async {
-            assert!(
-                client
-                    .get_async_connection(CommandClass::General)
-                    .await
-                    .is_err()
-            );
+            assert!(client.get_async_connection(CommandClass::General).await.is_err());
             assert!(client.get_async_dedicated_connection().await.is_err());
             client.invalidate_async_connection(0).await;
         });
@@ -526,14 +506,9 @@ mod tests {
         ]
         .into();
         let client =
-            Client::new(&RedisEventBusConfig::from_provider_options(&options).expect("settings"))
-                .expect("client");
-        let first = client
-            .get_connection(CommandClass::General)
-            .expect("first checkout");
-        let second = client
-            .get_connection(CommandClass::General)
-            .expect("second checkout");
+            Client::new(&RedisEventBusConfig::from_provider_options(&options).expect("settings")).expect("client");
+        let first = client.get_connection(CommandClass::General).expect("first checkout");
+        let second = client.get_connection(CommandClass::General).expect("second checkout");
         drop(first);
         drop(second);
         assert_eq!(
@@ -575,9 +550,7 @@ mod tests {
         fn new() -> Self {
             let listener = TcpListener::bind("127.0.0.1:0").expect("lease endpoint");
             let url = format!("redis://{}/3", listener.local_addr().expect("address"));
-            listener
-                .set_nonblocking(true)
-                .expect("nonblocking listener");
+            listener.set_nonblocking(true).expect("nonblocking listener");
             let stop = Arc::new(AtomicBool::new(false));
             let mode = Arc::new(AtomicUsize::new(0));
             let accepted = Arc::new(AtomicUsize::new(0));
@@ -617,10 +590,7 @@ mod tests {
                                     let reply = match command[0].as_str() {
                                         "PING" if current_mode == 1 => b"+NOT_PONG\r\n".to_vec(),
                                         "PING" => b"+PONG\r\n".to_vec(),
-                                        "ECHO" => {
-                                            format!("${}\r\n{}\r\n", command[1].len(), command[1])
-                                                .into_bytes()
-                                        }
+                                        "ECHO" => format!("${}\r\n{}\r\n", command[1].len(), command[1]).into_bytes(),
                                         "CLIENT" | "SELECT" => b"+OK\r\n".to_vec(),
                                         other => panic!("unexpected fixture command {other}"),
                                     };
@@ -630,9 +600,7 @@ mod tests {
                                 }
                             }));
                         }
-                        Err(error) if error.kind() == ErrorKind::WouldBlock => {
-                            sleep(Duration::from_millis(1))
-                        }
+                        Err(error) if error.kind() == ErrorKind::WouldBlock => sleep(Duration::from_millis(1)),
                         Err(_) => break,
                     }
                 }
@@ -651,8 +619,8 @@ mod tests {
             }
         }
 
-        /// Constructs a one-general-slot client using this endpoint's database-three
-        /// URL.
+        /// Constructs a one-general-slot client using this endpoint's
+        /// database-three URL.
         ///
         /// # Returns
         ///
@@ -671,11 +639,8 @@ mod tests {
                 ("redis.command_timeout_ms".into(), "100".into()),
             ]
             .into();
-            Client::new(
-                &RedisEventBusConfig::from_provider_options(&options)
-                    .expect("valid finite settings"),
-            )
-            .expect("client")
+            Client::new(&RedisEventBusConfig::from_provider_options(&options).expect("valid finite settings"))
+                .expect("client")
         }
     }
 
@@ -759,14 +724,9 @@ mod tests {
     fn test_sync_pipeline_database_and_health_failures_discard_idle_leases() {
         let server = LeaseEndpoint::new();
         let client = server.client();
-        let mut connection = client
-            .get_connection(CommandClass::General)
-            .expect("first checkout");
+        let mut connection = client.get_connection(CommandClass::General).expect("first checkout");
         assert_eq!(connection.get_db(), 3);
-        assert!(
-            connection.check_connection(),
-            "complete PONG confirms healthy lease"
-        );
+        assert!(connection.check_connection(), "complete PONG confirms healthy lease");
         let mut pipeline = pipe();
         pipeline
             .cmd("ECHO")
@@ -787,22 +747,13 @@ mod tests {
         );
         let observed = server.commands.lock().expect("commands").clone();
         assert!(observed.contains(&vec!["SELECT".into(), "3".into()]));
-        assert_eq!(
-            observed
-                .iter()
-                .filter(|command| command[0] == "ECHO")
-                .count(),
-            3
-        );
+        assert_eq!(observed.iter().filter(|command| command[0] == "ECHO").count(), 3);
         server.mode.store(1, Ordering::SeqCst);
         assert!(
             !connection.check_connection(),
             "a complete non-PONG reply is not healthy"
         );
-        assert!(
-            connection.is_open(),
-            "discard cannot rely on the transport's open flag"
-        );
+        assert!(connection.is_open(), "discard cannot rely on the transport's open flag");
         drop(connection);
         assert!(client.sync_pool.idle.lock().expect("pool").is_empty());
 
@@ -821,10 +772,7 @@ mod tests {
             .get_connection(CommandClass::General)
             .expect("pipeline failure releases cap-one permit");
         server.mode.store(3, Ordering::SeqCst);
-        assert!(
-            !connection.check_connection(),
-            "PING disconnect must discard the lease"
-        );
+        assert!(!connection.check_connection(), "PING disconnect must discard the lease");
         drop(connection);
         assert!(client.sync_pool.idle.lock().expect("pool").is_empty());
         server.mode.store(0, Ordering::SeqCst);
@@ -883,8 +831,7 @@ mod tests {
 
     #[test]
     fn test_command_timeout_is_the_exact_policy_budget_without_io() {
-        let settings =
-            RedisEventBusConfig::new("redis://127.0.0.1:1/", "budget").expect("settings");
+        let settings = RedisEventBusConfig::new("redis://127.0.0.1:1/", "budget").expect("settings");
         let mut client = Client::new(&settings).expect("client construction performs no I/O");
         assert_eq!(client.command_timeout(), client.policy.command_timeout);
         // Internal boundary injection only: public configuration rejects these

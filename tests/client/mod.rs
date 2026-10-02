@@ -9,6 +9,7 @@
 #[cfg(feature = "async")]
 mod limit_tests;
 mod receive_admission_tests;
+mod receiver_stress_tests;
 mod resource_lifecycle_tests;
 mod transport_tests;
 
