@@ -170,12 +170,7 @@ impl Fixture {
         let mut connection = Client::open(self.server.url())?.get_connection()?;
         let reply: StreamPendingReply = cmd("XPENDING")
             .arg(stream_key(&self.namespace, TOPIC))
-            .arg(group_name(
-                &self.namespace,
-                TOPIC,
-                "first-consumer",
-                Some(&self.group),
-            ))
+            .arg(group_name(&self.namespace, TOPIC, "first-consumer", Some(&self.group)))
             .query(&mut connection)?;
         Ok(reply.count())
     }
@@ -203,14 +198,7 @@ fn assert_terminal(reason: &SubscriptionStopReason, event_id: &EventId, observat
         1,
         "natural terminal stop closed the real receiver"
     );
-    assert_eq!(
-        observation
-            .attempts
-            .lock()
-            .expect("observations lock")
-            .len(),
-        1
-    );
+    assert_eq!(observation.attempts.lock().expect("observations lock").len(), 1);
 }
 
 fn assert_retry(observation: &Observation) {
@@ -237,10 +225,7 @@ fn assert_retry(observation: &Observation) {
 fn wait_until(mut condition: impl FnMut() -> bool) {
     let deadline = Instant::now() + WATCHDOG;
     while !condition() {
-        assert!(
-            Instant::now() < deadline,
-            "settlement observation watchdog expired"
-        );
+        assert!(Instant::now() < deadline, "settlement observation watchdog expired");
         sleep(Duration::from_millis(5));
     }
 }
@@ -274,23 +259,12 @@ fn test_sync_terminal_settlement_retains_unacked_redis_entry() -> Result<(), Box
         counter.fetch_add(1, Ordering::SeqCst);
     })?;
     let _cancel = CancelOnDrop(&subscription);
-    let receipt = bus.publish(PublishRequest::new(
-        Topic::new(TOPIC)?,
-        "durable".to_owned(),
-    )?)?;
-    wait_until(|| {
-        subscription.terminal_failure().is_some() && observation.closes.load(Ordering::SeqCst) == 1
-    });
-    let reason = subscription
-        .terminal_failure()
-        .expect("terminal cause retained");
+    let receipt = bus.publish(PublishRequest::new(Topic::new(TOPIC)?, "durable".to_owned())?)?;
+    wait_until(|| subscription.terminal_failure().is_some() && observation.closes.load(Ordering::SeqCst) == 1);
+    let reason = subscription.terminal_failure().expect("terminal cause retained");
     assert_terminal(&reason, receipt.input_event_id(), &observation);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
-    assert_eq!(
-        fixture.pending()?,
-        1,
-        "close must not implicitly XACK durable delivery"
-    );
+    assert_eq!(fixture.pending()?, 1, "close must not implicitly XACK durable delivery");
 
     let mut recovered = inner.subscribe(fixture.recovery_request()?)?;
     let ReceiveOutcome::Message(message) = recovered.receive(Duration::from_secs(2))? else {
@@ -344,19 +318,9 @@ fn test_sync_retry_after_applied_xack_lost_reply() -> Result<(), Box<dyn Error>>
     }
     let release = gate.clone();
     let _release = ReleaseGate(Arc::new(move || release.release_without_reply()));
-    bus.publish(PublishRequest::new(
-        Topic::new(TOPIC)?,
-        "acknowledged".to_owned(),
-    )?)?;
-    assert!(
-        gate.wait_until_reached(WATCHDOG),
-        "real Redis XACK must reach the gate"
-    );
-    assert_eq!(
-        fixture.pending()?,
-        0,
-        "XACK applied before any reply is delivered"
-    );
+    bus.publish(PublishRequest::new(Topic::new(TOPIC)?, "acknowledged".to_owned())?)?;
+    assert!(gate.wait_until_reached(WATCHDOG), "real Redis XACK must reach the gate");
+    assert_eq!(fixture.pending()?, 0, "XACK applied before any reply is delivered");
     gate.release_without_reply();
     wait_until(|| observation.settled());
     subscription.cancel()?;
@@ -391,19 +355,12 @@ fn test_async_terminal_settlement_retains_unacked_redis_entry() -> Result<(), Bo
             observation: observation.clone(),
             fail_before_settle: true,
         });
-        let bus = AsyncEventBus::with_config(
-            ProviderId::new("redis-streams")?,
-            wrapped,
-            facade_config()?,
-        )?;
+        let bus = AsyncEventBus::with_config(ProviderId::new("redis-streams")?, wrapped, facade_config()?)?;
         let calls = Arc::new(AtomicUsize::new(0));
         let counter = calls.clone();
         let mut subscription = bus.subscribe(fixture.request()?).await?;
         let receipt = bus
-            .publish(PublishRequest::new(
-                Topic::new(TOPIC)?,
-                "durable".to_owned(),
-            )?)
+            .publish(PublishRequest::new(Topic::new(TOPIC)?, "durable".to_owned())?)
             .await?;
         let result = race(
             subscription.run(move |_| {
@@ -424,8 +381,7 @@ fn test_async_terminal_settlement_retains_unacked_redis_entry() -> Result<(), Bo
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(fixture.pending()?, 1);
         let mut recovered = inner.subscribe(fixture.recovery_request()?).await?;
-        let ReceiveOutcome::Message(message) = recovered.receive(Duration::from_secs(2)).await?
-        else {
+        let ReceiveOutcome::Message(message) = recovered.receive(Duration::from_secs(2)).await? else {
             panic!("closed owner's entry must be claimable by the new consumer")
         };
         assert_eq!(message.id(), receipt.input_event_id());
@@ -440,9 +396,7 @@ fn test_async_terminal_settlement_retains_unacked_redis_entry() -> Result<(), Bo
         subscription.close().await?;
         assert!(Arc::ptr_eq(
             &reason,
-            &subscription
-                .terminal_failure()
-                .expect("first cause survives close")
+            &subscription.terminal_failure().expect("first cause survives close")
         ));
         Ok(())
     })
@@ -465,19 +419,12 @@ fn test_async_retry_after_applied_xack_lost_reply() -> Result<(), Box<dyn Error>
             observation: observation.clone(),
             fail_before_settle: false,
         });
-        let bus = AsyncEventBus::with_config(
-            ProviderId::new("redis-streams")?,
-            wrapped,
-            facade_config()?,
-        )?;
+        let bus = AsyncEventBus::with_config(ProviderId::new("redis-streams")?, wrapped, facade_config()?)?;
         let calls = Arc::new(AtomicUsize::new(0));
         let counter = calls.clone();
         let mut subscription = bus.subscribe(fixture.request()?).await?;
-        bus.publish(PublishRequest::new(
-            Topic::new(TOPIC)?,
-            "acknowledged".to_owned(),
-        )?)
-        .await?;
+        bus.publish(PublishRequest::new(Topic::new(TOPIC)?, "acknowledged".to_owned())?)
+            .await?;
         let observe = async {
             gate.wait_applied().await;
             assert_eq!(
