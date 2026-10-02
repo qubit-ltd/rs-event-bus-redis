@@ -1,8 +1,152 @@
 # Redis public API workload benchmark
 
-This report records the 2026-09-29 workload matrix separately from the historical
-single-run connection reuse experiment below. The complete current matrix is
-reported with raw samples, source identities, and shared-host limitations.
+## 2026-10-03 pre-fix redesign run (`b61dd8b`)
+
+This run uses the checked-in public SPI harness from source revision
+`b61dd8b3549d175dcdd8f5b507c88bb9fa3cecc0`, Rust 1.94.0, and an owned Docker
+Redis 7.4.8 standalone fixture. It covers synchronous and asynchronous modes,
+64/4,096/262,144-byte raw payloads, concurrency 1/8/32, default and limited
+admission, plus 10/100 idle receivers, with three 1,000-attempt rounds per
+configuration. Limited mode sets 32 total commands and one retained idle
+connection. This is a single-host workload sample, not a paired comparison to
+the historical 2026-09-29 baseline.
+
+Reproduction command:
+
+```sh
+REDIS_BENCH_LABEL=redesign-20261003 \
+REDIS_BENCH_OUTPUT=/tmp/redis-redesign-benchmark-20261003 \
+REDIS_BENCH_ROUNDS=3 REDIS_BENCH_SAMPLES=1000 \
+REDIS_BENCH_SCENARIOS=round_trip,idle \
+cargo bench --locked --all-features --bench redis_workloads
+```
+
+The first run completed with exit code 0 and produced 120 summary rows plus
+120,000 attempt rows. A zero process exit means the harness finished, not that
+all workloads passed: only 87/108 business rounds had 1,000 successes and zero
+errors; 11/12 idle rounds had zero errors. `unknown` is a subset of `errors`.
+The 108,000 business attempts recorded 104,337 successful publish/receive/Accept
+round trips, 3,663 errors, and 446 unknown outcomes. The 12,000 idle polls
+recorded 11,990 timeouts and 10 receive errors/unknowns. Outcome counts were
+104,337 `ok`, 11,990 `timed_out`, 694 `publish:resource_limit`, 179 transport
+errors, 456 unknown outcomes, and 2,344 `event_id_mismatch` samples. A lost or
+uncertain publish/settle can leave an older PEL entry; because this harness
+does not recover that old token before its next attempt, the resulting mismatch
+is a measurement-harness cascade, not evidence of event data corruption.
+
+### First-run business workload matrix
+
+Each row aggregates the three rounds (3,000 attempts). Throughput is the median
+of per-round accepted events/second. The latency columns are medians of the
+per-round nearest-rank successful-sample p95/p99 values. Redis command counts
+are sums over all three rounds. `Errors (unknown)` reports unknown outcomes as
+a subset; the raw CSV also retains each error's own p50/p95/p99 latency.
+
+| Mode | Admission | Payload B | Concurrency | Success / attempts | Errors (unknown) | Median events/s | p95 / p99 ms | Σ XAUTOCLAIM | Σ XREADGROUP |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| sync | default | 64 | 1 | 3000/3000 | 0 (0) | 1453.9 | 2.1/4.0 | 3 | 3003 |
+| sync | default | 64 | 8 | 3000/3000 | 0 (0) | 8981.5 | 1.6/3.1 | 24 | 3024 |
+| sync | default | 64 | 32 | 3000/3000 | 0 (0) | 5306.3 | 4.4/12.5 | 96 | 3096 |
+| sync | default | 4096 | 1 | 3000/3000 | 0 (0) | 602.4 | 4.1/6.0 | 5 | 3005 |
+| sync | default | 4096 | 8 | 3000/3000 | 0 (0) | 2637.1 | 4.7/9.5 | 24 | 3024 |
+| sync | default | 4096 | 32 | 3000/3000 | 0 (0) | 2242.0 | 12.5/20.5 | 96 | 3096 |
+| sync | default | 262144 | 1 | 3000/3000 | 0 (0) | 13.9 | 152.3/287.2 | 192 | 3192 |
+| sync | default | 262144 | 8 | 3000/3000 | 0 (0) | 30.4 | 1098.0/1497.0 | 554 | 3554 |
+| sync | default | 262144 | 32 | 2764/3000 | 236 (26) | 39.1 | 2037.6/2965.9 | 1038 | 4348 |
+| sync | limited | 64 | 1 | 3000/3000 | 0 (0) | 1776.3 | 1.6/2.8 | 4 | 3004 |
+| sync | limited | 64 | 8 | 3000/3000 | 0 (0) | 5960.8 | 2.4/3.8 | 24 | 3024 |
+| sync | limited | 64 | 32 | 2969/3000 | 31 (0) | 7165.4 | 4.9/6.6 | 96 | 3065 |
+| sync | limited | 4096 | 1 | 3000/3000 | 0 (0) | 383.2 | 5.5/10.0 | 10 | 3010 |
+| sync | limited | 4096 | 8 | 3000/3000 | 0 (0) | 1691.3 | 6.5/11.5 | 24 | 3024 |
+| sync | limited | 4096 | 32 | 2991/3000 | 9 (0) | 1992.4 | 17.3/32.4 | 96 | 3087 |
+| sync | limited | 262144 | 1 | 3000/3000 | 0 (0) | 13.8 | 155.0/470.2 | 172 | 3172 |
+| sync | limited | 262144 | 8 | 2933/3000 | 67 (1) | 38.6 | 838.8/1396.3 | 513 | 3601 |
+| sync | limited | 262144 | 32 | 2543/3000 | 457 (35) | 45.9 | 1658.0/2108.1 | 951 | 3932 |
+| async | default | 64 | 1 | 3000/3000 | 0 (0) | 814.6 | 3.0/3.8 | 5 | 3005 |
+| async | default | 64 | 8 | 3000/3000 | 0 (0) | 4848.2 | 3.6/5.5 | 24 | 3024 |
+| async | default | 64 | 32 | 3000/3000 | 0 (0) | 6087.0 | 8.8/11.2 | 96 | 3096 |
+| async | default | 4096 | 1 | 3000/3000 | 0 (0) | 372.2 | 5.1/7.1 | 9 | 3009 |
+| async | default | 4096 | 8 | 3000/3000 | 0 (0) | 1236.9 | 6.9/33.0 | 24 | 3024 |
+| async | default | 4096 | 32 | 3000/3000 | 0 (0) | 2225.0 | 49.1/162.2 | 111 | 3111 |
+| async | default | 262144 | 1 | 3000/3000 | 0 (0) | 19.4 | 107.7/181.6 | 155 | 3155 |
+| async | default | 262144 | 8 | 3000/3000 | 0 (0) | 34.1 | 977.0/1245.0 | 496 | 3496 |
+| async | default | 262144 | 32 | 1870/3000 | 1130 (248) | 25.9 | 1916.8/2695.4 | 1151 | 4954 |
+| async | limited | 64 | 1 | 3000/3000 | 0 (0) | 953.8 | 0.7/2.4 | 5 | 3005 |
+| async | limited | 64 | 8 | 3000/3000 | 0 (0) | 5404.0 | 3.2/5.4 | 24 | 3024 |
+| async | limited | 64 | 32 | 2870/3000 | 130 (0) | 12019.3 | 4.5/7.0 | 96 | 2966 |
+| async | limited | 4096 | 1 | 3000/3000 | 0 (0) | 1006.4 | 3.0/4.5 | 4 | 3004 |
+| async | limited | 4096 | 8 | 3000/3000 | 0 (0) | 1165.9 | 5.8/65.0 | 32 | 3032 |
+| async | limited | 4096 | 32 | 2955/3000 | 45 (0) | 3971.8 | 15.7/21.2 | 96 | 3051 |
+| async | limited | 262144 | 1 | 3000/3000 | 0 (0) | 22.0 | 87.8/854.4 | 110 | 3110 |
+| async | limited | 262144 | 8 | 2357/3000 | 643 (16) | 32.8 | 995.0/1316.9 | 1514 | 5111 |
+| async | limited | 262144 | 32 | 2085/3000 | 915 (120) | 32.0 | 1971.9/2506.0 | 1081 | 4345 |
+
+Idle receive rounds (1,000 polls per round) had these measurements:
+
+| Mode | Idle receivers | Timed out / attempts | Errors (unknown) | Median polls/s | p95 / p99 ms | Σ XAUTOCLAIM | Σ XREADGROUP |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| sync | 10 | 2990/3000 | 10 (10) | 1555.3 | 8.0/9.4 | 51 | 3018 |
+| sync | 100 | 3000/3000 | 0 (0) | 16267.7 | 7.4/9.0 | 740 | 2684 |
+| async | 10 | 3000/3000 | 0 (0) | 1417.6 | 7.8/38.3 | 30 | 3021 |
+| async | 100 | 3000/3000 | 0 (0) | 9253.9 | 6.1/7.9 | 2520 | 591 |
+
+### Fresh-fixture repeats of error rounds
+
+The original CSVs were preserved. Repeats below used the same public harness,
+source and 1,000 attempts per round on newly owned Redis fixtures; they do not
+replace or overwrite the first-run samples.
+
+| Workload slice | First run success / attempts; errors (unknown) | Fresh repeats success / attempts; errors (unknown) |
+| --- | ---: | ---: |
+| default, sync, 256 KiB, c32 | 2764/3000; 236 (26) | 2845/3000; 155 (27) |
+| default, async, 256 KiB, c32 | 1870/3000; 1130 (248) | 2370/3000; 630 (123) |
+| limited, sync, 256 KiB, c8 | 2933/3000; 67 (1) | 3000/3000; 0 (0) |
+| limited, async, 256 KiB, c8 | 2357/3000; 643 (16) | 3000/3000; 0 (0) |
+| limited, sync, 256 KiB, c32 | 2543/3000; 457 (35) | 2976/3000; 24 (2) |
+| limited, async, 256 KiB, c32 | 2085/3000; 915 (120) | 2931/3000; 69 (0) |
+| limited, sync, 64 B, c32 | 2969/3000; 31 (0) | 3000/3000; 0 (0) |
+| limited, sync, 4 KiB, c32 | 2991/3000; 9 (0) | 2928/3000; 72 (0) |
+| limited, async, 64 B, c32 | 2870/3000; 130 (0) | 2734/3000; 266 (0) |
+| limited, async, 4 KiB, c32 | 2955/3000; 45 (0) | 2810/3000; 190 (0) |
+| idle, sync, 10 receivers | 2990/3000; 10 (10) | 3000/3000; 0 (0) |
+
+All 528 errors in the fresh limited small-payload c32 repeats were
+`publish:resource_limit`. With a total of 32 commands and the default 8
+settlement reservations, only 24 slots serve general commands; 32 simultaneous
+publish attempts can exceed that admission lane. The limited large-payload c32
+repeat set had 70 `publish:resource_limit` outcomes. The default large-payload
+c32 repeats had no `resource_limit`; their errors were transport/unknown
+outcomes followed by the harness's old-entry `event_id_mismatch` cascade.
+Counter pressure is therefore a repeatable configuration effect in the tested
+limited c32 bursts; high-payload default transport behavior varied between
+rounds and remains unresolved.
+
+The raw files are retained at
+`/tmp/redis-redesign-benchmark-20261003/` and
+`/tmp/redis-redesign-benchmark-rerun-20261003/`. They include every attempt,
+per-round successful and failed latency distributions, and command-counter
+deltas. Redis server identity was 7.4.8. At the end of measurement the host had
+6 CPUs visible to the benchmark and load averages 56.98/54.97/57.19; this is
+only a post-run snapshot, not per-round load attribution. Because errors remain
+in high-concurrency groups and host load was high, these throughput figures are
+descriptive samples, not stable capacity claims or a performance comparison.
+
+The executable SHA-256 was
+`e9bfd5d724c297564e39b74da0f64d9c2f17aa3fee48aa93759a8127ad08f380`.
+First-run command:
+
+```sh
+REDIS_BENCH_LABEL=redesign-20261003 \
+REDIS_BENCH_OUTPUT=/tmp/redis-redesign-benchmark-20261003 \
+REDIS_BENCH_ROUNDS=3 REDIS_BENCH_SAMPLES=1000 \
+REDIS_BENCH_SCENARIOS=round_trip,idle \
+cargo bench --locked --all-features --bench redis_workloads
+```
+Use a new label and output directory when repeating: CSV creation is exclusive.
+
+The 2026-09-29 results below are historical baseline evidence. The redesign
+runs above are not paired with the 2026-09-29 baseline and must not be
+interpreted as a before/after result.
 
 ## Current measurement contract
 
@@ -17,12 +161,14 @@ exactly 64, 4,096, or 262,144 bytes; JSON wire metadata and byte-array expansion
 are additional. A start barrier releases concurrency 1, 8, or 32 simultaneously.
 
 Every default configuration and restricted command-admission configuration
-has 1,000 business events per round and three rounds. The restricted setting
+has 1,000 attempts per round and three rounds. The restricted setting
 changes `redis.max_concurrent_commands` from 64 to 32 and
 `redis.max_idle_connections` from 8 to 1; all receivers fit within the default
-256 active-receiver cap. The largest concurrency fits the restricted admission
-cap, allowing the main matrix to measure 1,000 successful events without retries.
-A business round is accepted only with exactly 1,000 successes and zero errors.
+256 active-receiver cap. With the default 8 reserved settlement slots, only 24
+of the 32 total command slots admit general commands, so concurrency 32 can be
+refused; the total limit is not a promise that all workers' commands are
+admitted. A business round is accepted only with exactly 1,000 successes and
+zero errors.
 An invalid round retains its raw evidence and is investigated before the entire
 round is repeated on a fresh fixture; individual publications are never retried
 to fill a successful-sample quota.
@@ -120,7 +266,7 @@ high-load diagnostic numbers are not used as final regression evidence. Follow-u
 quiet-window waiting is limited to two minutes in total; if no quiet window is
 available, the report leaves stable performance attribution unresolved.
 
-## 2026-09-29 results
+## Historical results from 2026-09-29
 
 The complete accepted matrix contains 234 summary rows: 84 before and 150 after.
 The CSV validator matched every summary to its attempt samples and all three
