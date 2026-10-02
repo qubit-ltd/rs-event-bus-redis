@@ -13,8 +13,8 @@
 
 ```toml
 [dependencies]
-qubit-event-bus = { version = "0.18", features = ["discovery"] }
-qubit-event-bus-redis = "0.6"
+qubit-event-bus = { version = "0.19", features = ["discovery"] }
+qubit-event-bus-redis = "0.7"
 qubit-spi = "0.13"
 ```
 
@@ -61,7 +61,7 @@ Redis delivery is at least once. Handlers should tolerate duplicates. A successf
 
 Each wire record, payload, and decoded headers string has a finite provider limit (8 MiB, 1 MiB, and 64 KiB by default), in addition to the facade's 1 MiB encoded publish/receive limits. Receive overflow stops the subscription and retains the pending entry without acknowledgement or quarantine. Public publication errors report `PublishFailure.effect()`; lost `XADD` replies are uncertain and default retry policy forbids blind resubmission. Version 1 wire data remains supported. See the [migration guide](doc/migration.md).
 
-Core 0.18 bounds running handlers, owned deliveries, per-subscription ownership, and registered subscriptions separately. Settlement retries are finite and require explicitly retryable errors; unknown retryability stops the subscription. The [user guide](doc/user_guide.md) covers first-cause diagnostics, delivery metrics, durable recovery, and bounded shutdown waits that do not guarantee forced process exit.
+Core 0.19 bounds running handlers, owned deliveries, per-subscription ownership, and registered subscriptions separately. `RedisSubscriptionProfile` requires an explicit start position and builds durable options; new stream entries report provider attempt `Some(1)`, while pending and claimed entries remain unknown. Settlement retries are finite and require explicitly retryable errors; unknown retryability stops the subscription. The [user guide](doc/user_guide.md) covers first-cause diagnostics, delivery metrics, durable recovery, and bounded shutdown waits that do not guarantee forced process exit.
 
 ## Learn More
 

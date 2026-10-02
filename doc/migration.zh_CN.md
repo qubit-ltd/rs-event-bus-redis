@@ -1,6 +1,12 @@
-# 迁移到 Redis provider 0.6
+# 迁移到 Redis provider 0.7
 
 [English](migration.md) · [用户指南](user_guide.zh_CN.md)
+
+## 从 provider 0.6 升级到 0.7
+
+将 `qubit-event-bus-redis` 升级到 0.7 时，同时将 `qubit-event-bus` 升级到 0.19。把重复设置 `durability(Durable)`、`start_position(...)` 和可选 `consumer_group(...)` 的代码改为 `RedisSubscriptionProfile::new(start_position).consumer_group(group).options()`；不使用消费组时省略 `consumer_group`。profile 要求明确指定 `StartPosition`，并始终生成 durable options；后续 `.durability(Ephemeral)` 会被 Redis capability 检查拒绝。
+
+由 `XREADGROUP >` 返回的新消息会通过 `provider_attempt()` 报告 `Some(1)`。pending 和 `XAUTOCLAIM` 恢复消息仍为 `None`，因为 provider 尚未传递历史投递次数。既有 wire v1 记录、Redis group 和结算行为保持可用。Core 0.19 的 `CodecRegistry::register` 遇到重复载荷类型也会返回错误，详见[核心迁移指南](https://github.com/qubit-ltd/rs-event-bus/blob/main/doc/migration.zh_CN.md)。
 
 将 `qubit-event-bus-redis` 从 0.5 升级到 0.6 时，须同时采用
 `qubit-event-bus` 0.18。一起更新直接依赖、下游 fixture 和 lockfile，不能混用

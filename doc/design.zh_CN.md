@@ -86,7 +86,7 @@ wire 限额优先：超限历史记录作为 poison，即使其版本本来未�
 
 ## 持久化、下游集成与迁移
 
-Accept/Reject 确认 Redis PEL，Retry 只释放本地占用并保留 PEL。关闭不 ACK，不删除消费组或 stream。可选 `XADD MAXLEN ~` 会丢失未读/pending 历史；未读记录被裁剪不一定返回 Gap。至少一次投递要求业务幂等，claim idle 阈值应匹配 handler 时长。
+Accept/Reject 确认 Redis PEL，Retry 只释放本地占用并保留 PEL。`XREADGROUP >` 返回的新消息携带 `provider_attempt = Some(1)`；pending 和 `XAUTOCLAIM` 恢复路径因当前没有传递历史次数而保持未知（`None`）。关闭不 ACK，不删除消费组或 stream。可选 `XADD MAXLEN ~` 会丢失未读/pending 历史；未读记录被裁剪不一定返回 Gap。至少一次投递要求业务幂等，claim idle 阈值应匹配 handler 时长。
 
 XADD Accepted 不证明 fsync、副本持久化或业务完成。新 observer 连接上的 WAIT 无法为 provider 连接写入提供 fencing；Sentinel 验收应观察实际复制的消费组游标、PEL ID 和 owner。旧 consumer 清理须先停实例、确认 PEL 清空并满足业务保留要求，不引入自动 DELCONSUMER。
 

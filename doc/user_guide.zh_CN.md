@@ -1,6 +1,6 @@
 # Redis Streams 用户指南
 
-**读者：** 使用 `qubit-event-bus` 0.18 和 `qubit-event-bus-redis` 0.6 的 Rust 服务开发者。本指南以订单发布服务和账单消费服务为例，说明如何通过 Redis 共享事件，同时让应用代码继续使用 event-bus facade。
+**读者：** 使用 `qubit-event-bus` 0.19 和 `qubit-event-bus-redis` 0.7 的 Rust 服务开发者。本指南以订单发布服务和账单消费服务为例，说明如何通过 Redis 共享事件，同时让应用代码继续使用 event-bus facade。
 
 [English](user_guide.md) · [README](../README.zh_CN.md) · [API 文档](https://docs.rs/qubit-event-bus-redis)
 
@@ -10,8 +10,8 @@
 
 ```toml
 [dependencies]
-qubit-event-bus = { version = "0.18", features = ["discovery"] }
-qubit-event-bus-redis = "0.6"
+qubit-event-bus = { version = "0.19", features = ["discovery"] }
+qubit-event-bus-redis = "0.7"
 qubit-spi = "0.13"
 ```
 
@@ -66,7 +66,8 @@ impl EventCodec<String> for Utf8Codec {
 
 pub(crate) fn facade_config() -> Result<EventBusFacadeConfig, Box<dyn Error>> {
     let mut codecs = CodecRegistry::new();
-    codecs.register::<String>(Arc::new(Utf8Codec(ContentType::new("text/plain")?)));
+    codecs.register::<String>(Arc::new(Utf8Codec(ContentType::new("text/plain")?)))
+        .expect("unique codec type");
     Ok(EventBusFacadeConfig::new().with_codec_registry(Arc::new(codecs)))
 }
 ```
@@ -82,18 +83,17 @@ pub(crate) fn facade_config() -> Result<EventBusFacadeConfig, Box<dyn Error>> {
 ```rust
 use std::time::Duration;
 
-use qubit_event_bus::SubscriberId;
 use qubit_event_bus::model::ConsumerGroup;
 use qubit_event_bus::model::ProviderOptions;
 use qubit_event_bus::model::PublishRequest;
 use qubit_event_bus::model::StartPosition;
 use qubit_event_bus::model::SubscribeRequest;
-use qubit_event_bus::model::SubscriptionDurability;
 use qubit_event_bus::model::Topic;
 use qubit_event_bus::registry::EventBusConfig;
 use qubit_event_bus::spi::ShutdownMode;
 use qubit_event_bus::spi::ShutdownOutcome;
 use qubit_event_bus_redis as _;
+use qubit_event_bus_redis::RedisSubscriptionProfile;
 use qubit_spi::ProviderSelection;
 use qubit_event_bus::EventBusRegistry;
 
@@ -113,13 +113,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let topic = Topic::<String>::new("orders.created")?;
     let (sender, receiver) = std::sync::mpsc::channel();
     let subscription = bus.subscribe(
-        SubscribeRequest::builder()
-            .subscriber_id(SubscriberId::new("billing-worker")?)
-            .topic(topic.clone())
-            .consumer_group(ConsumerGroup::new("billing")?)
-            .durability(SubscriptionDurability::Durable)
-            .start_position(StartPosition::Earliest)
-            .build()?,
+        SubscribeRequest::new("billing-worker", topic.clone())?.with_options(
+            RedisSubscriptionProfile::new(StartPosition::Earliest)
+                .consumer_group(ConsumerGroup::new("billing")?)
+                .options()
+                .build(),
+        ),
         move |delivery| {
             sender.send(delivery.payload().clone())
                 .map_err(|source| qubit_event_bus::DeliveryError::Handler { source: Box::new(source) })
@@ -163,18 +162,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```rust
 use std::time::Duration;
 
-use qubit_event_bus::SubscriberId;
 use qubit_event_bus::model::ConsumerGroup;
 use qubit_event_bus::model::ProviderOptions;
 use qubit_event_bus::model::PublishRequest;
 use qubit_event_bus::model::StartPosition;
 use qubit_event_bus::model::SubscribeRequest;
-use qubit_event_bus::model::SubscriptionDurability;
 use qubit_event_bus::model::Topic;
 use qubit_event_bus::registry::EventBusConfig;
 use qubit_event_bus::spi::ShutdownMode;
 use qubit_event_bus::spi::ShutdownOutcome;
 use qubit_event_bus_redis as _;
+use qubit_event_bus_redis::RedisSubscriptionProfile;
 use qubit_spi::ProviderSelection;
 use futures_channel::oneshot;
 use futures_lite::future;
@@ -196,13 +194,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let bus = registry.create(&config).await?;
         let topic = Topic::<String>::new("orders.created")?;
         let mut subscription = bus.subscribe(
-            SubscribeRequest::builder()
-                .subscriber_id(SubscriberId::new("billing-worker")?)
-                .topic(topic.clone())
-                .consumer_group(ConsumerGroup::new("billing")?)
-                .durability(SubscriptionDurability::Durable)
-                .start_position(StartPosition::Earliest)
-                .build()?,
+            SubscribeRequest::new("billing-worker", topic.clone())?.with_options(
+                RedisSubscriptionProfile::new(StartPosition::Earliest)
+                    .consumer_group(ConsumerGroup::new("billing")?)
+                    .options()
+                    .build(),
+            ),
         ).await?;
         bus.publish(PublishRequest::new(topic, "order-43".to_owned())?).await?;
         let (sender, received) = oneshot::channel();
@@ -321,7 +318,7 @@ provider 将一条 JSON wire record 写入 Redis Stream 的 `wire` 字段。内�
 | 关闭或 drop | 不会隐式执行 `XACK` | 未结算消息仍可恢复。 |
 | 取消异步 receive | 不会隐式执行 `XACK` | 已读记录留在 PEL 中，供后续读取或认领。 |
 
-Redis 提供至少一次投递，因此 handler 应具备幂等性。如果 handler 运行时间超过 `redis.claim_min_idle_ms`，另一个 consumer 可能在原 handler 仍执行时认领同一事件。idle threshold 应覆盖常见和最慢的处理时间；重复代价高时，应用还应按业务 ID 去重。
+Redis 提供至少一次投递，因此 handler 应具备幂等性。新消息经 `XREADGROUP >` 读取时，`delivery.context().provider_attempt()` 为 `Some(1)`；pending 和 `XAUTOCLAIM` 恢复的消息为 `None`，因为当前 provider 没有传递历史投递次数。facade 本地重试次数请读取 `retry_attempt`。如果 handler 运行时间超过 `redis.claim_min_idle_ms`，另一个 consumer 可能在原 handler 仍执行时认领同一事件。idle threshold 应覆盖常见和最慢的处理时间；重复代价高时，应用还应按业务 ID 去重。
 
 每个订阅的未结算消息达到 `redis.max_unsettled_per_subscription` 后会暂停接收新记录。结算或 retry 后会释放容量。该设置限制进程内的投递压力，不会限制 Redis stream 增长。
 
@@ -439,9 +436,9 @@ Redis 持久化和复制由部署负责。`Accepted` 只证明 XADD 被接受，
 
 处理 typed `qubit-task` 通知时，consumer 应按 `TaskId` 去重并保留最高 `state_version`，忽略重复、旧版本通知，并查询任务服务取得权威状态。typed SQLite task service 可启用可选 outbox，在自己的状态事务中捕获生命周期变更，并重试向 Redis 发布。投递仍是至少一次；这不会令无关的应用业务事务与任务状态或 Redis 原子提交。
 
-## 12. 从 provider 0.5 升级
+## 12. 从 provider 0.6 升级
 
-将 `qubit-event-bus-redis` 升级到 0.6 时，也要将 `qubit-event-bus` 升级到 0.18。[迁移指南](migration.zh_CN.md)列出了已移除的 facade 配置、新的持有量限额、结算重试、结构化终止诊断及恢复步骤。保留 wire 版本 1 数据和现有消费组；发布前应验证保留的 pending 记录。
+将 `qubit-event-bus-redis` 升级到 0.7 时，也要将 `qubit-event-bus` 升级到 0.19。新版 `RedisSubscriptionProfile` 根据明确的 `StartPosition` 构造 durable 订阅选项；创建新订阅时使用它，并保留预期的消费组。核心 codec 注册现在会拒绝重复载荷类型并返回 `Result`；要传播错误，使用 `?`，确需替换时才调用 `replace`。`InboundMessage` 增加可选 provider attempt 元数据，但 `into_parts` tuple 保持原样。保留 wire 版本 1 数据和现有消费组；发布前应验证 pending 记录。[迁移指南](migration.zh_CN.md)列出完整变更。
 
 
 参阅[设计说明](design.zh_CN.md)、[覆盖率证据](coverage-review.zh_CN.md)和[工作负载基准](connection-reuse-benchmark.zh_CN.md)。性能、覆盖率须以各自测量为证；本指南没有宣称新的吞吐量或最终覆盖率结果。

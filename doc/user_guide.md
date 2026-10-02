@@ -1,6 +1,6 @@
 # Redis Streams User Guide
 
-**For:** Rust service developers using `qubit-event-bus` 0.18 and `qubit-event-bus-redis` 0.6. This guide shows how an order publisher and billing consumer share events through Redis while keeping application code on the event-bus facade.
+**For:** Rust service developers using `qubit-event-bus` 0.19 and `qubit-event-bus-redis` 0.7. This guide shows how an order publisher and billing consumer share events through Redis while keeping application code on the event-bus facade.
 
 [简体中文](user_guide.zh_CN.md) · [README](../README.md) · [API docs](https://docs.rs/qubit-event-bus-redis)
 
@@ -10,8 +10,8 @@ Add both the facade and provider as direct dependencies. `discovery` is on by de
 
 ```toml
 [dependencies]
-qubit-event-bus = { version = "0.18", features = ["discovery"] }
-qubit-event-bus-redis = "0.6"
+qubit-event-bus = { version = "0.19", features = ["discovery"] }
+qubit-event-bus-redis = "0.7"
 qubit-spi = "0.13"
 ```
 
@@ -66,7 +66,8 @@ impl EventCodec<String> for Utf8Codec {
 
 pub(crate) fn facade_config() -> Result<EventBusFacadeConfig, Box<dyn Error>> {
     let mut codecs = CodecRegistry::new();
-    codecs.register::<String>(Arc::new(Utf8Codec(ContentType::new("text/plain")?)));
+    codecs.register::<String>(Arc::new(Utf8Codec(ContentType::new("text/plain")?)))
+        .expect("unique codec type");
     Ok(EventBusFacadeConfig::new().with_codec_registry(Arc::new(codecs)))
 }
 ```
@@ -82,18 +83,17 @@ The service config contains only a Redis URL and a namespace. Select `redis-stre
 ```rust
 use std::time::Duration;
 
-use qubit_event_bus::SubscriberId;
 use qubit_event_bus::model::ConsumerGroup;
 use qubit_event_bus::model::ProviderOptions;
 use qubit_event_bus::model::PublishRequest;
 use qubit_event_bus::model::StartPosition;
 use qubit_event_bus::model::SubscribeRequest;
-use qubit_event_bus::model::SubscriptionDurability;
 use qubit_event_bus::model::Topic;
 use qubit_event_bus::registry::EventBusConfig;
 use qubit_event_bus::spi::ShutdownMode;
 use qubit_event_bus::spi::ShutdownOutcome;
 use qubit_event_bus_redis as _;
+use qubit_event_bus_redis::RedisSubscriptionProfile;
 use qubit_spi::ProviderSelection;
 use qubit_event_bus::EventBusRegistry;
 
@@ -113,13 +113,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let topic = Topic::<String>::new("orders.created")?;
     let (sender, receiver) = std::sync::mpsc::channel();
     let subscription = bus.subscribe(
-        SubscribeRequest::builder()
-            .subscriber_id(SubscriberId::new("billing-worker")?)
-            .topic(topic.clone())
-            .consumer_group(ConsumerGroup::new("billing")?)
-            .durability(SubscriptionDurability::Durable)
-            .start_position(StartPosition::Earliest)
-            .build()?,
+        SubscribeRequest::new("billing-worker", topic.clone())?.with_options(
+            RedisSubscriptionProfile::new(StartPosition::Earliest)
+                .consumer_group(ConsumerGroup::new("billing")?)
+                .options()
+                .build(),
+        ),
         move |delivery| {
             sender.send(delivery.payload().clone())
                 .map_err(|source| qubit_event_bus::DeliveryError::Handler { source: Box::new(source) })
@@ -165,18 +164,17 @@ Async bus creation, publish, subscribe, and receive return runtime-neutral futur
 ```rust
 use std::time::Duration;
 
-use qubit_event_bus::SubscriberId;
 use qubit_event_bus::model::ConsumerGroup;
 use qubit_event_bus::model::ProviderOptions;
 use qubit_event_bus::model::PublishRequest;
 use qubit_event_bus::model::StartPosition;
 use qubit_event_bus::model::SubscribeRequest;
-use qubit_event_bus::model::SubscriptionDurability;
 use qubit_event_bus::model::Topic;
 use qubit_event_bus::registry::EventBusConfig;
 use qubit_event_bus::spi::ShutdownMode;
 use qubit_event_bus::spi::ShutdownOutcome;
 use qubit_event_bus_redis as _;
+use qubit_event_bus_redis::RedisSubscriptionProfile;
 use qubit_spi::ProviderSelection;
 use futures_channel::oneshot;
 use futures_lite::future;
@@ -198,13 +196,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let bus = registry.create(&config).await?;
         let topic = Topic::<String>::new("orders.created")?;
         let mut subscription = bus.subscribe(
-            SubscribeRequest::builder()
-                .subscriber_id(SubscriberId::new("billing-worker")?)
-                .topic(topic.clone())
-                .consumer_group(ConsumerGroup::new("billing")?)
-                .durability(SubscriptionDurability::Durable)
-                .start_position(StartPosition::Earliest)
-                .build()?,
+            SubscribeRequest::new("billing-worker", topic.clone())?.with_options(
+                RedisSubscriptionProfile::new(StartPosition::Earliest)
+                    .consumer_group(ConsumerGroup::new("billing")?)
+                    .options()
+                    .build(),
+            ),
         ).await?;
         bus.publish(PublishRequest::new(topic, "order-43".to_owned())?).await?;
         let (sender, received) = oneshot::channel();
@@ -313,7 +310,7 @@ Credentials belong in the service environment. Provider options contain environm
 
 ## 6. Understand delivery, retry, and cleanup
 
-The provider stores one JSON wire record under the `wire` stream field. It contains a protocol version, event ID, timestamp, headers, optional ordering key, content type, optional schema ID, and payload bytes. Unknown versions fail with a provider error. `XADD` success returns an `Accepted` acknowledgement; if the connection drops before the reply arrives, the caller cannot know whether Redis stored the record. Retrying a publish can create a duplicate.
+The provider stores one JSON wire record under the `wire` stream field. It contains a protocol version, event ID, timestamp, headers, optional ordering key, content type, optional schema ID, and payload bytes. Unknown versions fail with a provider error. A newly read `XREADGROUP >` message reports `delivery.context().provider_attempt() == Some(1)`. Pending and `XAUTOCLAIM` recovery messages report `None` because the historical Redis delivery count is not currently propagated; use `retry_attempt` for facade-local retries. `XADD` success returns an `Accepted` acknowledgement; if the connection drops before the reply arrives, the caller cannot know whether Redis stored the record. Retrying a publish can create a duplicate.
 
 | Action | Redis behavior | Application consequence |
 | --- | --- | --- |
@@ -439,9 +436,9 @@ Redis persistence and replication are deployment responsibilities. `Accepted` pr
 
 With typed `qubit-task` notifications, consumers should deduplicate by `TaskId` and retain the highest `state_version`, ignoring duplicate/older notifications and querying the task service for authoritative state. The typed SQLite task service can use its optional outbox integration to capture lifecycle changes with its own state transaction and retry Redis publication. Delivery remains at least once, and this does not make unrelated application business transactions atomic with task state or Redis.
 
-## 12. Upgrade from provider 0.5
+## 12. Upgrade from provider 0.6
 
-Upgrade `qubit-event-bus-redis` to 0.6 together with `qubit-event-bus` 0.18. The [migration guide](migration.md) lists removed facade configuration, new ownership limits, settlement retry behavior, structured terminal diagnostics, and recovery steps. Keep stored wire version 1 data and consumer groups; test retained pending entries before rollout.
+Upgrade `qubit-event-bus-redis` to 0.7 together with `qubit-event-bus` 0.19. `RedisSubscriptionProfile` builds durable subscription options from an explicit `StartPosition`; use it for new subscriptions and preserve the intended consumer group. Core codec registration now rejects duplicate payload types and returns `Result`; handle it with `?` or use `replace` deliberately. `InboundMessage` carries optional provider-attempt metadata without changing its existing `into_parts` tuple. Keep stored wire version 1 data and consumer groups; test retained pending entries before rollout. The [migration guide](migration.md) covers the complete version-specific changes.
 
 
 See [design](design.md), [coverage evidence](coverage-review.md), and [workload benchmark](connection-reuse-benchmark.md). Performance/coverage results require their own measured evidence; this guide makes no new throughput or final coverage claim.

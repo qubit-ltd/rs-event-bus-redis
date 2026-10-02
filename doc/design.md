@@ -92,7 +92,7 @@ The quarantine Lua script validates source/destination types and current PEL own
 
 ## Durability, downstream use and migration
 
-Accept/Reject ACK Redis PEL; Retry is local and leaves PEL pending. Closing does not ACK, delete consumer groups or delete streams. Optional `XADD MAXLEN ~` can lose unread/pending history; unread trimming need not produce Gap. At-least-once handlers require business idempotence and a claim idle threshold suited to their latency.
+Accept/Reject ACK Redis PEL; Retry is local and leaves PEL pending. A newly returned message from `XREADGROUP >` carries `provider_attempt = Some(1)`; pending and `XAUTOCLAIM` recovery paths leave it unknown (`None`) because the provider does not currently propagate the historical count. Closing does not ACK, delete consumer groups or delete streams. Optional `XADD MAXLEN ~` can lose unread/pending history; unread trimming need not produce Gap. At-least-once handlers require business idempotence and a claim idle threshold suited to their latency.
 
 Accepted XADD does not prove fsync, replica durability or business completion. WAIT on a new observer connection does not fence a provider connection's writes. Sentinel tests must observe replicated group cursor, PEL IDs and owners rather than infer durability from that WAIT. Obsolete consumer cleanup requires stopping it and confirming empty PEL plus business retention requirements; no automatic DELCONSUMER is introduced.
 

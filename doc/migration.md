@@ -1,6 +1,12 @@
-# Migration to Redis provider 0.6
+# Migration to Redis provider 0.7
 
 [简体中文](migration.zh_CN.md) · [User guide](user_guide.md)
+
+## Upgrade from provider 0.6 to 0.7
+
+Upgrade `qubit-event-bus-redis` to 0.7 together with `qubit-event-bus` 0.19. Replace repeated `durability(Durable)`, `start_position(...)`, and optional `consumer_group(...)` setup with `RedisSubscriptionProfile::new(start_position).consumer_group(group).options()` (omit `consumer_group` when not used). The profile requires an explicit `StartPosition` and always starts with durable options; a later `.durability(Ephemeral)` is rejected by the Redis capability check.
+
+New entries returned from `XREADGROUP >` expose `provider_attempt() == Some(1)`. Pending and `XAUTOCLAIM` recovery entries remain `None` because the historical delivery count is not propagated yet. Existing wire v1 records, Redis groups, and settlement behavior remain compatible. Core 0.19 also changes `CodecRegistry::register` to return an error on duplicate payload registration; see the [core migration guide](https://github.com/qubit-ltd/rs-event-bus/blob/main/doc/migration.md).
 
 Upgrade `qubit-event-bus-redis` from 0.5 to 0.6 together with
 `qubit-event-bus` 0.18. Update direct dependencies, downstream fixtures, and
