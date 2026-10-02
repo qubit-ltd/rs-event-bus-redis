@@ -47,8 +47,9 @@ The event-bus SPI lets an application choose a transport without changing busine
 The Redis command budget defaults to 64 short operations, with 8 slots reserved for
 settlement; dedicated receiver connections have a separate default cap of 256.
 These admission rules are a breaking change: `redis.max_concurrent_commands=1`
-is rejected, and deployments that lower the total must set
-`redis.reserved_settlement_commands` below it. See the [migration guide](doc/migration.md).
+is rejected. When the total is lowered, the omitted settlement reservation
+adapts to `min(8, total - 1)`; set `redis.reserved_settlement_commands` only when
+a different reserve is needed. See the [migration guide](doc/migration.md).
 Each durable subscription checks pending work on its first receive, then carries
 its recovery schedule across calls and rescans at `redis.recovery_interval_ms`
 (default 1,000 ms). Retry, receive failure, or cancellation after polling forces

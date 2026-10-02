@@ -10,7 +10,7 @@ codec 应精确验证元数据；需要读取历史 schema 时，明确记录并
 
 ## 迁移 Redis 命令准入设置
 
-短命令总额度现在默认 64，其中 8 个名额保留给结算。专用 receiver 连接使用独立的 256 个默认上限，不占短命令额度。配置 `redis.max_concurrent_commands=1` 将被拒绝；没有保留旧行为的开关。总额度至少为 2；降低时须将 `redis.reserved_settlement_commands` 设为正数且小于总额度。省略保留数时默认 `min(8, 总额 - 1)`。命令限制属于每个已创建的 provider 实例，因此还须单独核算多个实例和其他 Redis 客户端。
+短命令总额度现在默认 64，其中 8 个名额保留给结算。专用 receiver 连接使用独立的 256 个默认上限，不占短命令额度。配置 `redis.max_concurrent_commands=1` 将被拒绝；没有保留旧行为的开关。总额度至少为 2。省略保留数时默认 `min(8, 总额 - 1)`；只有需要自定义保留数时才显式设置 `redis.reserved_settlement_commands`。命令限制属于每个已创建的 provider 实例，因此还须单独核算多个实例和其他 Redis 客户端。
 
 ## 替换调度配置并明确结算策略
 

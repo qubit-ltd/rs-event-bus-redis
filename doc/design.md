@@ -2,7 +2,7 @@
 
 [简体中文](design.zh_CN.md) · [User guide](user_guide.md) · [README](../README.md)
 
-This document describes the unreleased working tree whose Cargo version remains `0.4.0`. It records the implemented contracts and their limitations; test and benchmark reports carry the separate evidence for acceptance. No new release or measured performance result is implied.
+This document describes the unreleased working tree whose Cargo version is `0.6.0`. It records the implemented contracts and their limitations; test and benchmark reports carry the separate evidence for acceptance. No new release or measured performance result is implied.
 
 ## Boundaries and responsibilities
 
@@ -56,7 +56,7 @@ Zero timeout permits at most one claim, one own-pending read and one new-message
 | `redis.max_wire_bytes` | 8,388,608 | 1–268,435,456; at least payload limit |
 | `redis.sentinel.nodes` | unset | At most 16 valid host/port endpoints |
 
-The [guide](user_guide.md) lists the other existing options. New finite limits reject zero, signs, overflow and invalid decimal text. Total command concurrency must be at least 2; the default settlement reservation is 8 when the total is 64, and for smaller configured totals defaults to `min(8, total − 1)`. Set the reservation explicitly when tuning total concurrency. Lowering command concurrency below eight requires lowering idle retention as well. Existing `redis.max_concurrent_commands=1` configurations are rejected and require migration; there is no compatibility mode.
+The [guide](user_guide.md) lists the other existing options. New finite limits reject zero, signs, overflow and invalid decimal text. Total command concurrency must be at least 2; the default settlement reservation is 8 when the total is 64, and for smaller configured totals defaults to `min(8, total − 1)`. Set the reservation explicitly only when a custom reserve is needed. Lowering command concurrency below eight requires lowering idle retention as well. Existing `redis.max_concurrent_commands=1` configurations are rejected and require migration; there is no compatibility mode.
 
 Standalone sync short operations take fail-fast RAII command permits and reuse idle connections outside network I/O locks. Every checkout restores read/write command waits; I/O/protocol/timeout failures discard the connection. Async standalone short operations share a multiplexed connection. An async mutex spans cold initialization for single-flight publication; cancellation leaves an empty cache. Monotonic generations ensure a failing old lease invalidates only its own generation, with overflow rejected rather than reused. Receiver reads use dedicated connections and response budgets of actual BLOCK plus command timeout.
 

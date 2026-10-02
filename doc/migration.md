@@ -16,9 +16,9 @@ The short-command budget now defaults to 64 total slots, of which 8 are reserved
 for settlement. Dedicated receiver connections use a separate default cap of
 256 and do not consume this short-command budget. Configurations that set
 `redis.max_concurrent_commands=1` are rejected; there is no legacy behavior
-switch. Set the total to at least 2 and, when lowering it, set
-`redis.reserved_settlement_commands` to a positive value below the total. The
-omitted reservation defaults to `min(8, total - 1)`. Command limits remain
+switch. Set the total to at least 2. The omitted reservation defaults to
+`min(8, total - 1)`; set `redis.reserved_settlement_commands` explicitly only
+when a custom reserve is needed. Command limits remain
 local to each created provider instance, so account for multiple instances and
 other Redis clients separately.
 

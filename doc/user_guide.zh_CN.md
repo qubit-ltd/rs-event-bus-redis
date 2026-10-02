@@ -421,7 +421,7 @@ SPI 的结算状态只约束当前 receiver/token：
 
 ## 10. 怎样限制资源和消息尺寸
 
-同一个已创建 SPI 实例及其共享 Arc clone 共用预算。每次新的 `create_configured` 调用都会建立独立 client 预算；不同 registry 选出的实例不会共用整个进程或 Redis server 的全局准入限制。`max_concurrent_commands` 约束已准入的短操作，默认总额度为 64；其中 `reserved_settlement_commands`（默认 8）在普通命令额度耗尽时仍留给结算。专用 receiver 连接使用独立的 `max_active_receivers` 限制（默认 256），不占短命令名额。总命令数至少为 2；旧值 1 属于不兼容配置，会被拒绝。降低总额度时，应显式调整低于总额的结算保留数。失败、取消会释放本地命令名额；close/drop 释放 receiver 名额，token 继续存活也不会占用该名额。取消**不保证** multiplexed driver 停止请求，也不保证 Redis server 上已无在途命令。provider 不维护无界准入等待队列；专用阻塞读取与共享短命令通道分开。
+同一个已创建 SPI 实例及其共享 Arc clone 共用预算。每次新的 `create_configured` 调用都会建立独立 client 预算；不同 registry 选出的实例不会共用整个进程或 Redis server 的全局准入限制。`max_concurrent_commands` 约束已准入的短操作，默认总额度为 64；其中 `reserved_settlement_commands`（默认 8）在普通命令额度耗尽时仍留给结算。专用 receiver 连接使用独立的 `max_active_receivers` 限制（默认 256），不占短命令名额。总命令数至少为 2；旧值 1 属于不兼容配置，会被拒绝。降低总额度时，未显式配置的结算保留数会自动调整为 `min(8, 总额 - 1)`；只有要自定义保留数时才需显式配置。失败、取消会释放本地命令名额；close/drop 释放 receiver 名额，token 继续存活也不会占用该名额。取消**不保证**multiplexed driver 停止请求，也不保证 Redis server 上已无在途命令。provider 不维护无界准入等待队列；专用阻塞读取与共享短命令通道分开。
 
 活跃 receiver 上限不保证并发 poll 的每轮恢复工作都能准入；claim 等短恢复命令共用普通命令通道。高并发 poll 应处理可重试的 `resource_limit`，可限制 poll 并发或调整预算；提高预算不保证消除拒绝，也不是服务端连接硬总上限。准入按 provider 实例隔离，observer、Sentinel 和其他服务连接不一定计入这些限制。
 
