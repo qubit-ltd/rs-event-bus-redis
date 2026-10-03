@@ -120,6 +120,122 @@ impl EventCodec<Vec<u8>> for BytesCodec {
     }
 }
 
+#[test]
+fn test_sync_checked_publish_opaque_preflight_writes_nothing() -> Result<(), Box<dyn std::error::Error>> {
+    use qubit_event_bus::CheckedPublishError;
+    use qubit_event_bus::EventBus;
+    use qubit_event_bus::codec::CodecRegistry;
+    use qubit_event_bus::facade::EventBusFacadeConfig;
+    use qubit_event_bus::model::AdmissionOutcome;
+    use qubit_event_bus::model::AdmissionRequirement;
+    use qubit_event_bus::model::ProviderId;
+    use qubit_event_bus::model::PublishRequest;
+    use qubit_event_bus::model::Topic;
+    use qubit_event_bus_redis::naming::stream_key;
+    use support::redis_server::RedisServer;
+
+    let server = RedisServer::start()?;
+    let mut codecs = CodecRegistry::new();
+    codecs.register::<Vec<u8>>(Arc::new(BytesCodec(ContentType::new("text/plain")?)))?;
+    let provider_id = ProviderId::new("redis-streams")?;
+    let facade = EventBus::with_config(
+        provider_id.clone(),
+        bus(server.url()),
+        EventBusFacadeConfig::new().with_codec_registry(Arc::new(codecs)),
+    )?;
+    let topic = Topic::<Vec<u8>>::new("checked-events")?;
+    let stream = stream_key("uncertainty", "checked-events");
+    let mut observer = redis::Client::open(server.url())?.get_connection()?;
+    let stream_len = |observer: &mut redis::Connection| -> redis::RedisResult<usize> {
+        redis::cmd("XLEN").arg(&stream).query(observer)
+    };
+    assert_eq!(stream_len(&mut observer)?, 0);
+
+    for requirement in [
+        AdmissionRequirement::AtLeastOneAccepted,
+        AdmissionRequirement::AtLeastOneAcceptedAndNoRejected,
+    ] {
+        let request = PublishRequest::new(topic.clone(), b"preflight".to_vec())?;
+        let event_id = request.envelope().id().clone();
+        let error = facade.publish_checked(request, requirement).expect_err("Redis hides destinations");
+        assert!(matches!(error, CheckedPublishError::UnsupportedVisibility { event_id: actual_event_id, provider_id: actual_provider_id }
+            if actual_event_id == event_id && actual_provider_id == provider_id));
+        assert_eq!(stream_len(&mut observer)?, 0, "preflight must not write a Redis stream entry");
+    }
+
+    let receipt = facade.publish_checked(
+        PublishRequest::new(topic, b"accepted".to_vec())?,
+        AdmissionRequirement::ProviderOrDestinationAccepted,
+    )?;
+    assert_eq!(receipt.admission_outcome(), AdmissionOutcome::OpaqueAccepted);
+    assert_eq!(stream_len(&mut observer)?, 1, "provider acceptance writes one stream entry");
+    Ok(())
+}
+
+#[cfg(feature = "async")]
+#[test]
+fn test_async_checked_publish_opaque_preflight_writes_nothing() -> Result<(), Box<dyn std::error::Error>> {
+    use qubit_event_bus::AsyncEventBus;
+    use qubit_event_bus::CheckedPublishError;
+    use qubit_event_bus::codec::CodecRegistry;
+    use qubit_event_bus::facade::EventBusFacadeConfig;
+    use qubit_event_bus::model::AdmissionOutcome;
+    use qubit_event_bus::model::AdmissionRequirement;
+    use qubit_event_bus::model::ProviderId;
+    use qubit_event_bus::model::PublishRequest;
+    use qubit_event_bus::model::Topic;
+    use qubit_event_bus_redis::naming::stream_key;
+    use qubit_event_bus_redis::r#async::AsyncRedisEventBusProvider;
+    use qubit_spi::AsyncServiceProvider;
+    use support::redis_server::RedisServer;
+
+    let server = RedisServer::start()?;
+    let options: ProviderOptions = [
+        ("redis.url".into(), server.url().into()),
+        ("redis.namespace".into(), "async-checked-uncertainty".into()),
+    ]
+    .into();
+    let spi = futures_lite::future::block_on(
+        AsyncRedisEventBusProvider.create_configured(&EventBusConfig::default().with_provider_options(options)),
+    )?;
+    let mut codecs = CodecRegistry::new();
+    codecs.register::<Vec<u8>>(Arc::new(BytesCodec(ContentType::new("text/plain")?)))?;
+    let provider_id = ProviderId::new("redis-streams")?;
+    let facade = AsyncEventBus::with_config(
+        provider_id.clone(),
+        spi,
+        EventBusFacadeConfig::new().with_codec_registry(Arc::new(codecs)),
+    )?;
+    let topic = Topic::<Vec<u8>>::new("checked-events")?;
+    let stream = stream_key("async-checked-uncertainty", "checked-events");
+    let mut observer = redis::Client::open(server.url())?.get_connection()?;
+    let stream_len = |observer: &mut redis::Connection| -> redis::RedisResult<usize> {
+        redis::cmd("XLEN").arg(&stream).query(observer)
+    };
+    assert_eq!(stream_len(&mut observer)?, 0);
+
+    for requirement in [
+        AdmissionRequirement::AtLeastOneAccepted,
+        AdmissionRequirement::AtLeastOneAcceptedAndNoRejected,
+    ] {
+        let request = PublishRequest::new(topic.clone(), b"preflight".to_vec())?;
+        let event_id = request.envelope().id().clone();
+        let error = futures_lite::future::block_on(facade.publish_checked(request, requirement))
+            .expect_err("Redis hides destinations");
+        assert!(matches!(error, CheckedPublishError::UnsupportedVisibility { event_id: actual_event_id, provider_id: actual_provider_id }
+            if actual_event_id == event_id && actual_provider_id == provider_id));
+        assert_eq!(stream_len(&mut observer)?, 0, "preflight must not write a Redis stream entry");
+    }
+
+    let receipt = futures_lite::future::block_on(facade.publish_checked(
+        PublishRequest::new(topic, b"accepted".to_vec())?,
+        AdmissionRequirement::ProviderOrDestinationAccepted,
+    ))?;
+    assert_eq!(receipt.admission_outcome(), AdmissionOutcome::OpaqueAccepted);
+    assert_eq!(stream_len(&mut observer)?, 1, "provider acceptance writes one stream entry");
+    Ok(())
+}
+
 /// Executes a real XADD, discards its reply, and observes actual stream
 /// records.
 fn applied_xadd_reply_loss(policy: DuplicateRiskPolicy) -> Result<(), Box<dyn std::error::Error>> {
