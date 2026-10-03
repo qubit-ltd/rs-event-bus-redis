@@ -13,6 +13,8 @@
 
 吞吐和 p95/p99 列为三轮各自统计值的中位数；成功、错误和未知数是三轮合计。`XAUTOCLAIM` 与 `XREADGROUP` 按轮列出原始命令数。这组结果用于确认新源码行为，不与历史报告作前后对比。结果受运行主机影响；限额配置并发 32 的行包含快速准入拒绝。
 
+限额并发 32 场景的 860 次业务失败全部是 `publish:resource_limit`，业务工作负载没有未知结果。payload 不超过 4 KiB 时，每个 receiver 每轮只执行一次 `XAUTOCLAIM`（并发为 `c` 时共 `c` 次）。256 KiB 工作负载运行更久并触发周期扫描，但每轮 1,000 次尝试只执行 15 至 251 次 `XAUTOCLAIM`。空闲场景每个 receiver 只执行一次初始扫描。这证明热路径不再为每条消息扫描 pending list，同时周期恢复仍然生效。
+
 ## 往返结果
 
 | Mode | Limits | Payload (bytes) | Concurrency | Success / errors / unknown (total) | Throughput median (msg/s) | p95 median (µs) | p99 median (µs) | XAUTOCLAIM (r1/r2/r3) | XREADGROUP (r1/r2/r3) |

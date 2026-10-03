@@ -14,6 +14,8 @@
 
 The table reports the median of the three per-round throughput, p95, and p99 values. Counts sum across rounds. `XAUTOCLAIM` and `XREADGROUP` list raw per-round command counts. These measurements are a confirmation of the new source, not a before/after comparison. Results are host-sensitive; the limited c=32 rows include fast admission rejections.
 
+All 860 rejected business attempts were `publish:resource_limit` in limited c=32 workloads; business workloads had zero unknown outcomes. For payloads up to 4 KiB, each receiver issued one `XAUTOCLAIM` per round (`c` commands for concurrency `c`). The 256 KiB workloads took longer and triggered periodic scans, but remained between 15 and 251 `XAUTOCLAIM` calls for 1,000 attempts per round. Idle workloads issued one initial scan per receiver. This confirms the hot path no longer scans the pending list for every message while preserving periodic recovery.
+
 ## Round-trip results
 
 | Mode | Limits | Payload (bytes) | Concurrency | Success / errors / unknown (total) | Throughput median (msg/s) | p95 median (µs) | p99 median (µs) | XAUTOCLAIM (r1/r2/r3) | XREADGROUP (r1/r2/r3) |
