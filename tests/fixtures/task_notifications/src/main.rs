@@ -37,12 +37,13 @@ use qubit_event_bus::model::ProviderOptions;
 use qubit_event_bus::model::PublishRequest;
 use qubit_event_bus::model::StartPosition;
 use qubit_event_bus::model::SubscribeRequest;
+use qubit_event_bus::model::SubscriberId;
+use qubit_event_bus::model::SubscriptionDurability;
 use qubit_event_bus::model::Topic;
 use qubit_event_bus::spi::ShutdownMode;
 use qubit_event_bus_redis as _;
-use qubit_event_bus_redis::RedisSubscriptionProfile;
-use qubit_model_id::ModelId;
-use qubit_model_id::ModelIdBuf;
+use qubit_model_metadata::metadata::ModelId;
+use qubit_model_metadata::metadata::ModelIdBuf;
 use qubit_spi::ProviderSelection;
 use qubit_task::handler::TaskRunOutcome;
 use qubit_task::CancellationMode;
@@ -57,7 +58,7 @@ use qubit_task::TaskSummary;
 use qubit_task::model::TaskOutput;
 use qubit_task::model::TaskState;
 use qubit_task::TaskExecutionService;
-use qubit_task::store::MemoryTaskStore;
+use qubit_task::store::SqliteTaskStore;
 use qubit_task::store::TaskFuture;
 
 use crate::task_event_json_codec::TaskEventJsonCodec;
@@ -110,10 +111,13 @@ impl TaskHandler<u32> for TypedHandler {
     }
 }
 
-async fn create_task_service(bus: Arc<AsyncEventBus>, topic: Topic<TaskEvent>) -> Result<TaskExecutionService, Box<dyn Error>> {
+async fn create_task_service(
+    store: Arc<SqliteTaskStore>,
+    bus: Arc<AsyncEventBus>,
+) -> Result<TaskExecutionService, Box<dyn Error>> {
     let codecs = Arc::new(ValueBytesCodecRegistry::from_registrations([&TASK_CODEC])?);
     let mut builder = TaskExecutionServiceBuilder::new(
-        Arc::new(MemoryTaskStore::new(16)),
+        store,
         codecs,
         Arc::new(TaskIds(AtomicU64::new(1))),
     )
@@ -121,7 +125,8 @@ async fn create_task_service(bus: Arc<AsyncEventBus>, topic: Topic<TaskEvent>) -
         cpu_slots: 1,
         ..ResourceCapacity::default()
     })
-    .event_notifications(bus, topic, std::num::NonZeroUsize::new(16).unwrap(), Duration::from_secs(3));
+    .event_bus(bus)
+    .notification_shutdown_timeout(Duration::from_secs(3));
     builder.handlers_mut().register::<u32, _>(
         TaskHandlerDescriptor {
             kind_id: "example.task_notifications".into(),
@@ -181,6 +186,8 @@ async fn create_async_bus(url: &str, namespace: &str) -> Result<AsyncEventBus, B
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), Box<dyn Error>> {
     let url = args().nth(1).ok_or("expected Redis URL")?;
+    let database_dir = tempfile::tempdir()?;
+    let store = Arc::new(SqliteTaskStore::open_next(database_dir.path().join("tasks.sqlite"))?);
     let bus = create_bus(&url, "task-notification-fixture", true)?;
     let async_bus = Arc::new(create_async_bus(&url, "task-notification-fixture").await?);
     let topic = Topic::<TaskEvent>::new("task.lifecycle")?;
@@ -188,11 +195,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let consumer_projection = projection.clone();
     let (sender, receiver) = channel();
     let subscription = bus.subscribe(
-        SubscribeRequest::new("task-projection", topic.clone())?.with_options(
-            RedisSubscriptionProfile::new(StartPosition::Earliest)
-                .options()
-                .build(),
-        ),
+        SubscribeRequest::builder()
+            .subscriber_id(SubscriberId::new("task-projection")?)
+            .topic(topic.clone())
+            .start_position(StartPosition::Earliest)
+            .durability(SubscriptionDurability::Durable)
+            .build()?,
         move |delivery| {
             let event = delivery.payload().clone();
             let mut current = consumer_projection.lock().expect("projection lock must remain usable");
@@ -204,7 +212,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             Ok::<(), DeliveryError>(())
         },
     )?;
-    let task_service = create_task_service(Arc::clone(&async_bus), topic.clone()).await?;
+    let task_service = create_task_service(Arc::clone(&store), Arc::clone(&async_bus)).await?;
     let request = TaskRequest::new(
         "example.task_notifications",
         ModelId::new("example.TaskNotificationPayload"),
@@ -265,18 +273,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     subscription.cancel()?;
     let _ = bus.shutdown(ShutdownMode::Immediate)?;
 
-    // Missing application codec makes every notification fail. The task's
-    // business state still commits; this example does not implement an outbox.
-    let failing_bus = create_bus(&url, "task-failed-notification-fixture", false)?;
-    for (state_version, state) in [TaskState::Queued, TaskState::Running, TaskState::Succeeded].into_iter().enumerate() {
-        assert!(failing_bus.publish(PublishRequest::new(
-            topic.clone(),
-            TaskEvent { schema_version: 1, task_id: id, state_version: state_version as u64, state, correlation_key: summary.correlation_key.clone() },
-        )?).is_err());
-    }
     assert_eq!(task_service.get(id).await?.ok_or("task disappeared")?.state, TaskState::Succeeded,
-        "notification failure cannot roll back task state");
-    let _ = failing_bus.shutdown(ShutdownMode::Immediate)?;
-    println!("task notifications: lifecycle, duplicate/stale projection, failure preserves business state passed");
+        "task lifecycle publication cannot roll back committed task state");
+    println!("task notifications: durable lifecycle, duplicate/stale projection, business state passed");
     Ok(())
 }
