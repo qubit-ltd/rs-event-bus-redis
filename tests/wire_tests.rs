@@ -28,6 +28,7 @@ use qubit_event_bus::model::EventId;
 use qubit_event_bus::model::Headers;
 #[cfg(any(feature = "sync", feature = "async"))]
 use qubit_event_bus::model::ProviderOptions;
+#[cfg(any(feature = "sync", feature = "async"))]
 use qubit_event_bus::model::PublishEffect;
 #[cfg(any(feature = "sync", feature = "async"))]
 use qubit_event_bus::model::SchemaId;

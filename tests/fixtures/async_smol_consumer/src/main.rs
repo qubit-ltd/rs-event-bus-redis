@@ -67,7 +67,7 @@ async fn exercise() -> Result<(), Box<dyn Error>> {
         ))
         .await?;
     let payload: Arc<[u8]> = Arc::from(b"independent production features".as_slice());
-    bus.publish(OutboundMessage::new(
+    let _ = bus.publish(OutboundMessage::new(
         topic,
         EventId::new("isolated-runtime-event")?,
         SystemTime::now(),

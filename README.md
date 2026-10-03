@@ -14,7 +14,7 @@
 ```toml
 [dependencies]
 qubit-event-bus = { version = "0.19", features = ["discovery"] }
-qubit-event-bus-redis = "0.7"
+qubit-event-bus-redis = "0.6"
 qubit-spi = "0.13"
 ```
 
