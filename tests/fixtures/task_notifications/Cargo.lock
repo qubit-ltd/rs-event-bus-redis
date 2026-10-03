@@ -639,9 +639,9 @@ dependencies = [
 
 [[package]]
 name = "libc"
-version = "0.2.189"
+version = "0.2.190"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
+checksum = "ce5d3ddc6d3fa000eb1536d85e147bfe31aacaba692ed6a876f95cb7c855be78"
 
 [[package]]
 name = "libm"
@@ -935,13 +935,13 @@ dependencies = [
 
 [[package]]
 name = "qubit-event-bus"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "qubit-argument",
  "qubit-clock",
  "qubit-collections",
  "qubit-executor",
- "qubit-id 0.6.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "qubit-id",
  "qubit-metadata",
  "qubit-retry",
  "qubit-spi",
@@ -950,11 +950,11 @@ dependencies = [
 
 [[package]]
 name = "qubit-event-bus-redis"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "async-lock",
  "qubit-event-bus",
- "qubit-id 0.6.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "qubit-id",
  "qubit-spi",
  "redis",
  "serde",
@@ -994,19 +994,9 @@ checksum = "1f6ad59d1256f6c62bc2fe153bdd87f224d7cfd7fa81b58dd8ab03aa4836f21a"
 
 [[package]]
 name = "qubit-id"
-version = "0.6.0"
-dependencies = [
- "parking_lot",
- "qubit-clock",
- "serde",
- "thiserror",
-]
-
-[[package]]
-name = "qubit-id"
-version = "0.6.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "81a4ddf466a87d57a9b9a33f635e9e6395631a8b8e7e1d1139f2f53f6958a4f1"
+checksum = "9d861eb71f4ce5e46d1a956cc631859e9f9f45a5a4dd310a2e0acb570acd34d8"
 dependencies = [
  "getrandom 0.4.3",
  "parking_lot",
@@ -1059,12 +1049,12 @@ version = "0.1.0"
 
 [[package]]
 name = "qubit-model-metadata"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bigdecimal",
  "bitflags",
  "chrono",
- "qubit-id 0.6.0",
+ "qubit-id",
  "qubit-model-id",
  "qubit-redact 0.9.0",
  "qubit-reflect",
@@ -1074,7 +1064,9 @@ dependencies = [
 
 [[package]]
 name = "qubit-progress"
-version = "0.8.4"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d10d16ca6635e68ad50425113e36a027d5a5e97f944550b419fed26764f7b17"
 dependencies = [
  "qubit-fast-cas",
 ]
@@ -1117,13 +1109,13 @@ dependencies = [
 
 [[package]]
 name = "qubit-reflect"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bigdecimal",
  "chrono",
  "inventory",
  "qubit-datatype 0.14.0",
- "qubit-id 0.6.0",
+ "qubit-id",
  "qubit-reflect-derive",
  "thiserror",
  "uuid",
@@ -1131,7 +1123,7 @@ dependencies = [
 
 [[package]]
 name = "qubit-reflect-derive"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -1175,14 +1167,14 @@ dependencies = [
 
 [[package]]
 name = "qubit-task"
-version = "0.8.0"
+version = "0.10.0"
 dependencies = [
  "fs2",
  "futures",
  "parking_lot",
  "qubit-codec",
  "qubit-event-bus",
- "qubit-id 0.6.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "qubit-id",
  "qubit-metadata",
  "qubit-model-id",
  "qubit-progress",
@@ -1299,7 +1291,7 @@ dependencies = [
  "qubit-codec",
  "qubit-event-bus",
  "qubit-event-bus-redis",
- "qubit-id 0.6.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "qubit-id",
  "qubit-model-metadata",
  "qubit-spi",
  "qubit-task",
@@ -1500,6 +1492,17 @@ dependencies = [
 
 [[package]]
 name = "synstructure"
+version = "0.13.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "728a70f3dbaf5bab7f0c4b1ac8d7ae5ea60a4b5549c8a5914361c99147a709d2"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "synstructure"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "901704edd0dfe137f1987838ee4f259e4e063c31371bdb423f7ae38ec6f77f02"
@@ -1647,9 +1650,9 @@ checksum = "b6c140620e7ffbb22c2dee59cafe6084a59b5ffc27a8859a5f0d494b5d52b6be"
 
 [[package]]
 name = "uuid"
-version = "1.26.1"
+version = "1.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2ef6dac1e96601b4fb3acccccff2139741fcb757cb9a36089bf5be91cfb285ce"
+checksum = "97277d36b9c3ace13e58fa6e753f8b0bbbf302a18dd193240d70f9e29681059a"
 dependencies = [
  "getrandom 0.4.3",
  "js-sys",
@@ -1800,14 +1803,14 @@ dependencies = [
 
 [[package]]
 name = "yoke-derive"
-version = "0.8.3"
+version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "33811428bee40dbceb6d545e95754741d17a6aef9a4849f0fd62e2ba4f412a78"
+checksum = "de844c262c8848816172cef550288e7dc6c7b7814b4ee56b3e1553f275f1858e"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.6",
- "synstructure",
+ "syn 2.0.119",
+ "synstructure 0.13.2",
 ]
 
 [[package]]
@@ -1848,7 +1851,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.6",
- "synstructure",
+ "synstructure 0.14.0",
 ]
 
 [[package]]

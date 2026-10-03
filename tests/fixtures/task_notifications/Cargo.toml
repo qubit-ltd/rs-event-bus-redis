@@ -8,9 +8,9 @@ publish = false
 
 [dependencies]
 qubit-event-bus-redis = { path = "../../..", default-features = false, features = ["sync", "async", "discovery"] }
-qubit-event-bus = { version = "0.19.0", path = "../../../../rs-event-bus", default-features = false, features = ["discovery"] }
+qubit-event-bus = { version = "0.20.0", path = "../../../../rs-event-bus", default-features = false, features = ["discovery"] }
 qubit-task = { path = "../../../../rs-task", features = ["sqlite", "event-bus"] }
-qubit-codec = { path = "../../../../rs-codec" }
+qubit-codec = { path = "../../../../rs-codec", features = ["registry"] }
 tempfile = "3"
 qubit-id = "0.7"
 qubit-model-metadata = { path = "../../../../rs-model-metadata" }
@@ -19,4 +19,5 @@ serde_json = "1"
 tokio = { version = "1.53", features = ["rt-multi-thread", "macros"] }
 
 [patch.crates-io]
-qubit-event-bus = { version = "0.19.0", path = "../../../../rs-event-bus" }
+qubit-event-bus = { version = "0.20.0", path = "../../../../rs-event-bus" }
+qubit-codec = { version = "0.16.0", path = "../../../../rs-codec" }
