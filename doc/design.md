@@ -2,7 +2,7 @@
 
 [简体中文](design.zh_CN.md) · [User guide](user_guide.md) · [README](../README.md)
 
-This document describes the unreleased working tree whose Cargo version is `0.6.0`. It records the implemented contracts and their limitations; test and benchmark reports carry the separate evidence for acceptance. No new release or measured performance result is implied.
+This document describes the unreleased working tree whose Cargo version is `0.7.0`. It records the implemented contracts and their limitations; test and benchmark reports carry the separate evidence for acceptance. No new release or measured performance result is implied.
 
 ## Boundaries and responsibilities
 

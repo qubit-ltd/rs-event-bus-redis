@@ -10,7 +10,7 @@ Add both the facade and provider as direct dependencies. `discovery` is on by de
 
 ```toml
 [dependencies]
-qubit-event-bus = { version = "0.19", features = ["discovery"] }
+qubit-event-bus = { version = "0.20", features = ["discovery"] }
 qubit-event-bus-redis = "0.7"
 qubit-spi = "0.13"
 ```

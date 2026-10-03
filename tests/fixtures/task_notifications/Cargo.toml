@@ -12,7 +12,7 @@ qubit-event-bus = { version = "0.19.0", path = "../../../../rs-event-bus", defau
 qubit-task = { path = "../../../../rs-task", features = ["sqlite", "event-bus"] }
 qubit-codec = { path = "../../../../rs-codec" }
 tempfile = "3"
-qubit-id = "0.6"
+qubit-id = "0.7"
 qubit-model-metadata = { path = "../../../../rs-model-metadata" }
 qubit-spi = "0.13"
 serde_json = "1"
