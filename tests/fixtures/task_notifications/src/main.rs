@@ -37,11 +37,10 @@ use qubit_event_bus::model::ProviderOptions;
 use qubit_event_bus::model::PublishRequest;
 use qubit_event_bus::model::StartPosition;
 use qubit_event_bus::model::SubscribeRequest;
-use qubit_event_bus::model::SubscriberId;
-use qubit_event_bus::model::SubscriptionDurability;
 use qubit_event_bus::model::Topic;
 use qubit_event_bus::spi::ShutdownMode;
 use qubit_event_bus_redis as _;
+use qubit_event_bus_redis::RedisSubscriptionProfile;
 use qubit_model_id::ModelId;
 use qubit_model_id::ModelIdBuf;
 use qubit_spi::ProviderSelection;
@@ -144,7 +143,7 @@ async fn create_task_service(bus: Arc<AsyncEventBus>, topic: Topic<TaskEvent>) -
 fn create_bus(url: &str, namespace: &str, codec: bool) -> Result<EventBus, Box<dyn Error>> {
     let mut codecs = CodecRegistry::new();
     if codec {
-        codecs.register::<TaskEvent>(Arc::new(TaskEventJsonCodec(ContentType::new("application/json")?)));
+        codecs.register::<TaskEvent>(Arc::new(TaskEventJsonCodec(ContentType::new("application/json")?)))?;
     }
     let options: ProviderOptions = [
         ("redis.url".into(), url.into()),
@@ -160,7 +159,7 @@ fn create_bus(url: &str, namespace: &str, codec: bool) -> Result<EventBus, Box<d
 
 async fn create_async_bus(url: &str, namespace: &str) -> Result<AsyncEventBus, Box<dyn Error>> {
     let mut codecs = CodecRegistry::new();
-    codecs.register::<TaskEvent>(Arc::new(TaskEventJsonCodec(ContentType::new("application/json")?)));
+    codecs.register::<TaskEvent>(Arc::new(TaskEventJsonCodec(ContentType::new("application/json")?)))?;
     let options: ProviderOptions = [
         ("redis.url".into(), url.into()),
         ("redis.namespace".into(), namespace.into()),
@@ -189,12 +188,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let consumer_projection = projection.clone();
     let (sender, receiver) = channel();
     let subscription = bus.subscribe(
-        SubscribeRequest::builder()
-            .subscriber_id(SubscriberId::new("task-projection")?)
-            .topic(topic.clone())
-            .start_position(StartPosition::Earliest)
-            .durability(SubscriptionDurability::Durable)
-            .build()?,
+        SubscribeRequest::new("task-projection", topic.clone())?.with_options(
+            RedisSubscriptionProfile::new(StartPosition::Earliest)
+                .options()
+                .build(),
+        ),
         move |delivery| {
             let event = delivery.payload().clone();
             let mut current = consumer_projection.lock().expect("projection lock must remain usable");
