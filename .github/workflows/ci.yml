@@ -38,6 +38,8 @@ jobs:
           toolchain: 1.94
       - name: Prepare local path dependencies
         run: bash ./ci/prepare-event-bus.sh
+      - name: Test task notification downstream integration
+        run: cargo +1.94.0 test --test downstream_tests test_task_notifications_preserve_monotonic_projection_and_business_state --all-features --locked -- --exact --test-threads=1
       - name: Build all runnable provider examples
         run: cargo +1.94.0 build --examples --all-features --locked
       - name: Run examples against standalone Redis and Sentinel
