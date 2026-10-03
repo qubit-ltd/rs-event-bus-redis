@@ -16,11 +16,53 @@ use std::io::BufRead;
 use std::io::BufReader;
 use std::io::Write;
 use std::path::Path;
+use std::path::PathBuf;
 use std::process::Command;
 use std::process::Stdio;
+use std::sync::OnceLock;
 
 use support::redis_server::RedisServer;
 use support::sentinel::SentinelServer;
+
+static EXAMPLES_DIR: OnceLock<Result<PathBuf, String>> = OnceLock::new();
+
+fn examples_dir() -> Result<PathBuf, Box<dyn Error>> {
+    let result = EXAMPLES_DIR.get_or_init(|| {
+        let executable = current_exe().map_err(|error| error.to_string())?;
+        let profile_dir = executable
+            .parent()
+            .and_then(Path::parent)
+            .ok_or_else(|| "integration test executable has no profile directory".to_owned())?;
+        let examples = profile_dir.join("examples");
+        let required = ["sync_orders", "async_orders", "sentinel_orders"];
+        if required
+            .iter()
+            .any(|name| !examples.join(format!("{name}{EXE_SUFFIX}")).is_file())
+        {
+            let target_dir = profile_dir
+                .parent()
+                .ok_or_else(|| "integration test profile has no target directory".to_owned())?;
+            let status = Command::new("cargo")
+                .args([
+                    "build",
+                    "--locked",
+                    "--all-features",
+                    "--examples",
+                    "--manifest-path",
+                    concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"),
+                    "--target-dir",
+                ])
+                .arg(target_dir)
+                .status()
+                .map_err(|error| format!("failed to build facade examples: {error}"))?;
+            if !status.success() {
+                return Err(format!("building facade examples exited with {status}"));
+            }
+        }
+        Ok(examples)
+    });
+    result.as_ref().cloned().map_err(|error| error.clone().into())
+}
 
 /// Confirms both published codec snippets match the helper compiled by every
 /// facade example.
@@ -68,11 +110,7 @@ fn marked_snippet<'text>(text: &'text str, start: &str, end: &str) -> &'text str
 #[test]
 fn test_standalone_examples_publish_consume_and_close() -> Result<(), Box<dyn Error>> {
     let redis = RedisServer::start()?;
-    let target = current_exe()?
-        .parent()
-        .and_then(Path::parent)
-        .ok_or("integration test executable has no target directory")?
-        .join("examples");
+    let target = examples_dir()?;
 
     let sync = Command::new(target.join(format!("sync_orders{}", EXE_SUFFIX)))
         .arg(redis.url())
@@ -124,12 +162,7 @@ fn test_standalone_examples_publish_consume_and_close() -> Result<(), Box<dyn Er
 #[test]
 fn test_sentinel_example_resolves_and_uses_the_master() -> Result<(), Box<dyn Error>> {
     let sentinel = SentinelServer::start()?;
-    let target = current_exe()?
-        .parent()
-        .and_then(Path::parent)
-        .ok_or("integration test executable has no target directory")?
-        .join("examples")
-        .join(format!("sentinel_orders{}", EXE_SUFFIX));
+    let target = examples_dir()?.join(format!("sentinel_orders{}", EXE_SUFFIX));
     let output = Command::new(target)
         .arg("documentation-sentinel")
         .env("REDIS_SENTINEL_NODES", sentinel.endpoints())
