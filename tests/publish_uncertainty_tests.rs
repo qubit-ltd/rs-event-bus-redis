@@ -157,10 +157,18 @@ fn test_sync_checked_publish_opaque_preflight_writes_nothing() -> Result<(), Box
     ] {
         let request = PublishRequest::new(topic.clone(), b"preflight".to_vec())?;
         let event_id = request.envelope().id().clone();
-        let error = facade.publish_checked(request, requirement).expect_err("Redis hides destinations");
-        assert!(matches!(error, CheckedPublishError::UnsupportedVisibility { event_id: actual_event_id, provider_id: actual_provider_id }
-            if actual_event_id == event_id && actual_provider_id == provider_id));
-        assert_eq!(stream_len(&mut observer)?, 0, "preflight must not write a Redis stream entry");
+        let error = facade
+            .publish_checked(request, requirement)
+            .expect_err("Redis hides destinations");
+        assert!(
+            matches!(error, CheckedPublishError::UnsupportedVisibility { event_id: actual_event_id, provider_id: actual_provider_id }
+            if actual_event_id == event_id && actual_provider_id == provider_id)
+        );
+        assert_eq!(
+            stream_len(&mut observer)?,
+            0,
+            "preflight must not write a Redis stream entry"
+        );
     }
 
     let receipt = facade.publish_checked(
@@ -168,7 +176,11 @@ fn test_sync_checked_publish_opaque_preflight_writes_nothing() -> Result<(), Box
         AdmissionRequirement::ProviderOrDestinationAccepted,
     )?;
     assert_eq!(receipt.admission_outcome(), AdmissionOutcome::OpaqueAccepted);
-    assert_eq!(stream_len(&mut observer)?, 1, "provider acceptance writes one stream entry");
+    assert_eq!(
+        stream_len(&mut observer)?,
+        1,
+        "provider acceptance writes one stream entry"
+    );
     Ok(())
 }
 
@@ -184,8 +196,8 @@ fn test_async_checked_publish_opaque_preflight_writes_nothing() -> Result<(), Bo
     use qubit_event_bus::model::ProviderId;
     use qubit_event_bus::model::PublishRequest;
     use qubit_event_bus::model::Topic;
-    use qubit_event_bus_redis::naming::stream_key;
     use qubit_event_bus_redis::r#async::AsyncRedisEventBusProvider;
+    use qubit_event_bus_redis::naming::stream_key;
     use qubit_spi::AsyncServiceProvider;
     use support::redis_server::RedisServer;
 
@@ -222,9 +234,15 @@ fn test_async_checked_publish_opaque_preflight_writes_nothing() -> Result<(), Bo
         let event_id = request.envelope().id().clone();
         let error = futures_lite::future::block_on(facade.publish_checked(request, requirement))
             .expect_err("Redis hides destinations");
-        assert!(matches!(error, CheckedPublishError::UnsupportedVisibility { event_id: actual_event_id, provider_id: actual_provider_id }
-            if actual_event_id == event_id && actual_provider_id == provider_id));
-        assert_eq!(stream_len(&mut observer)?, 0, "preflight must not write a Redis stream entry");
+        assert!(
+            matches!(error, CheckedPublishError::UnsupportedVisibility { event_id: actual_event_id, provider_id: actual_provider_id }
+            if actual_event_id == event_id && actual_provider_id == provider_id)
+        );
+        assert_eq!(
+            stream_len(&mut observer)?,
+            0,
+            "preflight must not write a Redis stream entry"
+        );
     }
 
     let receipt = futures_lite::future::block_on(facade.publish_checked(
@@ -232,7 +250,11 @@ fn test_async_checked_publish_opaque_preflight_writes_nothing() -> Result<(), Bo
         AdmissionRequirement::ProviderOrDestinationAccepted,
     ))?;
     assert_eq!(receipt.admission_outcome(), AdmissionOutcome::OpaqueAccepted);
-    assert_eq!(stream_len(&mut observer)?, 1, "provider acceptance writes one stream entry");
+    assert_eq!(
+        stream_len(&mut observer)?,
+        1,
+        "provider acceptance writes one stream entry"
+    );
     Ok(())
 }
 
