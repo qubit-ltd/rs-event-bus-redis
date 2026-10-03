@@ -1,5 +1,7 @@
 # Redis 公开 API 工作负载基准
 
+集成重构源码的补充测量见[2026-10-03 重构基准](redis-redesign-benchmark-2026-10-03.zh_CN.md)。原始证据保存在 `/tmp/redis-event-bus-redesign-benchmark-20261003`。
+
 ## 2026-10-03 最终源码固定矩阵（`108d0ad`）
 
 本轮以最终 provider 源码 `108d0ad947f98e26a723adbc50878e58c9684cf9` 和同一公开 SPI harness 测量。环境为 Rust 1.94.0、独立 Redis 7.4.8 standalone fixture。完整固定矩阵覆盖 sync/async、64/4,096/262,144 字节原始 payload、并发 1/8/32、default/limited 准入以及 10/100 个空闲 receiver；每项配置三轮，每轮 1,000 次尝试。进程退出码为 0，生成完整的 120 行 summary 和 120,000 条逐次尝试样本。退出码 0 表示 harness 完成，不代表所有尝试都成功。

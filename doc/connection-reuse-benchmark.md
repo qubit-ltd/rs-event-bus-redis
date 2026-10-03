@@ -1,5 +1,7 @@
 # Redis public API workload benchmark
 
+Follow-up measurements against the integrated redesign source are in the [2026-10-03 redesign benchmark](redis-redesign-benchmark-2026-10-03.md). Its raw evidence is retained under `/tmp/redis-event-bus-redesign-benchmark-20261003`.
+
 ## 2026-10-03 final-source fixed matrix (`108d0ad`)
 
 This run measures the final provider source revision `108d0ad947f98e26a723adbc50878e58c9684cf9` with the same public-SPI harness. It ran on Rust 1.94.0 against an owned Redis 7.4.8 standalone fixture. The complete fixed matrix covers sync/async, raw payloads of 64/4,096/262,144 bytes, concurrency 1/8/32, default/limited admission, and idle receivers 10/100; every configuration has three rounds of 1,000 attempts. The process exited 0, emitted all 120 summary rows and 120,000 per-attempt samples. Exit 0 means the harness completed; it does not mean every attempt succeeded.
