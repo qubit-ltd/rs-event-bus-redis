@@ -10,7 +10,7 @@ publish = false
 qubit-event-bus-redis = { path = "../../..", default-features = false, features = ["sync", "async", "discovery"] }
 qubit-event-bus = { version = "0.20.0", path = "../../../../rs-event-bus", default-features = false, features = ["discovery"] }
 qubit-task = { path = "../../../../rs-task", features = ["sqlite", "event-bus"] }
-qubit-codec = { path = "../../../../rs-codec" }
+qubit-codec = { path = "../../../../rs-codec", features = ["registry"] }
 tempfile = "3"
 qubit-id = "0.7"
 qubit-model-id = { version = "0.1", path = "../../../../rs-model-metadata/model-id" }
@@ -20,3 +20,4 @@ tokio = { version = "1.53", features = ["rt-multi-thread", "macros"] }
 
 [patch.crates-io]
 qubit-event-bus = { version = "0.20.0", path = "../../../../rs-event-bus" }
+qubit-codec = { path = "../../../../rs-codec" }

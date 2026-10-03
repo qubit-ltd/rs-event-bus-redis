@@ -844,16 +844,6 @@ dependencies = [
 name = "qubit-codec"
 version = "0.16.0"
 dependencies = [
- "qubit-utils",
- "thiserror",
-]
-
-[[package]]
-name = "qubit-codec"
-version = "0.16.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a4e907054590c1818cb69fae360b2bf60d69890199dea8edd9bd991bb98a3c5b"
-dependencies = [
  "inventory",
  "qubit-utils",
  "thiserror",
@@ -1057,7 +1047,7 @@ dependencies = [
  "fs2",
  "futures",
  "parking_lot",
- "qubit-codec 0.16.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "qubit-codec",
  "qubit-event-bus",
  "qubit-id",
  "qubit-metadata",
@@ -1173,7 +1163,7 @@ dependencies = [
 name = "redis-event-bus-task-notifications"
 version = "0.0.0"
 dependencies = [
- "qubit-codec 0.16.0",
+ "qubit-codec",
  "qubit-event-bus",
  "qubit-event-bus-redis",
  "qubit-id",
