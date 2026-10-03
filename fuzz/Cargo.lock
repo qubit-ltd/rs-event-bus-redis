@@ -494,7 +494,7 @@ dependencies = [
 
 [[package]]
 name = "qubit-event-bus"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "qubit-argument",
  "qubit-clock",
@@ -509,7 +509,7 @@ dependencies = [
 
 [[package]]
 name = "qubit-event-bus-redis"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "qubit-event-bus",
  "qubit-id",
@@ -562,9 +562,9 @@ checksum = "1f6ad59d1256f6c62bc2fe153bdd87f224d7cfd7fa81b58dd8ab03aa4836f21a"
 
 [[package]]
 name = "qubit-id"
-version = "0.6.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "81a4ddf466a87d57a9b9a33f635e9e6395631a8b8e7e1d1139f2f53f6958a4f1"
+checksum = "9d861eb71f4ce5e46d1a956cc631859e9f9f45a5a4dd310a2e0acb570acd34d8"
 dependencies = [
  "getrandom 0.4.3",
  "parking_lot",
