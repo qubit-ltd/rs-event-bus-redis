@@ -153,12 +153,18 @@ fn test_async_cancelled_publish_has_no_returned_outcome_count() -> Result<(), Bo
         assert!(result.is_none(), "XADD future was cancelled before its reply");
         let mut observer = redis::Client::open(server.url())?.get_connection()?;
         let stream = qubit_event_bus_redis::naming::stream_key(namespace, "events");
-        let applied: usize = redis::cmd("XLEN").arg(stream).query(&mut observer)?;
+        let applied: usize = redis::cmd("XLEN").arg(&stream).query(&mut observer)?;
         assert_eq!(applied, 1, "Redis applied XADD before cancellation");
-        gate.release_without_reply();
+        gate.release();
         let counters = snapshot(namespace);
         assert_eq!(counters.publish_accepted(), 0);
         assert_eq!(counters.publish_unknown(), 0);
+        let _ = bus.publish(message()).await?;
+        let counters = snapshot(namespace);
+        assert_eq!(counters.publish_accepted(), 1, "later confirmed XADD counts after cancellation");
+        assert_eq!(counters.publish_unknown(), 0, "cancelled XADD has no returned unknown result");
+        let restored: usize = redis::cmd("XLEN").arg(&stream).query(&mut observer)?;
+        assert_eq!(restored, 2, "both applied XADDs remain visible after recovery");
         Ok::<(), Box<dyn std::error::Error>>(())
     })
 }

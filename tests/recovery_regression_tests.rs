@@ -1444,6 +1444,72 @@ fn test_async_deleted_pending_entry_is_cleared_on_redis_6_2_and_7() -> Result<()
     })
 }
 
+#[cfg(feature = "sync")]
+#[test]
+fn test_sync_tombstone_scan_counts_reported_quarantine_outcome() -> Result<(), Box<dyn Error>> {
+    let server = RedisServer::start_version("6.2-alpine")?;
+    let proxy = ControlledRedis::start(server.url())?;
+    let namespace = "tombstone-quarantine-sync";
+    let mut options = provider_options(&server, namespace, 2);
+    options.insert("redis.url".into(), proxy.url());
+    let bus = RedisEventBusProvider
+        .create_configured(&EventBusConfig::default().with_provider_options(options))
+        .map_err(|failure| failure.into_error())?;
+    let stream = stream_key(namespace, "events");
+    let mut observer = Client::open(server.url())?.get_connection()?;
+    let _ = bus.publish(event("events", "first", b"payload")?)?;
+    let _ = bus.publish(event("events", "second", b"payload")?)?;
+    let entries: StreamRangeReply = cmd("XRANGE").arg(&stream).arg("-").arg("+").query(&mut observer)?;
+    let deleted_id = entries.ids.first().ok_or("first entry missing")?.id.clone();
+    {
+        let mut first = bus.subscribe(request("events", "first-worker", "workers", SubscriptionDurability::Durable)?)?;
+        for _ in 0..2 {
+            assert!(matches!(first.receive(Duration::from_secs(2))?, ReceiveOutcome::Message(_)));
+        }
+    }
+    assert_eq!(cmd("XDEL").arg(&stream).arg(&deleted_id).query::<usize>(&mut observer)?, 1);
+    let mut second = bus.subscribe(request("events", "second-worker", "workers", SubscriptionDurability::Durable)?)?;
+    // Simulate the quarantine status-1 reply to verify this protocol branch.
+    proxy.replace_next_reply("EVAL", b":1\r\n");
+    let _ = second.receive(Duration::from_secs(2))?;
+    assert_eq!(snapshot(namespace).quarantine_succeeded(), 1);
+    Ok(())
+}
+
+#[cfg(feature = "async")]
+#[test]
+fn test_async_tombstone_scan_counts_reported_quarantine_outcome() -> Result<(), Box<dyn Error>> {
+    block_on(async {
+        let server = RedisServer::start_version("6.2-alpine")?;
+        let proxy = ControlledRedis::start(server.url())?;
+        let namespace = "tombstone-quarantine-async";
+        let mut options = provider_options(&server, namespace, 2);
+        options.insert("redis.url".into(), proxy.url());
+        let bus = AsyncRedisEventBusProvider
+            .create_configured(&EventBusConfig::default().with_provider_options(options))
+            .await
+            .map_err(|failure| failure.into_error())?;
+        let stream = stream_key(namespace, "events");
+        let mut observer = Client::open(server.url())?.get_connection()?;
+        let _ = bus.publish(event("events", "first", b"payload")?).await?;
+        let _ = bus.publish(event("events", "second", b"payload")?).await?;
+        let entries: StreamRangeReply = cmd("XRANGE").arg(&stream).arg("-").arg("+").query(&mut observer)?;
+        let deleted_id = entries.ids.first().ok_or("first entry missing")?.id.clone();
+        {
+            let mut first = bus.subscribe(request("events", "first-worker", "workers", SubscriptionDurability::Durable)?).await?;
+            for _ in 0..2 {
+                assert!(matches!(first.receive(Duration::from_secs(2)).await?, ReceiveOutcome::Message(_)));
+            }
+        }
+        assert_eq!(cmd("XDEL").arg(&stream).arg(&deleted_id).query::<usize>(&mut observer)?, 1);
+        let mut second = bus.subscribe(request("events", "second-worker", "workers", SubscriptionDurability::Durable)?).await?;
+        proxy.replace_next_reply("EVAL", b":1\r\n");
+        let _ = second.receive(Duration::from_secs(2)).await?;
+        assert_eq!(snapshot(namespace).quarantine_succeeded(), 1);
+        Ok::<(), Box<dyn Error>>(())
+    })
+}
+
 #[cfg(feature = "async")]
 #[test]
 fn test_async_duration_max_waits_for_a_message() -> Result<(), Box<dyn Error>> {

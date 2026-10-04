@@ -17,6 +17,7 @@ use super::Subscription;
 use super::lock_state;
 use super::receive_command::ReceiveCommand;
 use crate::client::PooledConnection;
+use crate::diagnostics::RedisDiagnosticCounter;
 use crate::error::RedisProviderError;
 use crate::error::from_redis_error as classified_spi_error;
 use crate::internal::PoisonOutcome;
@@ -142,7 +143,11 @@ pub(super) fn scan(
             })? {
                 PoisonOutcome::TombstoneCleared => deleted_count += 1,
                 PoisonOutcome::SourceGone | PoisonOutcome::OwnershipChanged => {}
-                PoisonOutcome::Quarantined => {}
+                PoisonOutcome::Quarantined => {
+                    if let Some(diagnostics) = subscription.client.diagnostics() {
+                        diagnostics.increment(RedisDiagnosticCounter::QuarantineSucceeded);
+                    }
+                }
             }
         }
         lock_state(&subscription.recovery, &subscription.topic, "receive", "recovery lock")?.set_tombstone_cursor(id);
