@@ -9,21 +9,21 @@
 
 use qubit_event_bus_redis::diagnostics::RedisProviderDiagnostics;
 
-#[cfg(all(feature = "sync", feature = "async"))]
+#[cfg(feature = "async")]
 use futures_lite::future::block_on;
-#[cfg(all(feature = "sync", feature = "async"))]
+#[cfg(any(feature = "sync", feature = "async"))]
 use qubit_event_bus::EventBusConfig;
-#[cfg(all(feature = "sync", feature = "async"))]
+#[cfg(any(feature = "sync", feature = "async"))]
 use qubit_event_bus::model::ProviderOptions;
-#[cfg(all(feature = "sync", feature = "async"))]
+#[cfg(feature = "async")]
 use qubit_event_bus_redis::r#async::AsyncRedisEventBusProvider;
-#[cfg(all(feature = "sync", feature = "async"))]
+#[cfg(feature = "async")]
 use qubit_event_bus_redis::diagnostics::RedisProviderMode;
-#[cfg(all(feature = "sync", feature = "async"))]
+#[cfg(feature = "sync")]
 use qubit_event_bus_redis::sync::RedisEventBusProvider;
-#[cfg(all(feature = "sync", feature = "async"))]
+#[cfg(feature = "async")]
 use qubit_spi::AsyncServiceProvider;
-#[cfg(all(feature = "sync", feature = "async"))]
+#[cfg(feature = "sync")]
 use qubit_spi::ServiceProvider;
 
 /// A sync and an async SPI each register their own correctly labeled instance.
@@ -65,7 +65,7 @@ fn test_snapshots_distinguish_sync_and_async_instances() {
 }
 
 /// Dropping an SPI removes its instance from the public process snapshot.
-#[cfg(all(feature = "sync", feature = "async"))]
+#[cfg(feature = "sync")]
 #[test]
 fn test_snapshots_remove_dropped_spi() {
     let options: ProviderOptions =
@@ -97,7 +97,7 @@ fn test_snapshots_remove_dropped_spi() {
 }
 
 /// Snapshot Debug output includes only public scope and counters, not endpoint secrets.
-#[cfg(all(feature = "sync", feature = "async"))]
+#[cfg(feature = "sync")]
 #[test]
 fn test_snapshot_debug_redacts_connection_details() {
     let url = "redis://diagnostics-secret.example:6389/";
@@ -124,6 +124,34 @@ fn test_snapshot_debug_redacts_connection_details() {
     assert!(!debug.contains(&std::env::var("PATH").expect("PATH is set")));
     assert!(!debug.contains("raw Redis error"));
     drop(bus);
+}
+
+/// An async-only build registers its SPI and removes the instance on drop.
+#[cfg(feature = "async")]
+#[test]
+fn test_async_snapshot_lifecycle() {
+    let options: ProviderOptions = [(
+        "redis.namespace".into(),
+        "diagnostics_async_lifecycle".into(),
+    )]
+    .into();
+    let config = EventBusConfig::default().with_provider_options(options);
+    let bus = block_on(AsyncRedisEventBusProvider.create_configured(&config))
+        .expect("create lazy async provider");
+    let snapshots = RedisProviderDiagnostics::snapshots();
+    let snapshot = snapshots
+        .iter()
+        .find(|snapshot| snapshot.namespace() == "diagnostics_async_lifecycle")
+        .expect("async provider is registered");
+    assert_eq!(snapshot.mode(), RedisProviderMode::Async);
+    let id = snapshot.instance_id();
+
+    drop(bus);
+    assert!(
+        RedisProviderDiagnostics::snapshots()
+            .iter()
+            .all(|snapshot| snapshot.instance_id() != id)
+    );
 }
 
 /// Without either provider feature there are no registered instances.

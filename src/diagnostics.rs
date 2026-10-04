@@ -41,124 +41,158 @@ pub enum RedisProviderMode {
 /// Redis error.
 #[derive(Clone, Debug)]
 pub struct RedisProviderSnapshot {
+    /// Process-unique ID assigned to this SPI instance.
     instance_id: u64,
+    /// Synchronous or asynchronous provider mode.
     mode: RedisProviderMode,
+    /// Configured scope used to derive Redis keys.
     namespace: String,
+    /// Currently occupied general command slots.
     general_in_flight: u64,
+    /// Currently occupied reserved settlement slots.
     settlement_in_flight: u64,
+    /// Currently retained receiver leases.
     active_receivers: u64,
+    /// General or settlement command admission rejections.
     command_rejections: u64,
+    /// Receiver admission rejections.
     receiver_rejections: u64,
+    /// Provider-level connection open attempts.
     connection_attempts: u64,
+    /// Provider-level connection open failures.
     connection_failures: u64,
+    /// Publishes confirmed accepted by Redis.
     publish_accepted: u64,
+    /// Publishes with an unknown outcome.
     publish_unknown: u64,
+    /// Receive calls with an unknown outcome.
     receive_unknown: u64,
+    /// Settlement calls with an unknown outcome.
     settlement_unknown: u64,
+    /// Recovery XAUTOCLAIM commands sent.
     recovery_claim_commands: u64,
+    /// Confirmed quarantine copies.
     quarantine_succeeded: u64,
+    /// Delivery gaps returned to callers.
     delivery_gaps: u64,
 }
 
 impl RedisProviderSnapshot {
     /// Returns the process-unique ID assigned at successful SPI creation.
     #[must_use]
+    #[inline]
     pub fn instance_id(&self) -> u64 {
         self.instance_id
     }
 
     /// Returns the provider mode.
     #[must_use]
+    #[inline]
     pub fn mode(&self) -> RedisProviderMode {
         self.mode
     }
 
     /// Returns the configured namespace, without Redis endpoint details.
     #[must_use]
+    #[inline]
     pub fn namespace(&self) -> &str {
         &self.namespace
     }
 
     /// Returns occupied general command slots, including general-lane settlements.
     #[must_use]
+    #[inline]
     pub fn general_in_flight(&self) -> u64 {
         self.general_in_flight
     }
 
     /// Returns occupied reserved settlement slots.
     #[must_use]
+    #[inline]
     pub fn settlement_in_flight(&self) -> u64 {
         self.settlement_in_flight
     }
 
     /// Returns active receiver leases.
     #[must_use]
+    #[inline]
     pub fn active_receivers(&self) -> u64 {
         self.active_receivers
     }
 
     /// Returns command admission rejections.
     #[must_use]
+    #[inline]
     pub fn command_rejections(&self) -> u64 {
         self.command_rejections
     }
 
     /// Returns receiver admission rejections.
     #[must_use]
+    #[inline]
     pub fn receiver_rejections(&self) -> u64 {
         self.receiver_rejections
     }
 
     /// Returns actual provider connection open attempts.
     #[must_use]
+    #[inline]
     pub fn connection_attempts(&self) -> u64 {
         self.connection_attempts
     }
 
     /// Returns failed provider connection open attempts.
     #[must_use]
+    #[inline]
     pub fn connection_failures(&self) -> u64 {
         self.connection_failures
     }
 
     /// Returns publishes confirmed accepted by Redis.
     #[must_use]
+    #[inline]
     pub fn publish_accepted(&self) -> u64 {
         self.publish_accepted
     }
 
     /// Returns publishes with an unknown Redis outcome.
     #[must_use]
+    #[inline]
     pub fn publish_unknown(&self) -> u64 {
         self.publish_unknown
     }
 
     /// Returns receive calls that reported an unknown outcome.
     #[must_use]
+    #[inline]
     pub fn receive_unknown(&self) -> u64 {
         self.receive_unknown
     }
 
     /// Returns settlement calls that reported an unknown outcome.
     #[must_use]
+    #[inline]
     pub fn settlement_unknown(&self) -> u64 {
         self.settlement_unknown
     }
 
     /// Returns XAUTOCLAIM commands sent during recovery.
     #[must_use]
+    #[inline]
     pub fn recovery_claim_commands(&self) -> u64 {
         self.recovery_claim_commands
     }
 
     /// Returns confirmed quarantine copies.
     #[must_use]
+    #[inline]
     pub fn quarantine_succeeded(&self) -> u64 {
         self.quarantine_succeeded
     }
 
     /// Returns gaps actually returned to the facade.
     #[must_use]
+    #[inline]
     pub fn delivery_gaps(&self) -> u64 {
         self.delivery_gaps
     }
@@ -224,20 +258,35 @@ pub(crate) enum RedisDiagnosticCounter {
 /// Atomics and the existing shared resource budget for one live SPI.
 #[cfg(any(feature = "sync", feature = "async"))]
 pub(crate) struct RedisDiagnosticsState {
+    /// Process-unique ID assigned before registration.
     instance_id: u64,
+    /// Mode attached by the creating provider.
     mode: RedisProviderMode,
+    /// Validated namespace, retained without endpoint settings.
     namespace: String,
+    /// Existing admission budget shared with the Client and active permits.
     budget: Arc<ResourceBudget>,
+    /// General or settlement command admission rejections.
     command_rejections: AtomicU64,
+    /// Receiver admission rejections.
     receiver_rejections: AtomicU64,
+    /// Provider-level connection open attempts.
     connection_attempts: AtomicU64,
+    /// Provider-level connection open failures.
     connection_failures: AtomicU64,
+    /// Publishes confirmed accepted by Redis.
     publish_accepted: AtomicU64,
+    /// Publishes with an unknown outcome.
     publish_unknown: AtomicU64,
+    /// Receive calls with an unknown outcome.
     receive_unknown: AtomicU64,
+    /// Settlement calls with an unknown outcome.
     settlement_unknown: AtomicU64,
+    /// Recovery XAUTOCLAIM commands sent.
     recovery_claim_commands: AtomicU64,
+    /// Confirmed quarantine copies.
     quarantine_succeeded: AtomicU64,
+    /// Delivery gaps returned to callers.
     delivery_gaps: AtomicU64,
 }
 
