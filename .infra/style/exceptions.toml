@@ -1,1 +1,6 @@
 format = 1
+
+[[exceptions]]
+rule = "public-type-layout"
+path = "src/diagnostics.rs"
+reason = "Keep the cohesive process-local diagnostics API types together in one module."

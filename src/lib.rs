@@ -20,11 +20,11 @@ mod bounded_wire_decoder;
 mod client;
 /// Redis Streams backend configuration.
 pub mod config;
-/// Process-local diagnostics for live Redis provider instances.
-pub mod diagnostics;
 /// Unique Redis consumer identity generation.
 #[cfg(any(feature = "sync", feature = "async"))]
 mod consumer_identity;
+/// Process-local diagnostics for live Redis provider instances.
+pub mod diagnostics;
 /// Shared provider discovery submissions.
 #[cfg(feature = "discovery")]
 mod discovery;

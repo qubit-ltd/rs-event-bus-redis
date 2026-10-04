@@ -170,11 +170,10 @@ impl Client {
     /// each failed admission increments the receiver rejection counter.
     #[inline]
     pub(crate) fn try_receiver(&self) -> Result<ReceiverPermit, RedisProviderError> {
-        self.budget.try_receiver().map_err(|error| {
+        self.budget.try_receiver().inspect_err(|_| {
             if let Some(diagnostics) = self.diagnostics() {
                 diagnostics.increment(RedisDiagnosticCounter::ReceiverRejections);
             }
-            error
         })
     }
     /// Returns the configured short-command response waiting budget.
@@ -228,11 +227,10 @@ impl Client {
     /// rejection counter once.
     #[cfg(feature = "sync")]
     pub(crate) fn get_connection(&self, class: CommandClass) -> Result<PooledConnection, RedisProviderError> {
-        let permit = self.budget.try_command(class).map_err(|error| {
+        let permit = self.budget.try_command(class).inspect_err(|_| {
             if let Some(diagnostics) = self.diagnostics() {
                 diagnostics.increment(RedisDiagnosticCounter::CommandRejections);
             }
-            error
         })?;
         if self.standalone.is_some() {
             let idle = self
@@ -292,11 +290,10 @@ impl Client {
         &self,
         class: CommandClass,
     ) -> Result<AsyncCommandConnection, RedisProviderError> {
-        let permit = self.budget.try_command(class).map_err(|error| {
+        let permit = self.budget.try_command(class).inspect_err(|_| {
             if let Some(diagnostics) = self.diagnostics() {
                 diagnostics.increment(RedisDiagnosticCounter::CommandRejections);
             }
-            error
         })?;
         let (generation, connection) = if self.standalone.is_some() {
             self.async_cache.get_or_connect(self.open_async()).await?

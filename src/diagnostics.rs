@@ -99,7 +99,8 @@ impl RedisProviderSnapshot {
         &self.namespace
     }
 
-    /// Returns occupied general command slots, including general-lane settlements.
+    /// Returns occupied general command slots, including general-lane
+    /// settlements.
     #[must_use]
     #[inline]
     pub fn general_in_flight(&self) -> u64 {
@@ -212,9 +213,7 @@ impl RedisProviderDiagnostics {
         #[cfg(any(feature = "sync", feature = "async"))]
         {
             let live = {
-                let mut directory = directory()
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let mut directory = directory().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 let mut live = Vec::with_capacity(directory.len());
                 directory.retain(|weak| {
                     if let Some(state) = weak.upgrade() {
@@ -339,7 +338,8 @@ impl RedisDiagnosticsState {
         Ok(state)
     }
 
-    /// Saturatingly increments one monotonic counter without taking the directory lock.
+    /// Saturatingly increments one monotonic counter without taking the
+    /// directory lock.
     #[allow(dead_code)] // T2 and T3 attach the counter update sites.
     pub(crate) fn increment(&self, field: RedisDiagnosticCounter) {
         let counter = match field {
@@ -355,9 +355,7 @@ impl RedisDiagnosticsState {
             RedisDiagnosticCounter::QuarantineSucceeded => &self.quarantine_succeeded,
             RedisDiagnosticCounter::DeliveryGaps => &self.delivery_gaps,
         };
-        let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
-            Some(n.saturating_add(1))
-        });
+        let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| Some(n.saturating_add(1)));
     }
 
     /// Reads independent atomic values into a secret-safe public snapshot.

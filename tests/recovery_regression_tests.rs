@@ -50,7 +50,8 @@ use qubit_event_bus::spi::TopicAddress;
 use qubit_event_bus::spi::TransportPayload;
 #[cfg(feature = "async")]
 use qubit_event_bus_redis::r#async::AsyncRedisEventBusProvider;
-use qubit_event_bus_redis::diagnostics::{RedisProviderDiagnostics, RedisProviderSnapshot};
+use qubit_event_bus_redis::diagnostics::RedisProviderDiagnostics;
+use qubit_event_bus_redis::diagnostics::RedisProviderSnapshot;
 use qubit_event_bus_redis::naming::group_name;
 use qubit_event_bus_redis::naming::poison_key;
 use qubit_event_bus_redis::naming::stream_key;
@@ -120,7 +121,10 @@ fn test_async_polled_receive_cancellation_forces_recovery() -> Result<(), Box<dy
         ));
         let mut observer = Client::open(server.url())?.get_connection()?;
         let completed_claims = command_calls(&mut observer, "xautoclaim")?;
-        assert_eq!(snapshot("cancelled-recovery-clock").recovery_claim_commands(), completed_claims);
+        assert_eq!(
+            snapshot("cancelled-recovery-clock").recovery_claim_commands(),
+            completed_claims
+        );
         drop(receiver.receive(Duration::from_secs(1)));
         let _ = bus.publish(event("events", "unpolled", b"payload")?).await?;
         let ReceiveOutcome::Message(first) = receiver.receive(Duration::ZERO).await? else {
@@ -1462,13 +1466,32 @@ fn test_sync_tombstone_scan_counts_reported_quarantine_outcome() -> Result<(), B
     let entries: StreamRangeReply = cmd("XRANGE").arg(&stream).arg("-").arg("+").query(&mut observer)?;
     let deleted_id = entries.ids.first().ok_or("first entry missing")?.id.clone();
     {
-        let mut first = bus.subscribe(request("events", "first-worker", "workers", SubscriptionDurability::Durable)?)?;
+        let mut first = bus.subscribe(request(
+            "events",
+            "first-worker",
+            "workers",
+            SubscriptionDurability::Durable,
+        )?)?;
         for _ in 0..2 {
-            assert!(matches!(first.receive(Duration::from_secs(2))?, ReceiveOutcome::Message(_)));
+            assert!(matches!(
+                first.receive(Duration::from_secs(2))?,
+                ReceiveOutcome::Message(_)
+            ));
         }
     }
-    assert_eq!(cmd("XDEL").arg(&stream).arg(&deleted_id).query::<usize>(&mut observer)?, 1);
-    let mut second = bus.subscribe(request("events", "second-worker", "workers", SubscriptionDurability::Durable)?)?;
+    assert_eq!(
+        cmd("XDEL")
+            .arg(&stream)
+            .arg(&deleted_id)
+            .query::<usize>(&mut observer)?,
+        1
+    );
+    let mut second = bus.subscribe(request(
+        "events",
+        "second-worker",
+        "workers",
+        SubscriptionDurability::Durable,
+    )?)?;
     // Simulate the quarantine status-1 reply to verify this protocol branch.
     proxy.replace_next_reply("EVAL", b":1\r\n");
     let _ = second.receive(Duration::from_secs(2))?;
@@ -1496,13 +1519,36 @@ fn test_async_tombstone_scan_counts_reported_quarantine_outcome() -> Result<(), 
         let entries: StreamRangeReply = cmd("XRANGE").arg(&stream).arg("-").arg("+").query(&mut observer)?;
         let deleted_id = entries.ids.first().ok_or("first entry missing")?.id.clone();
         {
-            let mut first = bus.subscribe(request("events", "first-worker", "workers", SubscriptionDurability::Durable)?).await?;
+            let mut first = bus
+                .subscribe(request(
+                    "events",
+                    "first-worker",
+                    "workers",
+                    SubscriptionDurability::Durable,
+                )?)
+                .await?;
             for _ in 0..2 {
-                assert!(matches!(first.receive(Duration::from_secs(2)).await?, ReceiveOutcome::Message(_)));
+                assert!(matches!(
+                    first.receive(Duration::from_secs(2)).await?,
+                    ReceiveOutcome::Message(_)
+                ));
             }
         }
-        assert_eq!(cmd("XDEL").arg(&stream).arg(&deleted_id).query::<usize>(&mut observer)?, 1);
-        let mut second = bus.subscribe(request("events", "second-worker", "workers", SubscriptionDurability::Durable)?).await?;
+        assert_eq!(
+            cmd("XDEL")
+                .arg(&stream)
+                .arg(&deleted_id)
+                .query::<usize>(&mut observer)?,
+            1
+        );
+        let mut second = bus
+            .subscribe(request(
+                "events",
+                "second-worker",
+                "workers",
+                SubscriptionDurability::Durable,
+            )?)
+            .await?;
         proxy.replace_next_reply("EVAL", b":1\r\n");
         let _ = second.receive(Duration::from_secs(2)).await?;
         assert_eq!(snapshot(namespace).quarantine_succeeded(), 1);
@@ -1670,7 +1716,12 @@ fn test_sync_receive_and_settle_unknown_count_once() -> Result<(), Box<dyn Error
         .create_configured(&EventBusConfig::default().with_provider_options(options))
         .map_err(|failure| failure.into_error())?;
     let _ = bus.publish(event("events", "unknown-sync", b"payload")?)?;
-    let mut receiver = bus.subscribe(request("events", "unknown-worker", "unknown-group", SubscriptionDurability::Durable)?)?;
+    let mut receiver = bus.subscribe(request(
+        "events",
+        "unknown-worker",
+        "unknown-group",
+        SubscriptionDurability::Durable,
+    )?)?;
     proxy.replace_next_reply("XREADGROUP", b"+OK\r\n");
     let error = match receiver.receive(Duration::from_secs(2)) {
         Err(error) => error,
@@ -1685,7 +1736,9 @@ fn test_sync_receive_and_settle_unknown_count_once() -> Result<(), Box<dyn Error
     };
     let token = message.settlement().ok_or("settlement token missing")?;
     proxy.replace_next_reply("XACK", b"+OK\r\n");
-    let error = receiver.settle(token, DeliveryDisposition::Accept).expect_err("malformed ACK reply");
+    let error = receiver
+        .settle(token, DeliveryDisposition::Accept)
+        .expect_err("malformed ACK reply");
     assert_eq!(error.kind(), "outcome_unknown");
     assert_eq!(snapshot(namespace).receive_unknown(), 1);
     assert_eq!(snapshot(namespace).settlement_unknown(), 1);
@@ -1710,7 +1763,14 @@ fn test_async_receive_and_settle_unknown_count_once() -> Result<(), Box<dyn Erro
             .await
             .map_err(|failure| failure.into_error())?;
         let _ = bus.publish(event("events", "unknown-async", b"payload")?).await?;
-        let mut receiver = bus.subscribe(request("events", "unknown-worker", "unknown-group", SubscriptionDurability::Durable)?).await?;
+        let mut receiver = bus
+            .subscribe(request(
+                "events",
+                "unknown-worker",
+                "unknown-group",
+                SubscriptionDurability::Durable,
+            )?)
+            .await?;
         proxy.replace_next_reply("XREADGROUP", b"+OK\r\n");
         let error = match receiver.receive(Duration::from_secs(2)).await {
             Err(error) => error,
@@ -1725,7 +1785,10 @@ fn test_async_receive_and_settle_unknown_count_once() -> Result<(), Box<dyn Erro
         };
         let token = message.settlement().ok_or("settlement token missing")?;
         proxy.replace_next_reply("XACK", b"+OK\r\n");
-        let error = receiver.settle(token, DeliveryDisposition::Accept).await.expect_err("malformed ACK reply");
+        let error = receiver
+            .settle(token, DeliveryDisposition::Accept)
+            .await
+            .expect_err("malformed ACK reply");
         assert_eq!(error.kind(), "outcome_unknown");
         assert_eq!(snapshot(namespace).receive_unknown(), 1);
         assert_eq!(snapshot(namespace).settlement_unknown(), 1);

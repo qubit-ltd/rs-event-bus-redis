@@ -30,7 +30,8 @@ use qubit_event_bus::spi::EventBusSpi;
 use qubit_event_bus::spi::OutboundMessage;
 use qubit_event_bus::spi::TopicAddress;
 use qubit_event_bus::spi::TransportPayload;
-use qubit_event_bus_redis::diagnostics::{RedisProviderDiagnostics, RedisProviderSnapshot};
+use qubit_event_bus_redis::diagnostics::RedisProviderDiagnostics;
+use qubit_event_bus_redis::diagnostics::RedisProviderSnapshot;
 use qubit_event_bus_redis::sync::RedisEventBusProvider;
 use qubit_event_bus_redis::wire::WireFields;
 use qubit_id::Id;
@@ -124,7 +125,8 @@ fn test_async_publish_counters_follow_returned_outcome() {
 #[cfg(feature = "async")]
 #[test]
 fn test_async_cancelled_publish_has_no_returned_outcome_count() -> Result<(), Box<dyn std::error::Error>> {
-    use futures_lite::future::{block_on, race};
+    use futures_lite::future::block_on;
+    use futures_lite::future::race;
     use qubit_event_bus_redis::r#async::AsyncRedisEventBusProvider;
     use qubit_spi::AsyncServiceProvider;
     use support::controlled_redis::proxy::ControlledRedis;
@@ -144,13 +146,10 @@ fn test_async_cancelled_publish_has_no_returned_outcome_count() -> Result<(), Bo
             .await
             .map_err(|failure| failure.into_error())?;
         let gate = proxy.pause_after_reply("XADD");
-        let result = race(
-            async { Some(bus.publish(message()).await) },
-            async {
-                gate.wait_applied().await;
-                None
-            },
-        )
+        let result = race(async { Some(bus.publish(message()).await) }, async {
+            gate.wait_applied().await;
+            None
+        })
         .await;
         assert!(result.is_none(), "XADD future was cancelled before its reply");
         let mut observer = redis::Client::open(server.url())?.get_connection()?;
@@ -163,8 +162,16 @@ fn test_async_cancelled_publish_has_no_returned_outcome_count() -> Result<(), Bo
         assert_eq!(counters.publish_unknown(), 0);
         let _ = bus.publish(message()).await?;
         let counters = snapshot(namespace);
-        assert_eq!(counters.publish_accepted(), 1, "later confirmed XADD counts after cancellation");
-        assert_eq!(counters.publish_unknown(), 0, "cancelled XADD has no returned unknown result");
+        assert_eq!(
+            counters.publish_accepted(),
+            1,
+            "later confirmed XADD counts after cancellation"
+        );
+        assert_eq!(
+            counters.publish_unknown(),
+            0,
+            "cancelled XADD has no returned unknown result"
+        );
         let restored: usize = redis::cmd("XLEN").arg(&stream).query(&mut observer)?;
         assert_eq!(restored, 2, "both applied XADDs remain visible after recovery");
         Ok::<(), Box<dyn std::error::Error>>(())
