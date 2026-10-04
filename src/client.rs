@@ -17,6 +17,7 @@ use redis::RedisError;
 use redis::aio::MultiplexedConnection;
 
 use crate::config::RedisEventBusConfig;
+use crate::diagnostics::RedisDiagnosticCounter;
 use crate::diagnostics::RedisDiagnosticsState;
 use crate::diagnostics::RedisProviderMode;
 use crate::error::RedisProviderError;
@@ -57,7 +58,8 @@ pub(crate) struct Client {
     sentinel: Option<SentinelResolver>,
     /// Admission counters shared by short operations and receiver leases.
     budget: Arc<ResourceBudget>,
-    /// Instance diagnostics, attached by a provider before it shares the client.
+    /// Instance diagnostics, attached by a provider before it shares the
+    /// client.
     diagnostics: Option<Arc<RedisDiagnosticsState>>,
     /// Finite per-endpoint setup and per-command response waiting budgets.
     policy: TransportPolicy,
@@ -134,10 +136,10 @@ impl Client {
         Ok(())
     }
 
-    /// Borrows the attached instance counters, if a provider created this client.
+    /// Borrows the attached instance counters, if a provider created this
+    /// client.
     ///
     /// Internal clients built directly by tests may have no diagnostics.
-    #[allow(dead_code)] // T2 and T3 attach the counter update sites.
     pub(crate) fn diagnostics(&self) -> Option<&RedisDiagnosticsState> {
         self.diagnostics.as_deref()
     }
@@ -164,10 +166,16 @@ impl Client {
     ///
     /// # Errors
     ///
-    /// Returns `ResourceLimit` immediately when the receiver cap is reached.
+    /// Returns `ResourceLimit` immediately when the receiver cap is reached;
+    /// each failed admission increments the receiver rejection counter.
     #[inline]
     pub(crate) fn try_receiver(&self) -> Result<ReceiverPermit, RedisProviderError> {
-        self.budget.try_receiver()
+        self.budget.try_receiver().map_err(|error| {
+            if let Some(diagnostics) = self.diagnostics() {
+                diagnostics.increment(RedisDiagnosticCounter::ReceiverRejections);
+            }
+            error
+        })
     }
     /// Returns the configured short-command response waiting budget.
     ///
@@ -216,10 +224,16 @@ impl Client {
     /// # Errors
     ///
     /// Returns resource exhaustion, pool poisoning, or a sanitized
-    /// endpoint/setup failure.
+    /// endpoint/setup failure. Failed command admission increments its
+    /// rejection counter once.
     #[cfg(feature = "sync")]
     pub(crate) fn get_connection(&self, class: CommandClass) -> Result<PooledConnection, RedisProviderError> {
-        let permit = self.budget.try_command(class)?;
+        let permit = self.budget.try_command(class).map_err(|error| {
+            if let Some(diagnostics) = self.diagnostics() {
+                diagnostics.increment(RedisDiagnosticCounter::CommandRejections);
+            }
+            error
+        })?;
         if self.standalone.is_some() {
             let idle = self
                 .sync_pool
@@ -271,13 +285,19 @@ impl Client {
     /// # Errors
     ///
     /// Returns resource exhaustion, generation overflow, or sanitized setup
-    /// failures.
+    /// failures. Failed command admission increments its rejection counter
+    /// once.
     #[cfg(feature = "async")]
     pub(crate) async fn get_async_connection(
         &self,
         class: CommandClass,
     ) -> Result<AsyncCommandConnection, RedisProviderError> {
-        let permit = self.budget.try_command(class)?;
+        let permit = self.budget.try_command(class).map_err(|error| {
+            if let Some(diagnostics) = self.diagnostics() {
+                diagnostics.increment(RedisDiagnosticCounter::CommandRejections);
+            }
+            error
+        })?;
         let (generation, connection) = if self.standalone.is_some() {
             self.async_cache.get_or_connect(self.open_async()).await?
         } else {
@@ -323,18 +343,36 @@ impl Client {
     /// # Returns
     ///
     /// A newly connected socket with finite short-command read/write waits.
+    /// One invocation counts as one provider connection attempt even when
+    /// Sentinel probes multiple nodes.
     ///
     /// # Errors
     ///
     /// Returns a sanitized discovery/setup failure or missing-factory invariant
-    /// error.
+    /// error. Failed factory calls count as connection failures; the missing
+    /// factory invariant does not count as an attempt.
     #[cfg(feature = "sync")]
     fn open_sync(&self) -> Result<Connection, RedisProviderError> {
         let result = match (&self.standalone, &self.sentinel) {
-            (Some(client), _) => open_sync_connection(client, self.policy),
-            (_, Some(resolver)) => resolver.connect_sync(),
+            (Some(client), _) => {
+                if let Some(diagnostics) = self.diagnostics() {
+                    diagnostics.increment(RedisDiagnosticCounter::ConnectionAttempts);
+                }
+                open_sync_connection(client, self.policy)
+            }
+            (_, Some(resolver)) => {
+                if let Some(diagnostics) = self.diagnostics() {
+                    diagnostics.increment(RedisDiagnosticCounter::ConnectionAttempts);
+                }
+                resolver.connect_sync()
+            }
             _ => return Err(RedisProviderError::Operation("missing Redis client")),
         };
+        if result.is_err()
+            && let Some(diagnostics) = self.diagnostics()
+        {
+            diagnostics.increment(RedisDiagnosticCounter::ConnectionFailures);
+        }
         result.map_err(|error| from_redis_error("connect", &error))
     }
     /// Opens bounded async standalone or Sentinel transport on the host
@@ -343,18 +381,36 @@ impl Client {
     /// # Returns
     ///
     /// A newly initialized connection with the short-command response budget.
+    /// One invocation counts as one provider connection attempt even when
+    /// Sentinel probes multiple nodes.
     ///
     /// # Errors
     ///
     /// Returns sanitized discovery/setup failures or a missing-factory
-    /// invariant error.
+    /// invariant error. Failed factory calls count as connection failures; the
+    /// missing factory invariant does not count as an attempt.
     #[cfg(feature = "async")]
     async fn open_async(&self) -> Result<MultiplexedConnection, RedisProviderError> {
         let result = match (&self.standalone, &self.sentinel) {
-            (Some(client), _) => open_async_connection(client, self.policy).await,
-            (_, Some(resolver)) => resolver.connect_async().await,
+            (Some(client), _) => {
+                if let Some(diagnostics) = self.diagnostics() {
+                    diagnostics.increment(RedisDiagnosticCounter::ConnectionAttempts);
+                }
+                open_async_connection(client, self.policy).await
+            }
+            (_, Some(resolver)) => {
+                if let Some(diagnostics) = self.diagnostics() {
+                    diagnostics.increment(RedisDiagnosticCounter::ConnectionAttempts);
+                }
+                resolver.connect_async().await
+            }
             _ => return Err(RedisProviderError::Operation("missing Redis client")),
         };
+        if result.is_err()
+            && let Some(diagnostics) = self.diagnostics()
+        {
+            diagnostics.increment(RedisDiagnosticCounter::ConnectionFailures);
+        }
         result.map_err(|error| from_redis_error("connect", &error))
     }
 }
