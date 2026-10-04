@@ -42,6 +42,7 @@ use qubit_event_bus::model::SubscriptionDurability;
 use qubit_event_bus::model::Topic;
 use qubit_event_bus::spi::ShutdownMode;
 use qubit_event_bus_redis as _;
+use qubit_model_id::HasModelId;
 use qubit_model_id::ModelId;
 use qubit_model_id::ModelIdBuf;
 use qubit_spi::ProviderSelection;
@@ -66,26 +67,33 @@ use crate::task_event_json_codec::TaskEventJsonCodec;
 #[derive(Default)]
 struct U32Codec;
 
-impl qubit_codec::ValueEncoder<u32> for U32Codec {
+struct TaskNotificationPayload(u32);
+
+impl HasModelId for TaskNotificationPayload {
+    const MODEL_ID: ModelId = ModelId::new("example.TaskNotificationPayload");
+}
+
+impl qubit_codec::ValueEncoder<TaskNotificationPayload> for U32Codec {
     type Output = Vec<u8>;
     type Error = std::convert::Infallible;
 
-    fn encode(&mut self, value: &u32) -> Result<Vec<u8>, Self::Error> {
-        Ok(value.to_le_bytes().to_vec())
+    fn encode(&mut self, value: &TaskNotificationPayload) -> Result<Vec<u8>, Self::Error> {
+        Ok(value.0.to_le_bytes().to_vec())
     }
 }
 
 impl qubit_codec::ValueDecoder<[u8]> for U32Codec {
-    type Output = u32;
+    type Output = TaskNotificationPayload;
     type Error = std::array::TryFromSliceError;
 
-    fn decode(&mut self, bytes: &[u8]) -> Result<u32, Self::Error> {
+    fn decode(&mut self, bytes: &[u8]) -> Result<TaskNotificationPayload, Self::Error> {
         let bytes: [u8; 4] = bytes.try_into()?;
-        Ok(u32::from_le_bytes(bytes))
+        Ok(TaskNotificationPayload(u32::from_le_bytes(bytes)))
     }
 }
 
-static TASK_CODEC_DESCRIPTOR: ValueBytesCodecDescriptor = ValueBytesCodecDescriptor::of::<U32Codec, u32>();
+static TASK_CODEC_DESCRIPTOR: ValueBytesCodecDescriptor =
+    ValueBytesCodecDescriptor::of::<U32Codec, TaskNotificationPayload>();
 static TASK_CODEC: ValueBytesCodecRegistration = ValueCodecRegistration::new(
     ValueCodecId::new("example.task_notifications.u32"),
     &TASK_CODEC_DESCRIPTOR,
@@ -102,10 +110,10 @@ impl qubit_id::IdGenerator for TaskIds {
 
 struct TypedHandler;
 
-impl TaskHandler<u32> for TypedHandler {
-    fn run<'a>(&'a self, value: u32, _context: TaskContext) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
+impl TaskHandler<TaskNotificationPayload> for TypedHandler {
+    fn run<'a>(&'a self, value: TaskNotificationPayload, _context: TaskContext) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
         Box::pin(async move {
-            assert_eq!(value, 7);
+            assert_eq!(value.0, 7);
             Ok(TaskRunOutcome::Succeeded(TaskOutput::default()))
         })
     }
@@ -127,7 +135,7 @@ async fn create_task_service(
     })
     .event_bus(bus)
     .notification_shutdown_timeout(Duration::from_secs(3));
-    builder.handlers_mut().register::<u32, _>(
+    builder.handlers_mut().register::<TaskNotificationPayload, _>(
         TaskHandlerDescriptor {
             kind_id: "example.task_notifications".into(),
             payload_type_id: ModelIdBuf::try_from("example.TaskNotificationPayload")?,
@@ -215,10 +223,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let task_service = create_task_service(Arc::clone(&store), Arc::clone(&async_bus)).await?;
     let request = TaskRequest::new(
         "example.task_notifications",
-        ModelId::new("example.TaskNotificationPayload"),
         1,
         ValueCodecId::new("example.task_notifications.u32"),
-        7_u32,
+        TaskNotificationPayload(7),
     );
     let accepted = task_service.submit(request).await?;
     let summary = tokio::time::timeout(Duration::from_secs(5), async {
