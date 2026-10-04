@@ -43,6 +43,21 @@ pub(crate) struct ResourceBudget {
     max_receivers: usize,
 }
 impl ResourceBudget {
+    /// Reads occupied general-lane slots, including general-lane settlements.
+    pub(crate) fn general_in_flight(&self) -> u64 {
+        u64::try_from(self.commands.load(Ordering::Relaxed)).unwrap_or(u64::MAX)
+    }
+
+    /// Reads occupied reserved settlement slots.
+    pub(crate) fn settlement_in_flight(&self) -> u64 {
+        u64::try_from(self.reserved_settlements.load(Ordering::Relaxed)).unwrap_or(u64::MAX)
+    }
+
+    /// Reads active receiver leases.
+    pub(crate) fn active_receivers(&self) -> u64 {
+        u64::try_from(self.receivers.load(Ordering::Relaxed)).unwrap_or(u64::MAX)
+    }
+
     /// Creates empty admission counters with validated finite caps.
     ///
     /// # Parameters

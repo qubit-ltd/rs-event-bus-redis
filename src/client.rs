@@ -17,6 +17,8 @@ use redis::RedisError;
 use redis::aio::MultiplexedConnection;
 
 use crate::config::RedisEventBusConfig;
+use crate::diagnostics::RedisDiagnosticsState;
+use crate::diagnostics::RedisProviderMode;
 use crate::error::RedisProviderError;
 use crate::internal::TransportPolicy;
 use crate::redis_provider_error::from_redis_error;
@@ -33,7 +35,7 @@ use self::internal::CommandPermit;
 #[cfg(feature = "sync")]
 pub(crate) use self::internal::PooledConnection;
 pub(crate) use self::internal::ReceiverPermit;
-use self::internal::ResourceBudget;
+pub(crate) use self::internal::ResourceBudget;
 use self::internal::SentinelResolver;
 #[cfg(feature = "sync")]
 use self::internal::SyncConnectionPool;
@@ -55,6 +57,8 @@ pub(crate) struct Client {
     sentinel: Option<SentinelResolver>,
     /// Admission counters shared by short operations and receiver leases.
     budget: Arc<ResourceBudget>,
+    /// Instance diagnostics, attached by a provider before it shares the client.
+    diagnostics: Option<Arc<RedisDiagnosticsState>>,
     /// Finite per-endpoint setup and per-command response waiting budgets.
     policy: TransportPolicy,
     /// Standalone idle short-command connections; receiver sockets are
@@ -102,12 +106,40 @@ impl Client {
                 config.reserved_settlement_commands(),
                 config.max_active_receivers(),
             )),
+            diagnostics: None,
             policy: TransportPolicy::from_config(config),
             #[cfg(feature = "sync")]
             sync_pool: Arc::new(SyncConnectionPool::new(config.max_idle_connections())),
             #[cfg(feature = "async")]
             async_cache: AsyncConnectionCache::new(),
         })
+    }
+    /// Registers diagnostics exactly once before a provider shares this client.
+    ///
+    /// Returns an error if diagnostics were already attached or the process ID
+    /// space is exhausted; it performs no Redis network I/O.
+    pub(crate) fn attach_diagnostics(
+        &mut self,
+        mode: RedisProviderMode,
+        namespace: &str,
+    ) -> Result<(), RedisProviderError> {
+        if self.diagnostics.is_some() {
+            return Err(RedisProviderError::Operation("Redis diagnostics already attached"));
+        }
+        self.diagnostics = Some(RedisDiagnosticsState::register(
+            mode,
+            namespace,
+            Arc::clone(&self.budget),
+        )?);
+        Ok(())
+    }
+
+    /// Borrows the attached instance counters, if a provider created this client.
+    ///
+    /// Internal clients built directly by tests may have no diagnostics.
+    #[allow(dead_code)] // T2 and T3 attach the counter update sites.
+    pub(crate) fn diagnostics(&self) -> Option<&RedisDiagnosticsState> {
+        self.diagnostics.as_deref()
     }
     /// Reserves a short-command slot before I/O.
     ///

@@ -25,6 +25,7 @@ use qubit_spi::provider_descriptor;
 use super::async_redis_event_bus::AsyncRedisEventBus;
 use crate::client::Client;
 use crate::config::RedisEventBusConfig;
+use crate::diagnostics::RedisProviderMode;
 use crate::error::RedisProviderError;
 
 /// Factory registered for runtime-neutral asynchronous Redis Streams access.
@@ -95,11 +96,14 @@ impl AsyncServiceProvider<EventBusSpec> for AsyncRedisEventBusProvider {
         Box::pin(async move {
             let settings = RedisEventBusConfig::from_event_bus_config(config)
                 .map_err(|error| ProviderFailure::invalid_configuration(EventBusProviderError::provider(error)))?;
-            let client = Client::new(&settings).map_err(|_| {
+            let mut client = Client::new(&settings).map_err(|_| {
                 ProviderFailure::invalid_configuration(EventBusProviderError::provider(
                     RedisProviderError::Configuration("invalid Redis connection configuration"),
                 ))
             })?;
+            client
+                .attach_diagnostics(RedisProviderMode::Async, settings.namespace())
+                .map_err(|error| ProviderFailure::invalid_configuration(EventBusProviderError::provider(error)))?;
             Ok(Arc::new(AsyncRedisEventBus {
                 client: Arc::new(client),
                 settings,
