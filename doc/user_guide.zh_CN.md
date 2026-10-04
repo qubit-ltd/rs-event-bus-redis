@@ -147,7 +147,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 此入门练习先安装账单 handler，再发布 `order-42`，等待 handler 发出通知，打印 `consumed order event: order-42`，最后取消订阅并关闭总线。生产 handler 应完成并提交应用自己的账单变更后才返回 `Ok(())`；打印和 channel 通知只是练习的验收信号。总线和订阅应由服务的启动、关闭模块持有。新建的 `Earliest` 消费组也能读取已保留的记录。生产服务若使用 `New`，应先注册 consumer，再依赖后续发布的事件。Redis Streams 只接受 `Durable` 订阅；`Ephemeral` 会在执行 Redis I/O 前被拒绝。服务断连或关闭订阅时，group 会保留，未结算记录仍在 pending entries list 中。Redis 只在首次创建 group 时应用起始位置。
 
-限额内格式错误的版本 1 wire 记录会被原子复制到按 group 隔离的 stream（`qubit:poison:*`），并从源 group 确认。隔离记录包含 `source_stream`、`source_id`、`group`、稳定的 `reason`、原始 `wire` 字节和 `wire_missing`。隔离成功后返回 `Gap`，不会把 payload 放进错误信息。可用 `XRANGE <quarantine-key> - +` 检查记录，并用 `XLEN`、`XPENDING` 监控隔离流、源 stream 和 pending 数量。provider 不会自动裁剪这些 stream；运维应按保留策略归档或清理隔离数据。
+限额内格式错误的版本 1 wire 记录会被原子复制到按 group 隔离的 stream（`qubit:poison:*`），并从源 group 确认。隔离记录包含 `source_stream`、`source_id`、`group`、稳定的 `reason`、原始 `wire` 字节和 `wire_missing`。隔离成功后返回 `Gap`，不会把 payload 放进错误信息。可用 `XRANGE <quarantine-key> - + COUNT 100` 读取一页记录，并用 `XLEN`、`XPENDING` 监控隔离流、源 stream 和 pending 数量；完整检查须继续翻页。provider 不会自动裁剪这些 stream；运维应按保留策略归档或清理隔离数据。
 
 投递语义仍是至少一次。如果 handler 运行时间超过 `redis.claim_min_idle_ms`，其他 consumer 可能接管该 pending 记录。若 `XADD` 回复丢失，发布结果未知，facade 默认安全门阻止自动重发；人工或明确允许的重试仍可能重复。`redis.max_unsettled_per_subscription` 限制本地活跃投递数，默认值为 100。
 
@@ -442,9 +442,9 @@ SPI 的结算状态只约束当前 receiver/token：
 
 ### 采集 provider 与 Redis 的证据
 
-前面的同步示例在创建总线后调用 `RedisProviderDiagnostics::snapshots()`；异步 SPI 也使用同一入口。采集时保持总线存活，按预期的 `namespace` 和 `mode` 筛选，再用进程身份加 `instance_id` 标记各条时序数据。ID 在单个进程内递增且不会复用；实例及剩余持有者释放后，它就不再出现在目录中。重启后是新的进程内 ID 序列，它既不是 Redis stream ID，也不能充当持久标识。未启用 sync/async feature 时返回空列表。各字段分别读取原子值，不能把多个值当成同一瞬间的事务快照；快照不包含端点、凭据、payload 或原始 Redis 错误。
+前面的同步示例在创建总线后调用 `RedisProviderDiagnostics::snapshots()`；异步 SPI 也使用同一入口。采集时保持总线存活，按预期的 `namespace` 和 `mode` 筛选，再用进程身份加 `instance_id` 标记各条时序数据。ID 在单个进程内递增且不会复用；实例及剩余持有者释放后，它就不再出现在目录中。同一进程重建 SPI 会分配新 ID，计数从零开始；只有进程重启才会重置 ID 序列。ID 不是 Redis stream ID，也不能充当持久标识。未启用 sync/async feature 时返回空列表。`snapshots()` 构造快照时逐字段读取原子值，getter 返回已采样的值，不会重新读取原子状态。因此，多个字段并非同一瞬间的事务快照；快照不包含端点、凭据、payload 或原始 Redis 错误。
 
-`general_in_flight` 是已占用的普通短命令名额，包含从普通通道准入的结算；`settlement_in_flight` 只计算已占用的结算预留名额。两者相加可估算当前短命令占用，`active_receivers` 则表示专用 receiver 租约。这三个是实时 gauge。其余 getter 是该 SPI 生命周期内单调递增、达到上限后饱和的进程内计数：
+`general_in_flight` 是已占用的普通短命令名额，包含从普通通道准入的结算；`settlement_in_flight` 只计算已占用的结算预留名额。两者相加可估算采样时的短命令占用，`active_receivers` 则表示专用 receiver 租约。这三个是在构造快照时采样的 gauge。其余 getter 返回该 SPI 生命周期内单调递增、达到上限后饱和的进程内计数的采样值：
 
 | Getter | 计数时机 |
 | --- | --- |
@@ -464,13 +464,13 @@ XPENDING <stream-key> <group> - + 100
 XINFO GROUPS <stream-key>
 XINFO CONSUMERS <stream-key> <group>
 XLEN <quarantine-key>
-XRANGE <quarantine-key> - +
+XRANGE <quarantine-key> - + COUNT 100
 INFO MEMORY
 ```
 
-通过有权限的运维连接执行这些命令。`XPENDING` 汇总提供各组 pending 数量；详细查询应翻页，找出 idle 最久的记录及其 owner。`XINFO GROUPS` 给出已有组最后投递位置，`XINFO CONSUMERS` 用于查看 consumer 活动情况。Redis 6.2 不能依赖 Redis 7 的 `lag` 字段，应结合游标和应用处理进度判断未读工作。`INFO MEMORY` 是整个 Redis 实例的指标，不属于某个 provider；应与该 Redis 部署的内存预算比较。命令活动可补充查看 `INFO commandstats`。隔离流单独增长，需要独立采集 `XLEN`，并抽样查看 `XRANGE`。
+通过有权限的运维连接执行这些命令。`XPENDING` 汇总提供各组 pending 数量；详细查询应翻页，找出 idle 最久的记录及其 owner。`XINFO GROUPS` 给出已有组最后投递位置，`XINFO CONSUMERS` 用于查看 consumer 活动情况。Redis 6.2 不能依赖 Redis 7 的 `lag` 字段，应结合游标和应用处理进度判断未读工作。`INFO MEMORY` 是整个 Redis 实例的指标，不属于某个 provider；应与该 Redis 部署的内存预算比较。命令活动可补充查看 `INFO commandstats`。隔离流单独增长，须独立采集 `XLEN`；`XRANGE ... COUNT 100` 只读取一页，完整检查应以上一页末尾 ID 为排他下界继续查询，直到没有后续记录。
 
-初始采集频率可设为每分钟一次：进程内快照、源/隔离流长度、group/consumer 和 PEL 汇总、PEL 最久 idle、使用 outbox 的应用的最老行年龄，以及 Redis 内存；同时计算计数器五分钟增量。示例告警是 `command_rejections` 或 `receiver_rejections` 在五分钟内增长、outbox 最老行超过应用通知延迟 SLO、PEL 最久 idle 超过 `2 × redis.claim_min_idle_ms`，或 Redis 已用内存超过该实例分配预算的 75%。频率与阈值均须按业务负载和处置能力调整。provider 重启会重置计数器及 ID 序列，不能把重置当成压力消失。先排查准入压力、停滞的 handler、outbox 发布和 Redis 内存，再调整限额。
+初始采集频率可设为每分钟一次：进程内快照、源/隔离流长度、group/consumer 和 PEL 汇总、PEL 最久 idle、使用 outbox 的应用的最老行年龄，以及 Redis 内存；同时计算计数器五分钟增量。示例告警是 `command_rejections` 或 `receiver_rejections` 在五分钟内增长、outbox 最老行超过应用通知延迟 SLO、PEL 最久 idle 超过 `2 × redis.claim_min_idle_ms`，或 Redis 已用内存超过该实例分配预算的 75%。频率与阈值均须按业务负载和处置能力调整。重建 SPI 后，新 ID 的计数从零开始；进程重启还会重置 ID 序列。这些重置都不能说明压力已消失。先排查准入压力、停滞的 handler、outbox 发布和 Redis 内存，再调整限额。
 
 ### 人工决定保留策略
 
