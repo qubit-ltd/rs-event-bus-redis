@@ -2,7 +2,7 @@
 
 [English](design.md) · [用户指南](user_guide.zh_CN.md) · [README](../README.zh_CN.md)
 
-本文记录当前未发布工作树的实现合同及边界，Cargo 版本为 `0.6.0`。测试与基准报告另行提供验收证据；本文不表示已经发布新版本，也不宣称未经测量的性能结果。
+本文记录当前未发布工作树的实现合同及边界，Cargo 版本为 `0.7.0`。测试与基准报告另行提供验收证据；本文不表示已经发布新版本，也不宣称未经测量的性能结果。
 
 ## 职责与支持范围
 
@@ -19,6 +19,14 @@ provider 实现同步和运行时中立的异步 event-bus SPI。facade 负责�
 | `src/internal/transport_policy.rs` | 连接/命令等待与实际 BLOCK 裕量 |
 | `src/wire_fields.rs`、`src/wire_fields/internal/`、`src/internal/decode.rs` | 有界 provider 编码、版本/深度策略及 receiver 绑定 token 构造 |
 | `src/poison.rs` | 在 Redis 内检查 owner、复制隔离记录并 ACK |
+
+## Provider 诊断与保留边界
+
+公开的 `diagnostics` 模块提供 `RedisProviderDiagnostics::snapshots() -> Vec<RedisProviderSnapshot>` 与 `RedisProviderMode::{Sync, Async}`。快照可通过只读 getter 获取 `instance_id`、`mode`、`namespace`，三个实时 gauge（`general_in_flight`、`settlement_in_flight`、`active_receivers`）及十一个饱和计数器（`command_rejections`、`receiver_rejections`、`connection_attempts`、`connection_failures`、`publish_accepted`、`publish_unknown`、`receive_unknown`、`settlement_unknown`、`recovery_claim_commands`、`quarantine_succeeded`、`delivery_gaps`）。普通名额包含从普通通道准入的结算，结算预留名额单独计算。连接尝试是 provider 实际打开连接的一次调用，不按 Sentinel 探测节点数或池命中次数计算；恢复计数针对命令，不针对认领条目；未知结果只统计有返回值的 SPI 调用。
+
+SPI 成功创建时分配进程内唯一且不复用的 ID。client 强引用诊断状态，进程目录仅保存弱引用，实例释放后即从快照中消失。`snapshots()` 在短锁内获取存活实例，再于锁外读取原子值并按 ID 排序；多个字段并非同一时刻的事务快照。快照不包含 URL、凭据、payload 或原始 Redis 错误，ID 也不跨进程重启保持不变。facade delivery metrics 与 Redis PEL/内存须另外采集；采集和告警见[运维指南](user_guide.zh_CN.md)。
+
+本次不引入 exporter、后台采集、自动 `XTRIM`、stream/group/consumer 删除、Redis 侧 EventId 索引或新 wire 格式。源 stream 默认无限保留。选择 `XADD MAXLEN ~` 时，必须同时配置 `redis.stream_maxlen_approx` 与 `redis.allow_lossy_retention=true`，并接受未读或 pending 历史可能丢失。运维须先确认所有 group、PEL、未读位置、未来回放和审计期限；隔离流单独增长。
 
 ## 结算意图与本地提交
 
@@ -92,7 +100,7 @@ XADD Accepted 不证明 fsync、副本持久化或业务完成。新 observer �
 
 任务通知 consumer 按 TaskId 和最高 `state_version` 去重，拒绝旧版本，并查询任务服务的权威状态。通知失败不回滚已提交的任务或业务状态。Redis provider 本身不提供事务性 outbox；typed SQLite task service 为自身的任务生命周期转换提供可选 outbox 集成。
 
-当前未发布变更引入有限超时、资源/字节默认值、新公开错误变体和未知结果规则。部署前检查限额，同时调整 idle/concurrency，停止盲目重试未知 publish，并保留未知 ACK 原意图；wire v1 不变。未来破坏性版本的发布属于另一步操作，本文不表示已经发布 `0.5.0`。
+当前未发布变更引入有限超时、资源/字节默认值、新公开错误变体和未知结果规则。部署前检查限额，同时调整 idle/concurrency，停止盲目重试未知 publish，并保留未知 ACK 原意图；wire v1 不变。Cargo 版本为 `0.7.0`；发布和创建标签属于另外的操作。
 
 ## 验收证据
 

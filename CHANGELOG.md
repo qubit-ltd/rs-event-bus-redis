@@ -2,11 +2,19 @@
 
 ## Unreleased
 
-This migration is not released. The package version remains `0.4.0`; no release
-tag has been created. Publishing these incompatible changes would require a new
-release, proposed as `0.5.0`.
+This working tree has package version `0.7.0`; these changes are not yet released
+and no release tag is claimed here.
 
 ### Migration
+
+- Added public, process-local `RedisProviderDiagnostics::snapshots()` for live
+  sync/async SPI instances. Snapshots expose an instance ID, mode, namespace,
+  three admission gauges and eleven saturating counters for rejection,
+  connection, publish, uncertain results, claim, quarantine and Gap outcomes.
+  IDs and counters reset with process/instance lifetime; fields are not an
+  atomic multi-value sample. Collect facade metrics and Redis PEL/memory
+  separately. The [operations guide](doc/user_guide.md#11-operate-groups-and-downstream-notifications)
+  gives commands, alert examples and the manual retention checklist.
 
 - Connections and commands now have finite default waiting budgets. Set
   `redis.connect_timeout_ms` and `redis.command_timeout_ms` explicitly if the
@@ -18,7 +26,7 @@ release, proposed as `0.5.0`.
 
   | Option | Default | Accepted range |
   | --- | --- | --- |
-  | `redis.max_concurrent_commands` | 64 | 1–4,096 |
+  | `redis.max_concurrent_commands` | 64 | 2–4,096 |
   | `redis.max_active_receivers` | 256 | 1–4,096 |
   | `redis.max_payload_bytes` | 1,048,576 | 1–67,108,864 |
   | `redis.max_wire_bytes` | 8,388,608 | 1–268,435,456 |
@@ -55,6 +63,10 @@ remain unchanged. Existing data needs no format migration. Unknown wire versions
 within the wire-size limit remain pending. Close and Drop do not automatically
 acknowledge messages or delete consumers, groups or streams. Quarantine scripts
 exclude interleaving but do not provide rollback or exactly-once isolation.
+Source streams are unlimited by default; approximate `XADD MAXLEN ~` requires
+both `redis.stream_maxlen_approx` and `redis.allow_lossy_retention=true` and can
+lose unread or pending history. Quarantine retention remains a separate operator
+decision. No automatic trimming or metrics exporter was added.
 
 See the [user guide](doc/user_guide.md) for configuration, recovery and consumer
 operations, and the [design](doc/design.md) for the state and resource contracts.

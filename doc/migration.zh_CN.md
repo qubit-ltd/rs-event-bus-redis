@@ -4,7 +4,7 @@
 
 ## 从 provider 0.6 升级到 0.7
 
-将 `qubit-event-bus-redis` 升级到 0.7 时，同时将 `qubit-event-bus` 升级到 0.19。把重复设置 `durability(Durable)`、`start_position(...)` 和可选 `consumer_group(...)` 的代码改为 `RedisSubscriptionProfile::new(start_position).consumer_group(group).options()`；不使用消费组时省略 `consumer_group`。profile 要求明确指定 `StartPosition`，并始终生成 durable options；后续 `.durability(Ephemeral)` 会被 Redis capability 检查拒绝。
+将 `qubit-event-bus-redis` 升级到 0.7 时，同时将 `qubit-event-bus` 升级到 0.20。把重复设置 `durability(Durable)`、`start_position(...)` 和可选 `consumer_group(...)` 的代码改为 `RedisSubscriptionProfile::new(start_position).consumer_group(group).options()`；不使用消费组时省略 `consumer_group`。profile 要求明确指定 `StartPosition`，并始终生成 durable options；后续 `.durability(Ephemeral)` 会被 Redis capability 检查拒绝。
 
 由 `XREADGROUP >` 返回的新消息会通过 `provider_attempt()` 报告 `Some(1)`。pending 和 `XAUTOCLAIM` 恢复消息仍为 `None`，因为 provider 尚未传递历史投递次数。既有 wire v1 记录、Redis group 和结算行为保持可用。Core 0.19 的 `CodecRegistry::register` 遇到重复载荷类型也会返回错误，详见[核心迁移指南](https://github.com/qubit-ltd/rs-event-bus/blob/main/doc/migration.zh_CN.md)。
 
@@ -70,6 +70,8 @@ fn facade_config() -> Result<EventBusFacadeConfig, ConfigurationError> {
 
 ## 更新诊断与恢复流程
 
+升级后应在每个运行进程采集 `RedisProviderDiagnostics::snapshots()`，以进程身份加 `instance_id`、`mode`、`namespace` 标记样本。ID 仅在单个进程内唯一；SPI 释放后从目录消失，重建实例或进程后计数重新开始。`general_in_flight` 包含从普通通道准入的结算，`settlement_in_flight` 是预留通道，两者相加才是当前短命令占用。快照字段分别读取，provider 计数也不能替代 facade delivery metrics 或 Redis `XPENDING`。核对升级前后的准入限额及新增拒绝计数，再按[运维指南](user_guide.zh_CN.md#11-怎样维护消费组和处理下游通知)采集 Redis 数据和设置告警。
+
 `Diagnostic::SettlementFailed.error` 由 `Box<str>` 改为 `Arc<SpiError>`，`attempt` 表示从 1 开始的 SPI 尝试次数。新增 `Diagnostic::SettlementStopped` 携带最终 `attempts` 和 `termination`。更新匹配代码，读取结构化错误字段并保留原因链，不按格式化字符串分类；匹配非穷尽 diagnostic enum 时保留 `_` 分支。`terminal_failure()` 中的 `SubscriptionStopReason::Settlement` 保存相同上下文，清理失败不能覆盖首个终止原因。
 
 通过 `bus.delivery_metrics()` 和 `subscription.delivery_metrics().metrics` 区分排队、运行中 handler、结算重试和终止失败。保存快照后关闭失败订阅，修复原因，再使用相同 namespace/topic/group 创建新的持久订阅。pending 历史只有在尚未被裁剪且满足 `redis.claim_min_idle_ms` 条件时才能认领；更改 `StartPosition` 不会回退已有 group。若 Redis 已执行 `XACK` 但回复丢失，可能已无待恢复消息。
@@ -108,4 +110,4 @@ facade 死信转发与源 `XACK` 是两个操作，消费者必须容忍重复�
 
 ## 有损 Stream 保留策略
 
-Redis Stream 默认不裁剪。启用近似 `MAXLEN` 裁剪时，必须同时设置 `redis.stream_maxlen_approx=<正整数>` 和 `redis.allow_lossy_retention=true`。裁剪可能删除尚未读取或仍处于 pending 状态的条目；订阅默认会在缺口后停止。验证保留策略时检查 `XLEN`、`XPENDING` 和 `XINFO`。`XADD` 接纳不代表 fsync 或副本持久化保证。
+Redis Stream 默认不裁剪。改变保留策略前，先用 `XINFO GROUPS <stream-key>` 列出所有 group，用 `XPENDING <stream-key> <group>` 逐组核对 PEL，并确认未读位置、未来回放需求和审计期限；源 stream 和隔离流的 `XLEN` 分别查看。准确 key 使用 `naming::stream_key`、`naming::group_name`、`naming::poison_key` 生成。任何事项未确认，都维持无限保留。只有业务明确接受历史丢失，才同时配置 `redis.stream_maxlen_approx=<正整数>` 与 `redis.allow_lossy_retention=true`。近似 `XADD MAXLEN ~` 可能删除未读或 pending payload；未读记录丢失不一定出现 Gap。启用后再次检查各组和隔离流，仅按业务与审计策略归档或移除隔离证据。`XADD` 接纳不代表 fsync 或副本持久化保证。完整流程见[人工决策清单](user_guide.zh_CN.md#人工决定保留策略)。

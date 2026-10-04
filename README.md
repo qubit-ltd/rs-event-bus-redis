@@ -42,6 +42,7 @@ The event-bus SPI lets an application choose a transport without changing busine
 - Stream records with a versioned encoded payload, headers, event ID, content type, and optional schema and ordering metadata.
 - Consumer groups, `Accept`/`Reject` acknowledgement, `Retry` through the pending entries list, and recovery with `XAUTOCLAIM`.
 - Per-client command/receiver admission, finite connection/command waits, payload/wire byte limits, and per-subscription unsettled tracking; malformed or oversized history is quarantined with a serialized Lua script; Redis subscriptions must explicitly use `Durable`.
+- Process-local `RedisProviderDiagnostics::snapshots()` for live SPI admission, connection, publish and recovery counters; Redis PEL and memory still require Redis commands. The [operations guide](doc/user_guide.md#11-operate-groups-and-downstream-notifications) covers collection, alerts and manual retention decisions.
 - Test fixtures that start isolated Redis 6.2, Redis 7, and Sentinel services in Docker.
 
 The Redis command budget defaults to 64 short operations, with 8 slots reserved for
@@ -57,11 +58,11 @@ the next receive to recover. Admission is per provider instance, not global to
 Redis or the process; monitor command rejections, `XPENDING`, stream `XLEN`, and
 quarantine growth.
 
-Redis delivery is at least once. Handlers should tolerate duplicates. A successful `XADD` means Redis accepted the command; it does not prove the record was fsynced or processed. By default streams are not trimmed. Set `redis.stream_maxlen_approx` to opt into Redis `XADD MAXLEN ~ N`; this approximate retention can remove unread or pending history and cause gaps, so use it only when that loss policy is acceptable. The provider does not implement Cluster, native/delayed delivery, TLS configuration, or a dead-letter policy. Stream and group cleanup is an operator task.
+Redis delivery is at least once. Handlers should tolerate duplicates. A successful `XADD` means Redis accepted the command; it does not prove the record was fsynced or processed. By default streams are not trimmed. Set both `redis.stream_maxlen_approx` and `redis.allow_lossy_retention=true` to opt into Redis `XADD MAXLEN ~ N`; this approximate retention can remove unread or pending history and cause gaps, so use it only after a manual loss review. The provider does not implement Cluster, native/delayed delivery, TLS configuration, or a dead-letter policy. Stream and group cleanup is an operator task.
 
 Each wire record, payload, and decoded headers string has a finite provider limit (8 MiB, 1 MiB, and 64 KiB by default), in addition to the facade's 1 MiB encoded publish/receive limits. Receive overflow stops the subscription and retains the pending entry without acknowledgement or quarantine. Public publication errors report `PublishFailure.effect()`; lost `XADD` replies are uncertain and default retry policy forbids blind resubmission. Version 1 wire data remains supported. See the [migration guide](doc/migration.md).
 
-Core 0.19 bounds running handlers, owned deliveries, per-subscription ownership, and registered subscriptions separately. `RedisSubscriptionProfile` requires an explicit start position and builds durable options; new stream entries report provider attempt `Some(1)`, while pending and claimed entries remain unknown. Settlement retries are finite and require explicitly retryable errors; unknown retryability stops the subscription. The [user guide](doc/user_guide.md) covers first-cause diagnostics, delivery metrics, durable recovery, and bounded shutdown waits that do not guarantee forced process exit.
+The core facade bounds running handlers, owned deliveries, per-subscription ownership, and registered subscriptions separately. `RedisSubscriptionProfile` requires an explicit start position and builds durable options; new stream entries report provider attempt `Some(1)`, while pending and claimed entries remain unknown. Settlement retries are finite and require explicitly retryable errors; unknown retryability stops the subscription. The [user guide](doc/user_guide.md) covers first-cause diagnostics, delivery metrics, durable recovery, and bounded shutdown waits that do not guarantee forced process exit.
 
 ## Learn More
 

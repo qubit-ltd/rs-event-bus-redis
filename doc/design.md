@@ -20,6 +20,14 @@ The implementation shares pure command construction, protocol normalization, rec
 | `src/wire_fields.rs`, `src/wire_fields/internal/`, `src/internal/decode.rs` | Bounded provider encoding, version/depth policy and receiver-bound token construction |
 | `src/poison.rs` | Redis-local owner-checked quarantine copy and ACK |
 
+## Provider diagnostics and retention boundary
+
+The public `diagnostics` module exposes `RedisProviderDiagnostics::snapshots() -> Vec<RedisProviderSnapshot>` and `RedisProviderMode::{Sync, Async}`. A snapshot has read-only getters for `instance_id`, `mode`, `namespace`, three live gauges (`general_in_flight`, `settlement_in_flight`, `active_receivers`) and eleven saturating counters (`command_rejections`, `receiver_rejections`, `connection_attempts`, `connection_failures`, `publish_accepted`, `publish_unknown`, `receive_unknown`, `settlement_unknown`, `recovery_claim_commands`, `quarantine_succeeded`, `delivery_gaps`). General slots include settlements admitted through the general lane; reserved settlement slots are separate. A connection attempt means an actual provider open call, not every Sentinel node probe or pool hit. Claim commands count commands, not reclaimed entries; uncertain outcomes count returned SPI calls, not cancelled calls without a result.
+
+Successful SPI creation allocates a process-unique, nonreused ID. The client owns diagnostic state; the process directory holds only weak references, so released instances disappear. `snapshots()` upgrades live references under a short lock, then reads atomics and sorts by ID outside that lock. The fields are not a transactionally consistent sample. The snapshot contains no URL, credentials, payload or raw Redis error; the ID is not stable across restarts. Facade delivery metrics and Redis PEL/memory require separate observations. The [operations guide](user_guide.md) defines collection and alerting.
+
+No exporter, background collector, automatic `XTRIM`, stream/group/consumer deletion, Redis-side EventId index, or wire format change is introduced. Source streams remain unlimited by default. Opt-in `XADD MAXLEN ~` requires `redis.stream_maxlen_approx` together with `redis.allow_lossy_retention=true` and accepts possible unread or pending history loss. Operators decide retention only after checking every group, PEL, unread position, future replay and audit deadline; quarantine grows independently.
+
 ## Settlement intent and local commit
 
 Tokens carry Redis coordinates, receiver identity and shared progress. The progression is Open → AckPending(original terminal intent) → Applied(original intent), or Open → Applied(Retry) without Redis ACK. An identical Applied request is a local success; conflicting requests are rejected without I/O.
@@ -98,7 +106,7 @@ Accepted XADD does not prove fsync, replica durability or business completion. W
 
 Task notification consumers deduplicate by TaskId and highest `state_version`, reject older versions and consult task service state. Failed notifications do not roll back committed task/business state. The Redis provider does not supply transactional outbox semantics; the typed SQLite task service has an optional outbox integration for its own task lifecycle transitions.
 
-This unreleased change adds finite timeout/resource/byte defaults, new public error variants and unknown-outcome rules. Review limits before deployment, adjust idle/concurrency together, stop blindly retrying unknown publish, and preserve unknown ACK intent. Wire v1 is retained. If a future release chooses a breaking version, publication is a separate operation; this tree does not claim a published `0.5.0`.
+This unreleased change adds finite timeout/resource/byte defaults, new public error variants and unknown-outcome rules. Review limits before deployment, adjust idle/concurrency together, stop blindly retrying unknown publish, and preserve unknown ACK intent. Wire v1 is retained. The Cargo version is `0.7.0`; publication and a release tag are separate operations.
 
 ## Acceptance evidence
 

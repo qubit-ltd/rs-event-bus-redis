@@ -2,10 +2,16 @@
 
 ## Unreleased（尚未发布）
 
-本轮迁移尚未发布，包版本仍为 `0.4.0`，未创建发布标签。若发布这批不兼容变更，
-需要使用新的发布版本，建议为 `0.5.0`。
+当前工作树的包版本为 `0.7.0`；这些变更尚未发布，本文不声称已有发布标签。
 
 ### 迁移说明
+
+- 新增公开的进程内 `RedisProviderDiagnostics::snapshots()`，可读取存活的同步/异步
+  SPI 实例。快照包含实例 ID、模式、namespace、三个准入 gauge，以及覆盖拒绝、
+  连接、发布、未知结果、认领、隔离和 Gap 的十一个饱和计数器。ID 与计数随进程
+  或实例生命周期重置，多个字段并非原子快照；facade 指标和 Redis PEL/内存仍须
+  分别采集。[运维指南](doc/user_guide.zh_CN.md#11-怎样维护消费组和处理下游通知)
+  列出命令、告警示例与人工保留清单。
 
 - 连接和命令现在默认使用有限等待预算。若默认 2,000 毫秒不适合部署环境，
   显式设置 `redis.connect_timeout_ms` 和 `redis.command_timeout_ms`，两者均接受
@@ -16,7 +22,7 @@
 
   | 配置项 | 默认值 | 合法范围 |
   | --- | --- | --- |
-  | `redis.max_concurrent_commands` | 64 | 1–4,096 |
+  | `redis.max_concurrent_commands` | 64 | 2–4,096 |
   | `redis.max_active_receivers` | 256 | 1–4,096 |
   | `redis.max_payload_bytes` | 1,048,576 | 1–67,108,864 |
   | `redis.max_wire_bytes` | 8,388,608 | 1–268,435,456 |
@@ -46,6 +52,9 @@ Redis key 命名、`wire` 字段、wire version 1 和 payload 字节数组编码
 已有数据无须格式迁移。在 wire 尺寸限制以内的未知版本仍保留 pending。
 Close 和 Drop 不会自动 ACK，也不删除 consumer、group 或 stream。隔离脚本
 排除执行过程中的交错操作，但不提供回滚或 exactly-once 隔离保证。
+源 stream 默认无限保留；近似 `XADD MAXLEN ~` 必须同时配置
+`redis.stream_maxlen_approx` 和 `redis.allow_lossy_retention=true`，可能丢失未读或
+pending 历史。隔离流的保留须由运维单独决定；本次没有新增自动裁剪或指标 exporter。
 
 配置、恢复和 consumer 运维见[用户指南](doc/user_guide.zh_CN.md)，状态及资源合同
 见[设计说明](doc/design.zh_CN.md)。

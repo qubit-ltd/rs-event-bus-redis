@@ -1,6 +1,6 @@
 # Redis Streams User Guide
 
-**For:** Rust service developers using `qubit-event-bus` 0.19 and `qubit-event-bus-redis` 0.7. This guide shows how an order publisher and billing consumer share events through Redis while keeping application code on the event-bus facade.
+**For:** Rust service developers using `qubit-event-bus` 0.20 and `qubit-event-bus-redis` 0.7. This guide shows how an order publisher and billing consumer share events through Redis while keeping application code on the event-bus facade.
 
 [简体中文](user_guide.zh_CN.md) · [README](../README.md) · [API docs](https://docs.rs/qubit-event-bus-redis)
 
@@ -92,6 +92,7 @@ use qubit_event_bus::registry::EventBusConfig;
 use qubit_event_bus::spi::ShutdownMode;
 use qubit_event_bus::spi::ShutdownOutcome;
 use qubit_event_bus_redis as _;
+use qubit_event_bus_redis::diagnostics::RedisProviderDiagnostics;
 use qubit_event_bus_redis::RedisSubscriptionProfile;
 use qubit_spi::ProviderSelection;
 use qubit_event_bus::EventBusRegistry;
@@ -101,7 +102,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let namespace = std::env::var("REDIS_NAMESPACE").unwrap_or_else(|_| "orders-guide-sync".into());
     let options: ProviderOptions = [
         ("redis.url".into(), url),
-        ("redis.namespace".into(), namespace),
+        ("redis.namespace".into(), namespace.clone()),
     ].into();
     let config = EventBusConfig::default()
         .with_selection(ProviderSelection::named("redis-streams")?)
@@ -109,6 +110,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_facade_config(facade_config()?);
     let registry = EventBusRegistry::discover()?;
     let bus = registry.create(&config)?;
+    for snapshot in RedisProviderDiagnostics::snapshots()
+        .into_iter()
+        .filter(|snapshot| snapshot.namespace() == namespace.as_str())
+    {
+        println!("Redis SPI {} {:?}: general={} settlement={} receivers={} rejected={}",
+            snapshot.instance_id(), snapshot.mode(), snapshot.general_in_flight(),
+            snapshot.settlement_in_flight(), snapshot.active_receivers(),
+            snapshot.command_rejections());
+    }
     let topic = Topic::<String>::new("orders.created")?;
     let (sender, receiver) = std::sync::mpsc::channel();
     let subscription = bus.subscribe(
@@ -143,7 +153,7 @@ Delivery remains at least once. If a handler runs longer than `redis.claim_min_i
 
 The first `receive` on each subscription checks pending entries immediately. Later receive calls share a recovery deadline: calls before `redis.recovery_interval_ms` (default 1,000 ms, valid range 50–60,000) read new entries without repeating the scans; long-running receives still revisit recovery when the interval expires. Retry, a receive error, or cancellation after polling an async receive forces recovery on the next call. Shorter intervals reduce the wait before eligible idle pending entries can be reclaimed, at the cost of more Redis scan commands.
 
-Streams are unlimited by default. To enable approximate trimming, add `("redis.stream_maxlen_approx".into(), "100000".into())` to the `ProviderOptions` map shown above. Every publish then uses `XADD MAXLEN ~ 100000`. Redis may trim unread records or entries still referenced by a consumer group's pending list; trimming does not guarantee delivery and can make old work unrecoverable. Keep this disabled when pending history must remain available for recovery. Malformed-record quarantine streams follow their separate operator retention policy.
+Streams are unlimited by default. Only after accepting historical loss in the retention review below, add both `("redis.stream_maxlen_approx".into(), "100000".into())` and `("redis.allow_lossy_retention".into(), "true".into())` to the `ProviderOptions` map shown above. Every publish then uses `XADD MAXLEN ~ 100000`. Redis may trim unread records or entries still referenced by a consumer group's pending list; trimming does not guarantee delivery and can make old work unrecoverable. Keep this disabled when pending history must remain available for recovery. Malformed-record quarantine streams follow their separate operator retention policy.
 
 Redis does not report a `ReceiveOutcome::Gap` for records trimmed before any consumer read them. The provider cannot identify those missing IDs, so applications must treat opt-in trimming as possible silent history loss and monitor retention outside the delivery API.
 
@@ -296,6 +306,7 @@ The async example runs until it consumes the event, then waits for Enter before 
 | `redis.max_headers_bytes` | `65536` | Maximum decoded headers string bytes before JSON parsing. |
 | `redis.max_idle_connections` | `8` | Maximum idle synchronous standalone command connections retained for reuse; accepts 1 through 64. Dedicated blocking receiver connections are counted separately. |
 | `redis.stream_maxlen_approx` | unset | Optional approximate stream entry limit applied with `XADD MAXLEN ~`; may trim unread or pending records. |
+| `redis.allow_lossy_retention` | `false` | Must be `true` together with `redis.stream_maxlen_approx`; explicitly accepts possible historical loss. |
 | `redis.username_env` | unset | Environment variable name containing the Redis ACL username. |
 | `redis.password_env` | unset | Environment variable name containing the Redis ACL password. |
 | `redis.sentinel.nodes` | unset | At most sixteen comma-separated Sentinel `host:port` endpoints; empty hosts and invalid/zero ports are rejected. |
@@ -429,7 +440,47 @@ These checks bound the provider’s additional serialization/parsing allocations
 
 ## 11. Operate groups and downstream notifications
 
-Use command admission errors and `INFO commandstats` for command activity, `XPENDING` and `XINFO CONSUMERS` for pending age/ownership, `XINFO GROUPS` for group cursors, and source/quarantine `XLEN` plus quarantine `XRANGE` for retained and isolated work. Random consumer names accumulate across restarts; the provider does not automatically run `DELCONSUMER`. Remove an obsolete consumer only after stopping it, checking its PEL is empty and satisfying business retention requirements. Close does not ACK work, delete groups, or delete streams. Trimmed unread history can be silently lost; trimmed pending history may produce Gap and cannot reconstruct payloads. There is no built-in metrics exporter or automatic stream/quarantine retention policy.
+### Collect provider and Redis evidence
+
+The sync example reads `RedisProviderDiagnostics::snapshots()` after creating the bus; the same call works for async SPIs. Keep the bus alive while sampling, select the expected `namespace` and `mode`, and label time series with process identity plus `instance_id`. IDs increase within one process, are not reused there, and disappear from the directory after the instance and its remaining owners are dropped. A restart starts a new process-local ID sequence; these are not Redis stream IDs or durable identifiers. Without a sync or async provider feature, the call returns an empty list. Each getter reads its own atomic value, so a snapshot is not transactionally consistent across fields. It contains no endpoint, credentials, payload, or raw Redis error.
+
+`general_in_flight` is occupied general short-command slots, including settlements admitted there; `settlement_in_flight` is occupied reserved settlement slots only. Add the two to estimate current short-command admission, and use `active_receivers` for dedicated receiver leases. These three values are live gauges. The remaining getters are process-local, monotonically increasing, saturating counters for that SPI lifetime:
+
+| Getter | Counted boundary |
+| --- | --- |
+| `command_rejections`, `receiver_rejections` | Failed short-command or receiver admission, once per rejected request. |
+| `connection_attempts`, `connection_failures` | Actual provider connection-open calls and their failures; pool/cache hits do not count. One Sentinel open counts once even if it probes multiple nodes. |
+| `publish_accepted`, `publish_unknown` | Confirmed `XADD` acceptance or a returned uncertain publish result. A cancelled async publish without a return counts neither. |
+| `receive_unknown`, `settlement_unknown` | SPI receive or settle calls returning `outcome_unknown`, once per call. |
+| `recovery_claim_commands` | Actual `XAUTOCLAIM` commands sent, rather than records claimed. |
+| `quarantine_succeeded`, `delivery_gaps` | Confirmed quarantine copies and Gap outcomes returned to the facade; a tombstone Gap need not have a quarantine copy. |
+
+Facade delivery metrics describe queued/running handlers and settlement retries. These SPI counters describe provider admission and Redis operation outcomes; neither reports Redis PEL depth or memory. Query Redis for those server-side facts. Derive keys from the public `naming` API with `stream_key(namespace, topic)`, `group_name(namespace, topic, subscriber, Some(group))` (or `None` when the subscriber is the group), and `poison_key(namespace, topic, generated_group_name)`. Use the resulting exact strings, not guessed `qubit:*` patterns. List actual groups with `XINFO GROUPS` as well as checking configured names.
+
+```text
+XLEN <stream-key>
+XPENDING <stream-key> <group>
+XPENDING <stream-key> <group> - + 100
+XINFO GROUPS <stream-key>
+XINFO CONSUMERS <stream-key> <group>
+XLEN <quarantine-key>
+XRANGE <quarantine-key> - +
+INFO MEMORY
+```
+
+Run these through an authenticated operations connection. `XPENDING` summary gives the group's pending count; page through the detailed form to find the oldest idle entry and its owner. `XINFO GROUPS` shows each existing group's last-delivered position, while `XINFO CONSUMERS` shows owner activity. Redis 6.2 may not provide the Redis 7 `lag` field, so compare positions and application progress without requiring `lag`. `INFO MEMORY` is server-wide, not a per-provider gauge; compare its used memory with the allocation budget for that Redis deployment. `INFO commandstats` can supplement command activity. Quarantine has independent growth and needs its own `XLEN` and sampled `XRANGE`.
+
+As a starting cadence, collect local snapshots, stream/quarantine lengths, group/consumer and PEL summaries, oldest PEL idle, application outbox oldest-row age where an outbox is used, and Redis memory every minute; compute five-minute counter increases. Alert when `command_rejections` or `receiver_rejections` grows during five minutes, the oldest outbox row exceeds the application's notification-delay SLO, the oldest PEL idle exceeds `2 × redis.claim_min_idle_ms`, or Redis used memory exceeds 75% of its allocated budget. Tune cadence and thresholds to the workload and incident response policy. A provider restart resets its counters and ID sequence; do not interpret that reset as recovered capacity. Investigate admission pressure, stalled handlers, outbox publication, and Redis memory before changing limits.
+
+### Decide retention manually
+
+1. Inventory every current group with `XINFO GROUPS`, including groups owned by other services. For each group, inspect `XPENDING` and `XINFO CONSUMERS`, reconcile its unread position with required history, and record the owner and oldest idle entry. Do not infer safety from `XLEN` alone.
+2. Confirm whether a group will be created later for replay, how far back it must read, and the business and audit retention deadline. Record who accepted any possible loss, including unread entries and pending payloads.
+3. If any group, PEL entry, unread position, future replay need, or audit deadline is unknown, keep the default unlimited source-stream retention and address capacity with producer throttling, consumer repair, or a reviewed archival/migration plan. A growing stream is a capacity incident to investigate, not permission to trim.
+4. Only after explicitly accepting historical loss, configure both `redis.stream_maxlen_approx=<positive integer>` and `redis.allow_lossy_retention=true`. `XADD MAXLEN ~` is approximate and lossy: it can silently remove unread history or remove payloads still referenced by PEL, leaving unrecoverable work or a Gap. It is not a lossless memory control. Recheck all groups after rollout.
+5. Review the separate quarantine stream with `XLEN` and sampled `XRANGE`; correlate `source_stream`, `source_id`, `group`, and `reason` with business handling. Archive or remove quarantine entries only after evidence and audit requirements are satisfied. The provider never trims quarantine automatically.
+
+Random consumer names accumulate across restarts; the provider does not automatically run `DELCONSUMER`. Remove an obsolete consumer only after stopping it, checking its PEL is empty and satisfying business retention requirements. Close does not ACK work, delete groups, or delete streams. There is no built-in metrics exporter or automatic stream/quarantine retention policy.
 
 Redis persistence and replication are deployment responsibilities. `Accepted` proves acceptance of XADD, not fsync, replica durability, handler success, or billing commit. A `WAIT` issued on a new observer connection does not fence writes sent through a different provider connection. Sentinel promotion may lose unreplicated writes or group state; inspect actual cursor, pending IDs and owners when validating recovery.
 
@@ -437,7 +488,7 @@ With typed `qubit-task` notifications, consumers should deduplicate by `TaskId` 
 
 ## 12. Upgrade from provider 0.6
 
-Upgrade `qubit-event-bus-redis` to 0.7 together with `qubit-event-bus` 0.19. `RedisSubscriptionProfile` builds durable subscription options from an explicit `StartPosition`; use it for new subscriptions and preserve the intended consumer group. Core codec registration now rejects duplicate payload types and returns `Result`; handle it with `?` or use `replace` deliberately. `InboundMessage` carries optional provider-attempt metadata without changing its existing `into_parts` tuple. Keep stored wire version 1 data and consumer groups; test retained pending entries before rollout. The [migration guide](migration.md) covers the complete version-specific changes.
+Upgrade `qubit-event-bus-redis` to 0.7 together with `qubit-event-bus` 0.20. `RedisSubscriptionProfile` builds durable subscription options from an explicit `StartPosition`; use it for new subscriptions and preserve the intended consumer group. Core codec registration now rejects duplicate payload types and returns `Result`; handle it with `?` or use `replace` deliberately. `InboundMessage` carries optional provider-attempt metadata without changing its existing `into_parts` tuple. Keep stored wire version 1 data and consumer groups; test retained pending entries before rollout. Start collecting provider snapshots and Redis PEL/memory separately as described above. The [migration guide](migration.md) covers the complete version-specific changes.
 
 
 See [design](design.md), [coverage evidence](coverage-review.md), and [workload benchmark](connection-reuse-benchmark.md). Performance/coverage results require their own measured evidence; this guide makes no new throughput or final coverage claim.

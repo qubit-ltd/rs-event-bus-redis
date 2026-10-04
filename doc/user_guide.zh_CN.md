@@ -1,6 +1,6 @@
 # Redis Streams 用户指南
 
-**读者：** 使用 `qubit-event-bus` 0.19 和 `qubit-event-bus-redis` 0.7 的 Rust 服务开发者。本指南以订单发布服务和账单消费服务为例，说明如何通过 Redis 共享事件，同时让应用代码继续使用 event-bus facade。
+**读者：** 使用 `qubit-event-bus` 0.20 和 `qubit-event-bus-redis` 0.7 的 Rust 服务开发者。本指南以订单发布服务和账单消费服务为例，说明如何通过 Redis 共享事件，同时让应用代码继续使用 event-bus facade。
 
 [English](user_guide.md) · [README](../README.zh_CN.md) · [API 文档](https://docs.rs/qubit-event-bus-redis)
 
@@ -92,6 +92,7 @@ use qubit_event_bus::registry::EventBusConfig;
 use qubit_event_bus::spi::ShutdownMode;
 use qubit_event_bus::spi::ShutdownOutcome;
 use qubit_event_bus_redis as _;
+use qubit_event_bus_redis::diagnostics::RedisProviderDiagnostics;
 use qubit_event_bus_redis::RedisSubscriptionProfile;
 use qubit_spi::ProviderSelection;
 use qubit_event_bus::EventBusRegistry;
@@ -101,7 +102,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let namespace = std::env::var("REDIS_NAMESPACE").unwrap_or_else(|_| "orders-guide-sync".into());
     let options: ProviderOptions = [
         ("redis.url".into(), url),
-        ("redis.namespace".into(), namespace),
+        ("redis.namespace".into(), namespace.clone()),
     ].into();
     let config = EventBusConfig::default()
         .with_selection(ProviderSelection::named("redis-streams")?)
@@ -109,6 +110,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_facade_config(facade_config()?);
     let registry = EventBusRegistry::discover()?;
     let bus = registry.create(&config)?;
+    for snapshot in RedisProviderDiagnostics::snapshots()
+        .into_iter()
+        .filter(|snapshot| snapshot.namespace() == namespace.as_str())
+    {
+        println!("Redis SPI {} {:?}: general={} settlement={} receivers={} rejected={}",
+            snapshot.instance_id(), snapshot.mode(), snapshot.general_in_flight(),
+            snapshot.settlement_in_flight(), snapshot.active_receivers(),
+            snapshot.command_rejections());
+    }
     let topic = Topic::<String>::new("orders.created")?;
     let (sender, receiver) = std::sync::mpsc::channel();
     let subscription = bus.subscribe(
@@ -141,7 +151,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 投递语义仍是至少一次。如果 handler 运行时间超过 `redis.claim_min_idle_ms`，其他 consumer 可能接管该 pending 记录。若 `XADD` 回复丢失，发布结果未知，facade 默认安全门阻止自动重发；人工或明确允许的重试仍可能重复。`redis.max_unsettled_per_subscription` 限制本地活跃投递数，默认值为 100。
 
-默认不限制 stream 长度。可在上方 `ProviderOptions` map 中添加 `("redis.stream_maxlen_approx".into(), "100000".into())` 启用近似裁剪。此后每次发布都会使用 `XADD MAXLEN ~ 100000`。Redis 可能裁剪尚未消费的记录，或消费组 pending 列表仍引用的记录；裁剪不保证投递，旧消息可能无法恢复。需要保留 pending 历史用于恢复时应保持此选项关闭。格式错误记录的隔离 stream 遵循单独的运维保留策略。
+默认不限制 stream 长度。只有在完成下文的保留评估并接受历史丢失后，才在上方 `ProviderOptions` map 中同时加入 `("redis.stream_maxlen_approx".into(), "100000".into())` 和 `("redis.allow_lossy_retention".into(), "true".into())`。此后每次发布都会使用 `XADD MAXLEN ~ 100000`。Redis 可能裁剪尚未消费的记录，或消费组 pending 列表仍引用的记录；裁剪不保证投递，旧消息可能无法恢复。需要保留 pending 历史用于恢复时应保持此选项关闭。格式错误记录的隔离 stream 遵循单独的运维保留策略。
 
 如果记录在任何 consumer 读取前被裁剪，Redis 不会通过 `ReceiveOutcome::Gap` 报告它们。provider 无法识别缺失的记录 ID，因此启用裁剪意味着可能发生 delivery API 无法发现的历史丢失，应用应在外部监控保留状态。
 
@@ -294,6 +304,7 @@ REDIS_SENTINEL_SERVICE_NAME=qeventbus \
 | `redis.max_headers_bytes` | `65536` | 二次 JSON 解析前的 headers 字符串字节上限。 |
 | `redis.max_idle_connections` | `8` | 同步 standalone 命令连接的最大空闲复用数，范围为 1 到 64。阻塞接收器的专用连接另计。 |
 | `redis.stream_maxlen_approx` | 未设置 | 可选的近似 stream 条目上限，通过 `XADD MAXLEN ~` 应用；可能裁剪未读或 pending 记录。 |
+| `redis.allow_lossy_retention` | `false` | 设置 `redis.stream_maxlen_approx` 时必须同时将此项设为 `true`，明确接受历史记录可能丢失。 |
 | `redis.username_env` | 未设置 | 保存 Redis ACL username 的环境变量名称。 |
 | `redis.password_env` | 未设置 | 保存 Redis ACL password 的环境变量名称。 |
 | `redis.sentinel.nodes` | 未设置 | 最多 16 个逗号分隔的 Sentinel `host:port` 地址；拒绝空 host 和非法或零端口。 |
@@ -429,7 +440,47 @@ SPI 的结算状态只约束当前 receiver/token：
 
 ## 11. 怎样维护消费组和处理下游通知
 
-使用命令准入错误和 `INFO commandstats` 查看命令活动；用 `XPENDING`、`XINFO CONSUMERS` 查看 pending 所有者/空闲时长，用 `XINFO GROUPS` 查看消费组游标，并通过源 stream/隔离流 `XLEN` 与隔离流 `XRANGE` 查看保留和隔离的记录。随机 consumer 名称会随重启积累，provider 不自动执行 `DELCONSUMER`。清理旧 consumer 前须停止对应实例，确认其 PEL 已清空并满足业务保留要求。close 不确认消息、不删除 group 或 stream。未读历史被裁剪时可能静默丢失；pending 历史被裁剪可能产生 Gap，且无法重建 payload。provider 没有内置指标 exporter，也不会自动保留或清理 stream/隔离流。
+### 采集 provider 与 Redis 的证据
+
+前面的同步示例在创建总线后调用 `RedisProviderDiagnostics::snapshots()`；异步 SPI 也使用同一入口。采集时保持总线存活，按预期的 `namespace` 和 `mode` 筛选，再用进程身份加 `instance_id` 标记各条时序数据。ID 在单个进程内递增且不会复用；实例及剩余持有者释放后，它就不再出现在目录中。重启后是新的进程内 ID 序列，它既不是 Redis stream ID，也不能充当持久标识。未启用 sync/async feature 时返回空列表。各字段分别读取原子值，不能把多个值当成同一瞬间的事务快照；快照不包含端点、凭据、payload 或原始 Redis 错误。
+
+`general_in_flight` 是已占用的普通短命令名额，包含从普通通道准入的结算；`settlement_in_flight` 只计算已占用的结算预留名额。两者相加可估算当前短命令占用，`active_receivers` 则表示专用 receiver 租约。这三个是实时 gauge。其余 getter 是该 SPI 生命周期内单调递增、达到上限后饱和的进程内计数：
+
+| Getter | 计数时机 |
+| --- | --- |
+| `command_rejections`、`receiver_rejections` | 短命令或 receiver 准入失败，每个被拒请求计一次。 |
+| `connection_attempts`、`connection_failures` | provider 实际打开连接的调用及其失败；池/cache 命中不计。一次 Sentinel 打开操作即使探测多个节点，也只计一次。 |
+| `publish_accepted`、`publish_unknown` | `XADD` 确认接纳，或发布调用返回结果未知；取消后没有返回值的异步发布不计入任何一种结果。 |
+| `receive_unknown`、`settlement_unknown` | SPI receive 或 settle 调用返回 `outcome_unknown`，每次调用计一次。 |
+| `recovery_claim_commands` | 实际发出的 `XAUTOCLAIM` 命令数，不是认领的记录数。 |
+| `quarantine_succeeded`、`delivery_gaps` | 已确认成功的隔离副本，以及实际返回 facade 的 Gap；tombstone Gap 不一定对应隔离副本。 |
+
+facade 的 delivery metrics 描述排队、执行中的 handler 和结算重试；这里的 SPI 计数反映 provider 准入和 Redis 操作结果。两者都不代表 Redis 的 PEL 数量或内存占用，后者必须查询 Redis。先用公开 `naming` API 的 `stream_key(namespace, topic)`、`group_name(namespace, topic, subscriber, Some(group))`（以 subscriber 为 group 时传 `None`）和 `poison_key(namespace, topic, generated_group_name)` 生成实际名称，不能猜测 `qubit:*` 的完整 key。还应通过 `XINFO GROUPS` 列出实际存在的所有组，而不只检查配置文件中的组。
+
+```text
+XLEN <stream-key>
+XPENDING <stream-key> <group>
+XPENDING <stream-key> <group> - + 100
+XINFO GROUPS <stream-key>
+XINFO CONSUMERS <stream-key> <group>
+XLEN <quarantine-key>
+XRANGE <quarantine-key> - +
+INFO MEMORY
+```
+
+通过有权限的运维连接执行这些命令。`XPENDING` 汇总提供各组 pending 数量；详细查询应翻页，找出 idle 最久的记录及其 owner。`XINFO GROUPS` 给出已有组最后投递位置，`XINFO CONSUMERS` 用于查看 consumer 活动情况。Redis 6.2 不能依赖 Redis 7 的 `lag` 字段，应结合游标和应用处理进度判断未读工作。`INFO MEMORY` 是整个 Redis 实例的指标，不属于某个 provider；应与该 Redis 部署的内存预算比较。命令活动可补充查看 `INFO commandstats`。隔离流单独增长，需要独立采集 `XLEN`，并抽样查看 `XRANGE`。
+
+初始采集频率可设为每分钟一次：进程内快照、源/隔离流长度、group/consumer 和 PEL 汇总、PEL 最久 idle、使用 outbox 的应用的最老行年龄，以及 Redis 内存；同时计算计数器五分钟增量。示例告警是 `command_rejections` 或 `receiver_rejections` 在五分钟内增长、outbox 最老行超过应用通知延迟 SLO、PEL 最久 idle 超过 `2 × redis.claim_min_idle_ms`，或 Redis 已用内存超过该实例分配预算的 75%。频率与阈值均须按业务负载和处置能力调整。provider 重启会重置计数器及 ID 序列，不能把重置当成压力消失。先排查准入压力、停滞的 handler、outbox 发布和 Redis 内存，再调整限额。
+
+### 人工决定保留策略
+
+1. 用 `XINFO GROUPS` 列出所有现存 group，包括其他服务创建的组。逐组查看 `XPENDING`、`XINFO CONSUMERS`，核对未读位置与所需历史，并记录 owner 和最久 idle。不能只凭 `XLEN` 断定可以裁剪。
+2. 确认未来是否会创建回放组、需要回溯到哪里，以及业务与审计要求保留到何时。记录由谁接受未读消息和 pending payload 可能丢失。
+3. 只要 group、PEL 记录、未读位置、未来回放需求或审计期限有任何一项未确认，就维持源 stream 默认无限保留，通过限制生产者、修复 consumer 或经评审的归档/迁移方案解决容量问题。stream 增长需要调查，不能直接视为裁剪许可。
+4. 明确接受历史丢失后，才同时配置 `redis.stream_maxlen_approx=<正整数>` 和 `redis.allow_lossy_retention=true`。`XADD MAXLEN ~` 是近似且有损的：它可能静默删除未读历史，也可能删除 PEL 仍引用的 payload，导致工作无法恢复或产生 Gap，不能当成无损内存治理。启用后再次核查所有 group。
+5. 隔离流应另用 `XLEN` 和抽样 `XRANGE` 检查，依据 `source_stream`、`source_id`、`group`、`reason` 核对业务影响。只有满足证据和审计要求后，才归档或移除隔离记录。provider 不会自动裁剪隔离流。
+
+随机 consumer 名称会随重启积累，provider 不自动执行 `DELCONSUMER`。清理旧 consumer 前须停止对应实例，确认其 PEL 已清空并满足业务保留要求。close 不确认消息、不删除 group 或 stream。provider 没有内置指标 exporter，也不会自动保留或清理 stream/隔离流。
 
 Redis 持久化和复制由部署负责。`Accepted` 只证明 XADD 被接受，不证明 fsync、副本持久化、handler 成功或账单提交。在新 observer 连接执行 `WAIT`，不能为另一条 provider 连接的写入提供 fencing 保证。Sentinel 提升可能丢失尚未复制的写入或消费组状态；恢复验收须检查实际游标、pending ID 和 owner。
 
@@ -437,7 +488,7 @@ Redis 持久化和复制由部署负责。`Accepted` 只证明 XADD 被接受，
 
 ## 12. 从 provider 0.6 升级
 
-将 `qubit-event-bus-redis` 升级到 0.7 时，也要将 `qubit-event-bus` 升级到 0.19。新版 `RedisSubscriptionProfile` 根据明确的 `StartPosition` 构造 durable 订阅选项；创建新订阅时使用它，并保留预期的消费组。核心 codec 注册现在会拒绝重复载荷类型并返回 `Result`；要传播错误，使用 `?`，确需替换时才调用 `replace`。`InboundMessage` 增加可选 provider attempt 元数据，但 `into_parts` tuple 保持原样。保留 wire 版本 1 数据和现有消费组；发布前应验证 pending 记录。[迁移指南](migration.zh_CN.md)列出完整变更。
+将 `qubit-event-bus-redis` 升级到 0.7 时，也要将 `qubit-event-bus` 升级到 0.20。新版 `RedisSubscriptionProfile` 根据明确的 `StartPosition` 构造 durable 订阅选项；创建新订阅时使用它，并保留预期的消费组。核心 codec 注册现在会拒绝重复载荷类型并返回 `Result`；要传播错误，使用 `?`，确需替换时才调用 `replace`。`InboundMessage` 增加可选 provider attempt 元数据，但 `into_parts` tuple 保持原样。保留 wire 版本 1 数据和现有消费组；发布前应验证 pending 记录，并按上文分别采集 provider 快照与 Redis PEL/内存。[迁移指南](migration.zh_CN.md)列出完整变更。
 
 
 参阅[设计说明](design.zh_CN.md)、[覆盖率证据](coverage-review.zh_CN.md)和[工作负载基准](connection-reuse-benchmark.zh_CN.md)。性能、覆盖率须以各自测量为证；本指南没有宣称新的吞吐量或最终覆盖率结果。

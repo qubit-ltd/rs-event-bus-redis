@@ -42,15 +42,16 @@ event-bus SPI 允许应用更换传输实现，而不改业务 handler。Redis S
 - 使用带版本的 stream 记录保存编码 payload、headers、事件 ID、content type，以及可选 schema 和排序元数据。
 - 支持消费组、`Accept`/`Reject` 确认、通过待处理列表执行 `Retry`，并用 `XAUTOCLAIM` 恢复消息。
 - 提供 client 级命令/receiver 准入限制、有限连接/命令等待、payload/wire 字节限制，以及每个订阅的未结算投递上限；格式错误或超限的历史记录通过单条 Lua 脚本隔离；Redis 订阅必须显式使用 `Durable`。
+- 通过进程内 `RedisProviderDiagnostics::snapshots()` 读取存活 SPI 的准入、连接、发布和恢复计数；PEL 与内存仍须查询 Redis。[运维指南](doc/user_guide.zh_CN.md#11-怎样维护消费组和处理下游通知)提供采集、告警和人工保留决策流程。
 - 测试会通过 Docker 启动隔离的 Redis 6.2、Redis 7 和 Sentinel 服务。
 
 Redis 短命令额度默认是 64，其中 8 个名额专供结算；专用 receiver 连接有独立的 256 个默认上限。这些准入规则属于破坏性变更：`redis.max_concurrent_commands=1` 会被拒绝。降低总额度时，未显式设置的结算保留数会自动调整为 `min(8, 总额 - 1)`；只有需要自定义保留数时才设置 `redis.reserved_settlement_commands`。详见[迁移指南](doc/migration.zh_CN.md)。每个持久订阅第一次 receive 都会检查 pending；之后恢复时钟跨调用保存，并按 `redis.recovery_interval_ms`（默认 1,000 毫秒）重新扫描。Retry、receive 失败或已开始轮询的 future 被取消时，会强制下一次 receive 执行恢复。额度按 provider 实例隔离，不是 Redis 或进程级全局额度；应监控命令拒绝、`XPENDING`、stream `XLEN` 和隔离流增长。
 
-Redis 使用至少一次投递，业务 handler 应能处理重复事件。`XADD` 成功只表示 Redis 接受了命令，不能证明记录已经 fsync 或完成处理。默认不会裁剪 stream。设置 `redis.stream_maxlen_approx` 可显式启用 Redis `XADD MAXLEN ~ N`；近似保留策略可能删除尚未消费或仍处于 pending 的历史记录并产生缺口，仅在业务接受这类损失时使用。当前不支持 Cluster、native/delayed delivery、TLS 配置或死信策略。stream 和消费组由运维人员负责清理。
+Redis 使用至少一次投递，业务 handler 应能处理重复事件。`XADD` 成功只表示 Redis 接受了命令，不能证明记录已经 fsync 或完成处理。默认不会裁剪 stream。只有同时设置 `redis.stream_maxlen_approx` 和 `redis.allow_lossy_retention=true`，并完成人工损失评估，才启用 Redis `XADD MAXLEN ~ N`；近似保留策略可能删除尚未消费或仍处于 pending 的历史记录并产生缺口。当前不支持 Cluster、native/delayed delivery、TLS 配置或死信策略。stream 和消费组由运维人员负责清理。
 
 provider 对单条 wire、payload 和解码后的 headers 字符串设置有限容量，默认分别为 8 MiB、1 MiB 和 64 KiB；facade 另有默认各 1 MiB 的编码发布/接收限制。接收超限会停止订阅，保留 pending 记录，不确认也不隔离。公开发布错误可通过 `PublishFailure.effect()` 判断效果；`XADD` 回复丢失属于未知结果，默认禁止盲目重发。仍支持 wire 版本 1。升级步骤见[迁移指南](doc/migration.zh_CN.md)。
 
-Core 0.19 分别限制 handler 运行数、全局持有投递数、每订阅持有量和注册订阅数。`RedisSubscriptionProfile` 要求明确指定起始位置，并构造 durable options；Redis 新读取的 stream entry 报告 provider attempt `Some(1)`，pending 和 claim 恢复的历史次数仍未知。结算只对明确可重试的错误执行有限重试，重试性未知时停止订阅。[用户指南](doc/user_guide.zh_CN.md) 说明首个终止原因、投递指标、持久恢复，以及限制等待时间但不保证强制退出进程的关闭策略。
+核心 facade 分别限制 handler 运行数、全局持有投递数、每订阅持有量和注册订阅数。`RedisSubscriptionProfile` 要求明确指定起始位置，并构造 durable options；Redis 新读取的 stream entry 报告 provider attempt `Some(1)`，pending 和 claim 恢复的历史次数仍未知。结算只对明确可重试的错误执行有限重试，重试性未知时停止订阅。[用户指南](doc/user_guide.zh_CN.md) 说明首个终止原因、投递指标、持久恢复，以及限制等待时间但不保证强制退出进程的关闭策略。
 
 ## 延伸阅读
 
