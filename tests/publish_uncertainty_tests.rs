@@ -15,6 +15,7 @@ use qubit_event_bus::CodecError;
 use qubit_event_bus::DeliveryError;
 use qubit_event_bus::EventBusConfig;
 use qubit_event_bus::codec::EventCodec;
+#[cfg(feature = "async")]
 use qubit_event_bus::error::ReceiveError;
 use qubit_event_bus::model::ContentType;
 use qubit_event_bus::model::DeadLetterEvent;
@@ -33,6 +34,7 @@ use qubit_event_bus_redis::diagnostics::{RedisProviderDiagnostics, RedisProvider
 use qubit_event_bus_redis::sync::RedisEventBusProvider;
 use qubit_event_bus_redis::wire::WireFields;
 use qubit_id::Id;
+#[cfg(feature = "async")]
 use qubit_retry::RetryPolicy;
 use qubit_spi::ServiceProvider;
 use support::scripted_redis::ScriptedRedis;
