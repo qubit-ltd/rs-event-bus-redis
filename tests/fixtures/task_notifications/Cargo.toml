@@ -13,7 +13,7 @@ qubit-task = { path = "../../../../rs-task", features = ["sqlite", "event-bus"] 
 qubit-codec = { version = "0.16.0", path = "../../../../rs-codec", features = ["registry"] }
 tempfile = "3"
 qubit-id = "0.7"
-qubit-model-metadata = { path = "../../../../rs-model-metadata" }
+qubit-model-id = { version = "0.1", path = "../../../../rs-model-metadata/model-id" }
 qubit-spi = "0.13"
 serde_json = "1"
 tokio = { version = "1.53", features = ["rt-multi-thread", "macros"] }
