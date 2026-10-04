@@ -39,6 +39,7 @@ use self::receive_command::ReceiveCommand;
 use crate::client::Client;
 use crate::client::CommandClass;
 use crate::client::ReceiverPermit;
+use crate::diagnostics::RedisDiagnosticCounter;
 use crate::error::RedisProviderError;
 use crate::error::from_redis_error as classified_spi_error;
 use crate::internal::DecodeFailure;
@@ -180,7 +181,7 @@ impl AsyncEventSubscriptionSpi for Subscription {
                     .await
                     .map_err(|error| spi_error("receive", &self.topic, error))?,
             };
-            let result = async {
+            let result: Result<ReceiveOutcome, SpiError> = async {
                 let mut driver = ReceiveDriver::new(
                     timeout,
                     started,
@@ -211,6 +212,9 @@ impl AsyncEventSubscriptionSpi for Subscription {
                             let cursor = lock_state(&self.recovery, &self.topic, "receive", "recovery lock")?
                                 .claim_cursor()
                                 .to_owned();
+                            if let Some(diagnostics) = self.client.diagnostics() {
+                                diagnostics.increment(RedisDiagnosticCounter::RecoveryClaimCommands);
+                            }
                             let raw_claim: Value = cmd("XAUTOCLAIM")
                                 .arg(&self.key)
                                 .arg(&self.group)
@@ -350,6 +354,15 @@ impl AsyncEventSubscriptionSpi for Subscription {
                 recovery_guard.disarm();
                 self.receive_connection = Some(connection);
             }
+            if let Some(diagnostics) = self.client.diagnostics() {
+                match &result {
+                    Ok(ReceiveOutcome::Gap(_)) => diagnostics.increment(RedisDiagnosticCounter::DeliveryGaps),
+                    Err(error) if error.kind() == "outcome_unknown" => {
+                        diagnostics.increment(RedisDiagnosticCounter::ReceiveUnknown);
+                    }
+                    _ => {}
+                }
+            }
             result
         })
     }
@@ -435,6 +448,9 @@ impl AsyncEventSubscriptionSpi for Subscription {
                     }
                     Ok(_) | Err(_) => {
                         client.invalidate_async_connection(connection.generation).await;
+                        if let Some(diagnostics) = client.diagnostics() {
+                            diagnostics.increment(RedisDiagnosticCounter::SettlementUnknown);
+                        }
                         return Err(spi_error(
                             "settle",
                             &topic,
@@ -578,7 +594,11 @@ async fn scan_missing_tombstones(
             })? {
                 PoisonOutcome::TombstoneCleared => deleted_count += 1,
                 PoisonOutcome::SourceGone | PoisonOutcome::OwnershipChanged => {}
-                PoisonOutcome::Quarantined => {}
+                PoisonOutcome::Quarantined => {
+                    if let Some(diagnostics) = subscription.client.diagnostics() {
+                        diagnostics.increment(RedisDiagnosticCounter::QuarantineSucceeded);
+                    }
+                }
             }
         }
         lock_state(&subscription.recovery, &subscription.topic, "receive", "recovery lock")?.set_tombstone_cursor(id);
@@ -667,10 +687,15 @@ async fn read_entry(
                 )
             })?;
             return Ok(match outcome {
-                PoisonOutcome::Quarantined => Some(ReceiveOutcome::Gap(DeliveryGap::new(
-                    "malformed Redis stream entry was quarantined",
-                    Some(1),
-                ))),
+                PoisonOutcome::Quarantined => {
+                    if let Some(diagnostics) = subscription.client.diagnostics() {
+                        diagnostics.increment(RedisDiagnosticCounter::QuarantineSucceeded);
+                    }
+                    Some(ReceiveOutcome::Gap(DeliveryGap::new(
+                        "malformed Redis stream entry was quarantined",
+                        Some(1),
+                    )))
+                }
                 PoisonOutcome::SourceGone => Some(ReceiveOutcome::Gap(DeliveryGap::new(
                     "malformed pending Redis stream entry was removed",
                     Some(1),

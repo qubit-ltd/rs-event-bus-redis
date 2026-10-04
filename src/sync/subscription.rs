@@ -43,6 +43,7 @@ use crate::client::Client;
 use crate::client::CommandClass;
 use crate::client::PooledConnection;
 use crate::client::ReceiverPermit;
+use crate::diagnostics::RedisDiagnosticCounter;
 use crate::error::RedisProviderError;
 use crate::error::from_redis_error as classified_spi_error;
 use crate::internal::DecodeFailure;
@@ -179,7 +180,7 @@ impl EventSubscriptionSpi for Subscription {
                 .get_dedicated_connection()
                 .map_err(|error| spi_error("receive", Some(&self.topic), error))?,
         };
-        let result = (|| {
+        let result: Result<ReceiveOutcome, SpiError> = (|| {
             let mut driver = ReceiveDriver::new(
                 timeout,
                 started,
@@ -217,6 +218,9 @@ impl EventSubscriptionSpi for Subscription {
                         let cursor = lock_state(&self.recovery, &self.topic, "receive", "recovery lock")?
                             .claim_cursor()
                             .to_owned();
+                        if let Some(diagnostics) = self.client.diagnostics() {
+                            diagnostics.increment(RedisDiagnosticCounter::RecoveryClaimCommands);
+                        }
                         let raw_claim: Value = cmd("XAUTOCLAIM")
                             .arg(&self.key)
                             .arg(&self.group)
@@ -361,6 +365,15 @@ impl EventSubscriptionSpi for Subscription {
             recovery_guard.disarm();
             self.receive_connection = Some(connection);
         }
+        if let Some(diagnostics) = self.client.diagnostics() {
+            match &result {
+                Ok(ReceiveOutcome::Gap(_)) => diagnostics.increment(RedisDiagnosticCounter::DeliveryGaps),
+                Err(error) if error.kind() == "outcome_unknown" => {
+                    diagnostics.increment(RedisDiagnosticCounter::ReceiveUnknown);
+                }
+                _ => {}
+            }
+        }
         result
     }
 
@@ -430,6 +443,9 @@ impl EventSubscriptionSpi for Subscription {
                 }
                 Ok(_) | Err(_) => {
                     connection.discard();
+                    if let Some(diagnostics) = self.client.diagnostics() {
+                        diagnostics.increment(RedisDiagnosticCounter::SettlementUnknown);
+                    }
                     return Err(spi_error(
                         "settle",
                         Some(&self.topic),
@@ -576,10 +592,15 @@ fn read_entry(
                 )
             })?;
             match outcome {
-                PoisonOutcome::Quarantined => Ok(Some(ReceiveOutcome::Gap(DeliveryGap::new(
-                    "malformed Redis stream entry was quarantined",
-                    Some(1),
-                )))),
+                PoisonOutcome::Quarantined => {
+                    if let Some(diagnostics) = subscription.client.diagnostics() {
+                        diagnostics.increment(RedisDiagnosticCounter::QuarantineSucceeded);
+                    }
+                    Ok(Some(ReceiveOutcome::Gap(DeliveryGap::new(
+                        "malformed Redis stream entry was quarantined",
+                        Some(1),
+                    ))))
+                }
                 PoisonOutcome::SourceGone => Ok(Some(ReceiveOutcome::Gap(DeliveryGap::new(
                     "malformed pending Redis stream entry was removed",
                     Some(1),

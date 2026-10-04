@@ -43,6 +43,7 @@ use crate::client::Client;
 use crate::client::CommandClass;
 use crate::config::RedisEventBusConfig;
 use crate::consumer_identity::new_consumer_name;
+use crate::diagnostics::RedisDiagnosticCounter;
 use crate::error::RedisProviderError;
 use crate::error::invalid_publish_reply;
 use crate::error::query_publish_error;
@@ -115,22 +116,45 @@ impl EventBusSpi for RedisEventBus {
                 Ok(id) if valid_stream_id(&id) && id != "0-0" => id,
                 _ => {
                     connection.discard();
-                    return Err(invalid_publish_reply(message.topic()));
+                    let error = invalid_publish_reply(message.topic());
+                    if let Some(diagnostics) = self.client.diagnostics() {
+                        diagnostics.increment(RedisDiagnosticCounter::PublishUnknown);
+                    }
+                    return Err(error);
                 }
             },
             Ok(Value::ServerError(error)) => {
                 let error: RedisError = error.into();
-                return Err(query_publish_error(message.topic(), &error));
+                let error = query_publish_error(message.topic(), &error);
+                if error.kind() == "outcome_unknown"
+                    && let Some(diagnostics) = self.client.diagnostics()
+                {
+                    diagnostics.increment(RedisDiagnosticCounter::PublishUnknown);
+                }
+                return Err(error);
             }
             Ok(_) => {
                 connection.discard();
-                return Err(invalid_publish_reply(message.topic()));
+                let error = invalid_publish_reply(message.topic());
+                if let Some(diagnostics) = self.client.diagnostics() {
+                    diagnostics.increment(RedisDiagnosticCounter::PublishUnknown);
+                }
+                return Err(error);
             }
             Err(error) => {
                 connection.discard();
-                return Err(query_publish_error(message.topic(), &error));
+                let error = query_publish_error(message.topic(), &error);
+                if error.kind() == "outcome_unknown"
+                    && let Some(diagnostics) = self.client.diagnostics()
+                {
+                    diagnostics.increment(RedisDiagnosticCounter::PublishUnknown);
+                }
+                return Err(error);
             }
         };
+        if let Some(diagnostics) = self.client.diagnostics() {
+            diagnostics.increment(RedisDiagnosticCounter::PublishAccepted);
+        }
         Ok(PublishAcknowledgement::Accepted {
             provider_message_id: Some(message_id),
             metadata: Default::default(),

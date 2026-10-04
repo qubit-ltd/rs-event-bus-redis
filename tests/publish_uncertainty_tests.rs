@@ -29,6 +29,7 @@ use qubit_event_bus::spi::EventBusSpi;
 use qubit_event_bus::spi::OutboundMessage;
 use qubit_event_bus::spi::TopicAddress;
 use qubit_event_bus::spi::TransportPayload;
+use qubit_event_bus_redis::diagnostics::{RedisProviderDiagnostics, RedisProviderSnapshot};
 use qubit_event_bus_redis::sync::RedisEventBusProvider;
 use qubit_event_bus_redis::wire::WireFields;
 use qubit_id::Id;
@@ -39,15 +40,127 @@ use support::scripted_redis::Step;
 
 /// Opens only the configured provider; network IO begins with publishing.
 fn bus(url: &str) -> Arc<dyn EventBusSpi> {
+    bus_in_namespace(url, "uncertainty")
+}
+
+fn bus_in_namespace(url: &str, namespace: &str) -> Arc<dyn EventBusSpi> {
     let options: ProviderOptions = [
         ("redis.url".into(), url.into()),
-        ("redis.namespace".into(), "uncertainty".into()),
+        ("redis.namespace".into(), namespace.into()),
         ("redis.claim_min_idle_ms".into(), "0".into()),
     ]
     .into();
     RedisEventBusProvider
         .create_configured(&EventBusConfig::default().with_provider_options(options))
         .unwrap()
+}
+
+fn snapshot(namespace: &str) -> RedisProviderSnapshot {
+    RedisProviderDiagnostics::snapshots()
+        .into_iter()
+        .find(|snapshot| snapshot.namespace() == namespace)
+        .expect("live provider diagnostics")
+}
+
+#[test]
+fn test_sync_publish_counters_follow_returned_outcome() {
+    let accepted = ScriptedRedis::start(vec![Step::reply("XADD", b"$3\r\n1-0\r\n")]).unwrap();
+    let bus = bus_in_namespace(accepted.url(), "metric-publish-sync-accepted");
+    let _ = bus.publish(message()).expect("valid XADD reply");
+    let counters = snapshot("metric-publish-sync-accepted");
+    assert_eq!(counters.publish_accepted(), 1);
+    assert_eq!(counters.publish_unknown(), 0);
+    accepted.finish();
+
+    let lost = ScriptedRedis::start(vec![Step::disconnect("XADD", false)]).unwrap();
+    let bus = bus_in_namespace(lost.url(), "metric-publish-sync-lost");
+    assert_eq!(bus.publish(message()).unwrap_err().kind(), "outcome_unknown");
+    let counters = snapshot("metric-publish-sync-lost");
+    assert_eq!(counters.publish_accepted(), 0);
+    assert_eq!(counters.publish_unknown(), 1);
+    lost.finish();
+}
+
+#[cfg(feature = "async")]
+#[test]
+fn test_async_publish_counters_follow_returned_outcome() {
+    use qubit_event_bus_redis::r#async::AsyncRedisEventBusProvider;
+    use qubit_spi::AsyncServiceProvider;
+    futures_lite::future::block_on(async {
+        for (namespace, reply, accepted_count, unknown_count) in [
+            ("metric-publish-async-accepted", Some(b"$3\r\n1-0\r\n".as_slice()), 1, 0),
+            ("metric-publish-async-lost", None, 0, 1),
+        ] {
+            let step = match reply {
+                Some(reply) => Step::reply("XADD", reply),
+                None => Step::disconnect("XADD", false),
+            };
+            let server = ScriptedRedis::start(vec![step]).unwrap();
+            let options: ProviderOptions = [
+                ("redis.url".into(), server.url().into()),
+                ("redis.namespace".into(), namespace.into()),
+            ]
+            .into();
+            let bus = AsyncRedisEventBusProvider
+                .create_configured(&EventBusConfig::default().with_provider_options(options))
+                .await
+                .unwrap();
+            let result = bus.publish(message()).await;
+            if accepted_count == 1 {
+                let _ = result.expect("valid XADD reply");
+            } else {
+                assert_eq!(result.unwrap_err().kind(), "outcome_unknown");
+            }
+            let counters = snapshot(namespace);
+            assert_eq!(counters.publish_accepted(), accepted_count);
+            assert_eq!(counters.publish_unknown(), unknown_count);
+            server.finish();
+        }
+    });
+}
+
+#[cfg(feature = "async")]
+#[test]
+fn test_async_cancelled_publish_has_no_returned_outcome_count() -> Result<(), Box<dyn std::error::Error>> {
+    use futures_lite::future::{block_on, race};
+    use qubit_event_bus_redis::r#async::AsyncRedisEventBusProvider;
+    use qubit_spi::AsyncServiceProvider;
+    use support::controlled_redis::proxy::ControlledRedis;
+    use support::redis_server::RedisServer;
+
+    block_on(async {
+        let server = RedisServer::start()?;
+        let proxy = ControlledRedis::start(server.url())?;
+        let namespace = "metric-publish-async-cancelled";
+        let options: ProviderOptions = [
+            ("redis.url".into(), proxy.url()),
+            ("redis.namespace".into(), namespace.into()),
+        ]
+        .into();
+        let bus = AsyncRedisEventBusProvider
+            .create_configured(&EventBusConfig::default().with_provider_options(options))
+            .await
+            .map_err(|failure| failure.into_error())?;
+        let gate = proxy.pause_after_reply("XADD");
+        let result = race(
+            async { Some(bus.publish(message()).await) },
+            async {
+                gate.wait_applied().await;
+                None
+            },
+        )
+        .await;
+        assert!(result.is_none(), "XADD future was cancelled before its reply");
+        let mut observer = redis::Client::open(server.url())?.get_connection()?;
+        let stream = qubit_event_bus_redis::naming::stream_key(namespace, "events");
+        let applied: usize = redis::cmd("XLEN").arg(stream).query(&mut observer)?;
+        assert_eq!(applied, 1, "Redis applied XADD before cancellation");
+        gate.release_without_reply();
+        let counters = snapshot(namespace);
+        assert_eq!(counters.publish_accepted(), 0);
+        assert_eq!(counters.publish_unknown(), 0);
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })
 }
 
 /// Creates a stable encoded event so SPI tests bypass all facade limits.

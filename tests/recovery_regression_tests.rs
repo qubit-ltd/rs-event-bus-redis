@@ -50,6 +50,7 @@ use qubit_event_bus::spi::TopicAddress;
 use qubit_event_bus::spi::TransportPayload;
 #[cfg(feature = "async")]
 use qubit_event_bus_redis::r#async::AsyncRedisEventBusProvider;
+use qubit_event_bus_redis::diagnostics::{RedisProviderDiagnostics, RedisProviderSnapshot};
 use qubit_event_bus_redis::naming::group_name;
 use qubit_event_bus_redis::naming::poison_key;
 use qubit_event_bus_redis::naming::stream_key;
@@ -67,9 +68,17 @@ use redis::RedisResult;
 use redis::Value;
 use redis::cmd;
 use redis::streams::StreamRangeReply;
+use support::controlled_redis::proxy::ControlledRedis;
 use support::redis_server::RedisServer;
 
 static SUBSCRIPTION_IDS: AtomicU64 = AtomicU64::new(10_000);
+
+fn snapshot(namespace: &str) -> RedisProviderSnapshot {
+    RedisProviderDiagnostics::snapshots()
+        .into_iter()
+        .find(|snapshot| snapshot.namespace() == namespace)
+        .expect("live provider diagnostics")
+}
 
 /// Reads one Redis command invocation count from an isolated server.
 ///
@@ -111,6 +120,7 @@ fn test_async_polled_receive_cancellation_forces_recovery() -> Result<(), Box<dy
         ));
         let mut observer = Client::open(server.url())?.get_connection()?;
         let completed_claims = command_calls(&mut observer, "xautoclaim")?;
+        assert_eq!(snapshot("cancelled-recovery-clock").recovery_claim_commands(), completed_claims);
         drop(receiver.receive(Duration::from_secs(1)));
         let _ = bus.publish(event("events", "unpolled", b"payload")?).await?;
         let ReceiveOutcome::Message(first) = receiver.receive(Duration::ZERO).await? else {
@@ -137,6 +147,10 @@ fn test_async_polled_receive_cancellation_forces_recovery() -> Result<(), Box<dy
         assert!(
             command_calls(&mut observer, "xautoclaim")? > completed_claims,
             "polled cancellation must force a claim scan"
+        );
+        assert_eq!(
+            snapshot("cancelled-recovery-clock").recovery_claim_commands(),
+            command_calls(&mut observer, "xautoclaim")?
         );
         Ok::<(), Box<dyn Error>>(())
     })
@@ -173,6 +187,7 @@ fn test_sync_hot_path_avoids_repeated_autoclaim_for_one_thousand_messages() -> R
         receiver.settle(token, DeliveryDisposition::Accept)?;
     }
     let claims = command_calls(&mut observer, "xautoclaim")? - before_claim;
+    assert_eq!(snapshot("hot-recovery-clock").recovery_claim_commands(), claims);
     let reads = command_calls(&mut observer, "xreadgroup")? - before_read;
     assert!(claims < 1_000, "hot path issued {claims} XAUTOCLAIM commands");
     assert!(
@@ -724,6 +739,8 @@ fn test_sync_poison_does_not_block_next() -> Result<(), Box<dyn Error>> {
     );
     let quarantined: usize = cmd("XLEN").arg(quarantine).query(&mut connection)?;
     assert_eq!(quarantined, 4);
+    assert_eq!(snapshot("poison-sync").quarantine_succeeded(), 4);
+    assert_eq!(snapshot("poison-sync").delivery_gaps(), 4);
     let records: StreamRangeReply = cmd("XRANGE")
         .arg(poison_key(
             "poison-sync",
@@ -951,6 +968,8 @@ fn test_async_poison_does_not_block_next() -> Result<(), Box<dyn Error>> {
         let quarantine = poison_key("poison-async", "events", &group);
         let quarantined: usize = cmd("XLEN").arg(quarantine).query(&mut verify)?;
         assert_eq!(quarantined, 4);
+        assert_eq!(snapshot("poison-async").quarantine_succeeded(), 4);
+        assert_eq!(snapshot("poison-async").delivery_gaps(), 4);
         let records: StreamRangeReply = cmd("XRANGE")
             .arg(poison_key(
                 "poison-async",
@@ -1346,6 +1365,8 @@ fn test_sync_deleted_pending_entry_is_cleared_on_redis_6_2_and_7() -> Result<(),
         let deleted: usize = cmd("XDEL").arg(&key).arg(redis_id).query(&mut connection)?;
         assert_eq!(deleted, 1);
         assert!(matches!(receiver.receive(Duration::ZERO)?, ReceiveOutcome::Gap(_)));
+        assert_eq!(snapshot(&namespace).delivery_gaps(), 1);
+        assert_eq!(snapshot(&namespace).quarantine_succeeded(), 0);
         assert!(matches!(receiver.receive(Duration::ZERO)?, ReceiveOutcome::TimedOut));
         let pending: Vec<Value> = cmd("XPENDING")
             .arg(&key)
@@ -1404,6 +1425,8 @@ fn test_async_deleted_pending_entry_is_cleared_on_redis_6_2_and_7() -> Result<()
                 receiver.receive(Duration::ZERO).await?,
                 ReceiveOutcome::Gap(_)
             ));
+            assert_eq!(snapshot(&namespace).delivery_gaps(), 1);
+            assert_eq!(snapshot(&namespace).quarantine_succeeded(), 0);
             assert!(matches!(
                 receiver.receive(Duration::ZERO).await?,
                 ReceiveOutcome::TimedOut
@@ -1561,6 +1584,85 @@ fn test_async_removed_group_error_has_unknown_retryability() -> Result<(), Box<d
             Err(error) => error,
         };
         assert!(matches!(error, SpiError::Operation { retryable: None, .. }));
+        Ok::<(), Box<dyn Error>>(())
+    })
+}
+
+#[cfg(feature = "sync")]
+#[test]
+fn test_sync_receive_and_settle_unknown_count_once() -> Result<(), Box<dyn Error>> {
+    let server = RedisServer::start()?;
+    let proxy = ControlledRedis::start(server.url())?;
+    let namespace = "outcome-metrics-sync";
+    let options: ProviderOptions = [
+        ("redis.url".into(), proxy.url()),
+        ("redis.namespace".into(), namespace.into()),
+        ("redis.claim_min_idle_ms".into(), "0".into()),
+    ]
+    .into();
+    let bus = RedisEventBusProvider
+        .create_configured(&EventBusConfig::default().with_provider_options(options))
+        .map_err(|failure| failure.into_error())?;
+    let _ = bus.publish(event("events", "unknown-sync", b"payload")?)?;
+    let mut receiver = bus.subscribe(request("events", "unknown-worker", "unknown-group", SubscriptionDurability::Durable)?)?;
+    proxy.replace_next_reply("XREADGROUP", b"+OK\r\n");
+    let error = match receiver.receive(Duration::from_secs(2)) {
+        Err(error) => error,
+        Ok(_) => return Err("malformed read reply was accepted".into()),
+    };
+    assert_eq!(error.kind(), "outcome_unknown");
+    assert_eq!(snapshot(namespace).receive_unknown(), 1);
+    assert_eq!(snapshot(namespace).settlement_unknown(), 0);
+
+    let ReceiveOutcome::Message(message) = receiver.receive(Duration::from_secs(2))? else {
+        return Err("pending message not recovered".into());
+    };
+    let token = message.settlement().ok_or("settlement token missing")?;
+    proxy.replace_next_reply("XACK", b"+OK\r\n");
+    let error = receiver.settle(token, DeliveryDisposition::Accept).expect_err("malformed ACK reply");
+    assert_eq!(error.kind(), "outcome_unknown");
+    assert_eq!(snapshot(namespace).receive_unknown(), 1);
+    assert_eq!(snapshot(namespace).settlement_unknown(), 1);
+    Ok(())
+}
+
+#[cfg(feature = "async")]
+#[test]
+fn test_async_receive_and_settle_unknown_count_once() -> Result<(), Box<dyn Error>> {
+    block_on(async {
+        let server = RedisServer::start()?;
+        let proxy = ControlledRedis::start(server.url())?;
+        let namespace = "outcome-metrics-async";
+        let options: ProviderOptions = [
+            ("redis.url".into(), proxy.url()),
+            ("redis.namespace".into(), namespace.into()),
+            ("redis.claim_min_idle_ms".into(), "0".into()),
+        ]
+        .into();
+        let bus = AsyncRedisEventBusProvider
+            .create_configured(&EventBusConfig::default().with_provider_options(options))
+            .await
+            .map_err(|failure| failure.into_error())?;
+        let _ = bus.publish(event("events", "unknown-async", b"payload")?).await?;
+        let mut receiver = bus.subscribe(request("events", "unknown-worker", "unknown-group", SubscriptionDurability::Durable)?).await?;
+        proxy.replace_next_reply("XREADGROUP", b"+OK\r\n");
+        let error = match receiver.receive(Duration::from_secs(2)).await {
+            Err(error) => error,
+            Ok(_) => return Err("malformed read reply was accepted".into()),
+        };
+        assert_eq!(error.kind(), "outcome_unknown");
+        assert_eq!(snapshot(namespace).receive_unknown(), 1);
+        assert_eq!(snapshot(namespace).settlement_unknown(), 0);
+
+        let ReceiveOutcome::Message(message) = receiver.receive(Duration::from_secs(2)).await? else {
+            return Err("pending message not recovered".into());
+        };
+        let token = message.settlement().ok_or("settlement token missing")?;
+        proxy.replace_next_reply("XACK", b"+OK\r\n");
+        let error = receiver.settle(token, DeliveryDisposition::Accept).await.expect_err("malformed ACK reply");
+        assert_eq!(error.kind(), "outcome_unknown");
+        assert_eq!(snapshot(namespace).receive_unknown(), 1);
+        assert_eq!(snapshot(namespace).settlement_unknown(), 1);
         Ok::<(), Box<dyn Error>>(())
     })
 }
