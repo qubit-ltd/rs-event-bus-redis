@@ -1,9 +1,28 @@
 # Changelog
 
-## Unreleased
+## 0.7.0
 
 This working tree has package version `0.7.0`; these changes are not yet released
-and no release tag is claimed here.
+and no release tag is claimed here. The notes describe the source version declared
+by `Cargo.toml` and do not claim publication.
+
+### Added
+
+- `RedisSubscriptionProfile` for explicit durable start-position and consumer
+  group configuration.
+- Provider-attempt metadata for newly read stream entries (`Some(1)`); pending
+  and claimed recovery entries remain unknown.
+
+### Changed
+
+- The provider is coordinated with `qubit-event-bus` 0.20 and `qubit-task`
+  0.10. Follow the migration guide when upgrading across SPI generations.
+
+### Operational contract
+
+The timeout, resource limits, unknown-outcome handling, settlement intent,
+wire-format, and lifecycle migration notes below describe the implemented 0.7
+contract. They do not represent an unreleased 0.5 proposal.
 
 ### Migration
 

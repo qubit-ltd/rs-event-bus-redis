@@ -2,9 +2,32 @@
 
 [简体中文](migration.zh_CN.md) · [User guide](user_guide.md)
 
+## Current compatibility
+
+The current provider manifest is version 0.7 and depends on core 0.20. Keep
+those versions together when using this checkout. The provider 0.6 to 0.7
+migration below records the API transition; its original release pairing was
+core 0.19, before core 0.20 was prepared.
+
+### Core 0.20 compatibility
+
+Redis cannot report per-destination admission. Use
+`AdmissionRequirement::ProviderOrDestinationAccepted` with `publish_checked`;
+stricter destination requirements fail before publication with
+`CheckedPublishError::UnsupportedVisibility`. Provider acceptance does not
+mean that a handler processed the event or that Redis persisted it to disk.
+Core stops a subscription after a reported gap by default; choose
+`GapPolicy::Continue` only if the application accepts missed events and has a
+recovery policy. New stream entries report provider attempt `Some(1)`; pending
+and claimed entries remain unknown (`None`). Existing wire v1 records, streams,
+groups, and pending entries need no format migration. Retention settings can
+still remove unread or pending history and cause gaps.
+
 ## Upgrade from provider 0.6 to 0.7
 
-Upgrade `qubit-event-bus-redis` to 0.7 together with `qubit-event-bus` 0.20. Replace repeated `durability(Durable)`, `start_position(...)`, and optional `consumer_group(...)` setup with `RedisSubscriptionProfile::new(start_position).consumer_group(group).options()` (omit `consumer_group` when not used). The profile requires an explicit `StartPosition` and always starts with durable options; a later `.durability(Ephemeral)` is rejected by the Redis capability check.
+The original provider 0.7 migration paired `qubit-event-bus-redis` 0.7 with
+`qubit-event-bus` 0.19. For the current provider 0.7 manifest, use core 0.20.
+Replace repeated `durability(Durable)`, `start_position(...)`, and optional `consumer_group(...)` setup with `RedisSubscriptionProfile::new(start_position).consumer_group(group).options()` (omit `consumer_group` when not used). The profile requires an explicit `StartPosition` and always starts with durable options; a later `.durability(Ephemeral)` is rejected by the Redis capability check.
 
 New entries returned from `XREADGROUP >` expose `provider_attempt() == Some(1)`. Pending and `XAUTOCLAIM` recovery entries remain `None` because the historical delivery count is not propagated yet. Existing wire v1 records, Redis groups, and settlement behavior remain compatible. Core 0.19 also changes `CodecRegistry::register` to return an error on duplicate payload registration; see the [core migration guide](https://github.com/qubit-ltd/rs-event-bus/blob/main/doc/migration.md).
 

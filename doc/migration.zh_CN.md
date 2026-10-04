@@ -2,9 +2,27 @@
 
 [English](migration.md) · [用户指南](user_guide.zh_CN.md)
 
+## 当前版本配套关系
+
+当前 provider manifest 版本为 0.7，并依赖 core 0.20。使用此工作区版本
+时请保持这两个版本配套。下文记录 provider 0.6 到 0.7 的 API 迁移；该次
+迁移最初发布时配套 core 0.19，早于 core 0.20 的准备。
+
+### Core 0.20 配套说明
+
+Redis 不提供逐目标接纳信息。调用 `publish_checked` 时应使用
+`AdmissionRequirement::ProviderOrDestinationAccepted`；要求更严格的逐目标
+条件会在发布前返回 `CheckedPublishError::UnsupportedVisibility`。provider 接纳
+不表示 handler 已处理事件，也不代表 Redis 已将数据持久化到磁盘。Core 默认在
+检测到投递缺口后停止订阅；只有应用能接受消息遗漏且已有恢复策略时，才选择
+`GapPolicy::Continue`。新读取的 stream entry 报告 provider attempt `Some(1)`；
+pending 和 claim 恢复消息的次数未知（`None`）。现有 wire v1 记录、stream、消费组和
+pending entry 无需格式迁移。保留策略仍可能删除未读取或 pending 历史并造成缺口。
+
 ## 从 provider 0.6 升级到 0.7
 
-将 `qubit-event-bus-redis` 升级到 0.7 时，同时将 `qubit-event-bus` 升级到 0.20。把重复设置 `durability(Durable)`、`start_position(...)` 和可选 `consumer_group(...)` 的代码改为 `RedisSubscriptionProfile::new(start_position).consumer_group(group).options()`；不使用消费组时省略 `consumer_group`。profile 要求明确指定 `StartPosition`，并始终生成 durable options；后续 `.durability(Ephemeral)` 会被 Redis capability 检查拒绝。
+provider 0.7 最初迁移时与 `qubit-event-bus` 0.19 配套。当前 provider 0.7
+manifest 使用 core 0.20。把重复设置 `durability(Durable)`、`start_position(...)` 和可选 `consumer_group(...)` 的代码改为 `RedisSubscriptionProfile::new(start_position).consumer_group(group).options()`；不使用消费组时省略 `consumer_group`。profile 要求明确指定 `StartPosition`，并始终生成 durable options；后续 `.durability(Ephemeral)` 会被 Redis capability 检查拒绝。
 
 由 `XREADGROUP >` 返回的新消息会通过 `provider_attempt()` 报告 `Some(1)`。pending 和 `XAUTOCLAIM` 恢复消息仍为 `None`，因为 provider 尚未传递历史投递次数。既有 wire v1 记录、Redis group 和结算行为保持可用。Core 0.19 的 `CodecRegistry::register` 遇到重复载荷类型也会返回错误，详见[核心迁移指南](https://github.com/qubit-ltd/rs-event-bus/blob/main/doc/migration.zh_CN.md)。
 

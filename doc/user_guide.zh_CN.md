@@ -488,7 +488,7 @@ Redis 持久化和复制由部署负责。`Accepted` 只证明 XADD 被接受，
 
 ## 12. 从 provider 0.6 升级
 
-将 `qubit-event-bus-redis` 升级到 0.7 时，也要将 `qubit-event-bus` 升级到 0.20。新版 `RedisSubscriptionProfile` 根据明确的 `StartPosition` 构造 durable 订阅选项；创建新订阅时使用它，并保留预期的消费组。核心 codec 注册现在会拒绝重复载荷类型并返回 `Result`；要传播错误，使用 `?`，确需替换时才调用 `replace`。`InboundMessage` 增加可选 provider attempt 元数据，但 `into_parts` tuple 保持原样。保留 wire 版本 1 数据和现有消费组；发布前应验证 pending 记录，并按上文分别采集 provider 快照与 Redis PEL/内存。[迁移指南](migration.zh_CN.md)列出完整变更。
+provider 0.7 最初迁移时与 core 0.19 配套；当前 provider 0.7 manifest 使用 core 0.20。新版 `RedisSubscriptionProfile` 根据明确的 `StartPosition` 构造 durable 订阅选项；创建新订阅时使用它，并保留预期的消费组。核心 codec 注册现在会拒绝重复载荷类型并返回 `Result`；要传播错误，使用 `?`，确需替换时才调用 `replace`。`InboundMessage` 增加可选 provider attempt 元数据，但 `into_parts` tuple 保持原样。保留 wire 版本 1 数据和现有消费组；发布前应验证 pending 记录，并按上文分别采集 provider 快照与 Redis PEL/内存。[迁移指南](migration.zh_CN.md)列出完整变更。
 
 
 参阅[设计说明](design.zh_CN.md)、[覆盖率证据](coverage-review.zh_CN.md)和[工作负载基准](connection-reuse-benchmark.zh_CN.md)。性能、覆盖率须以各自测量为证；本指南没有宣称新的吞吐量或最终覆盖率结果。

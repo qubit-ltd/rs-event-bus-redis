@@ -51,7 +51,7 @@ Redis 使用至少一次投递，业务 handler 应能处理重复事件。`XADD
 
 provider 对单条 wire、payload 和解码后的 headers 字符串设置有限容量，默认分别为 8 MiB、1 MiB 和 64 KiB；facade 另有默认各 1 MiB 的编码发布/接收限制。接收超限会停止订阅，保留 pending 记录，不确认也不隔离。公开发布错误可通过 `PublishFailure.effect()` 判断效果；`XADD` 回复丢失属于未知结果，默认禁止盲目重发。仍支持 wire 版本 1。升级步骤见[迁移指南](doc/migration.zh_CN.md)。
 
-核心 facade 分别限制 handler 运行数、全局持有投递数、每订阅持有量和注册订阅数。`RedisSubscriptionProfile` 要求明确指定起始位置，并构造 durable options；Redis 新读取的 stream entry 报告 provider attempt `Some(1)`，pending 和 claim 恢复的历史次数仍未知。结算只对明确可重试的错误执行有限重试，重试性未知时停止订阅。[用户指南](doc/user_guide.zh_CN.md) 说明首个终止原因、投递指标、持久恢复，以及限制等待时间但不保证强制退出进程的关闭策略。
+Core 0.20 分别限制 handler 运行数、全局持有投递数、每订阅持有量和注册订阅数。`RedisSubscriptionProfile` 要求明确指定起始位置，并构造 durable options；Redis 新读取的 stream entry 报告 provider attempt `Some(1)`，pending 和 claim 恢复的历史次数仍未知。结算只对明确可重试的错误执行有限重试，重试性未知时停止订阅。[用户指南](doc/user_guide.zh_CN.md) 说明首个终止原因、投递指标、持久恢复、provider snapshot 采集，以及限制等待时间但不保证强制退出进程的关闭策略。
 
 ## 延伸阅读
 
