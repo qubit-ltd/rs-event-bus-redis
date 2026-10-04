@@ -6,6 +6,7 @@
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 //! Fail-fast command admission observed while another XADD is pending.
+#[cfg(feature = "sync")]
 use std::any::TypeId;
 use std::sync::Arc;
 use std::sync::mpsc::channel;
@@ -18,16 +19,22 @@ use futures_lite::future::block_on;
 use futures_lite::future::poll_once;
 use qubit_event_bus::EventBusConfig;
 use qubit_event_bus::model::ProviderOptions;
+#[cfg(feature = "sync")]
 use qubit_event_bus::model::StartPosition;
+#[cfg(feature = "sync")]
 use qubit_event_bus::model::SubscriberId;
+#[cfg(feature = "sync")]
 use qubit_event_bus::model::SubscriptionDurability;
+#[cfg(feature = "sync")]
 use qubit_event_bus::spi::SpiSubscriptionRequest;
+#[cfg(feature = "sync")]
 use qubit_event_bus::spi::TopicAddress;
 use qubit_event_bus_redis::r#async::AsyncRedisEventBusProvider;
 use qubit_event_bus_redis::diagnostics::RedisProviderDiagnostics;
 use qubit_event_bus_redis::diagnostics::RedisProviderSnapshot;
 #[cfg(feature = "sync")]
 use qubit_event_bus_redis::sync::RedisEventBusProvider;
+#[cfg(feature = "sync")]
 use qubit_id::Id;
 use qubit_spi::AsyncServiceProvider;
 #[cfg(feature = "sync")]
