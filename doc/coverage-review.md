@@ -12,13 +12,13 @@ The sixth full CI attempt on 2026-09-29 exited with status 0. Its clean package 
 | Lines | 3,755/3,913 (95.96%) | above 90% |
 | Regions | 5,821/6,160 (94.50%) | above 85% |
 
-Coverage runs through `ci-check.sh` → `project-hook` → `project-ci-check.sh` → `coverage.sh`, selecting `qubit-event-bus-redis` with `--locked --all-features -- --test-threads=1`. The file summaries cover 39 provider `src` files, excluding external `tests`, `src/tests`, `examples` and upstream package paths. Inline private tests and helpers in the included source files participate in the LLVM summaries, so these metrics are not coverage of production declarations alone. Their denominator differs from the manual Rustdoc declaration count. The raw and processed totals, `ci-summary.json`, and sums of the 39 file summaries agree for functions, lines and regions.
+Coverage runs through `.infra/bin/ci-check.sh` → `project-hook` → `project-ci-check.sh` → `.infra/bin/coverage.sh`, selecting `qubit-event-bus-redis` with `--locked --all-features -- --test-threads=1`. The file summaries cover 39 provider `src` files, excluding external `tests`, `src/tests`, `examples` and upstream package paths. Inline private tests and helpers in the included source files participate in the LLVM summaries, so these metrics are not coverage of production declarations alone. Their denominator differs from the manual Rustdoc declaration count. The raw and processed totals, `ci-summary.json`, and sums of the 39 file summaries agree for functions, lines and regions.
 
-`coverage.sh` cleans profile data before building the instrumented examples and measuring coverage. All 26 profiles in CI6 were created after its start at 2026-09-29 13:54:33 UTC; none predates this attempt. The measured source seal contains 154 Rust files and `coverage.sh` (155 entries), SHA256 `02510d2bb99983c7a6b6977bebdec34bf99b83faaeaefc0a567bfab1eb7a9861`. Baseline HEAD was `5e36aede24c5db5de2e282932546de2fe500e9c2`; the measured changes were still uncommitted, so that HEAD identifies the baseline, not the complete measured source. Cargo remains at `0.4.0`, and these changes are unreleased.
+`.infra/bin/coverage.sh` cleans profile data before building the instrumented examples and measuring coverage. All 26 profiles in CI6 were created after its start at 2026-09-29 13:54:33 UTC; none predates this attempt. The measured source seal contains 154 Rust files and `.infra/bin/coverage.sh` (155 entries), SHA256 `02510d2bb99983c7a6b6977bebdec34bf99b83faaeaefc0a567bfab1eb7a9861`. Baseline HEAD was `5e36aede24c5db5de2e282932546de2fe500e9c2`; the measured changes were still uncommitted, so that HEAD identifies the baseline, not the complete measured source. Cargo remains at `0.4.0`, and these changes are unreleased.
 
 The coverage hook ran 23 suites: 302 passed, zero failed and one ignored legacy manual benchmark. The earlier verification phase passed 310 tests including eight doctests, with one ignored benchmark. These counts describe separate executions and exclude feature-matrix repetitions. The configured nine variants passed: default, no default features, sync, async, sync+discovery, async+discovery, sync+conformance, async+conformance and all features. Full CI also passed strict style/Clippy/Rustdoc, README checks, release build, package verification and the dependency audit of 148 dependencies. Five additional locked minimal/discovery checks also passed in separate runs; their test executions are not added to the 302 coverage-hook tests.
 
-CI6 ran `RS_INFRA_ARTIFACT_CLEANUP=0 ./ci-check.sh` on `x86_64-unknown-linux-gnu`, using rustc `1.94.0` (`4a4ef493e`, LLVM `21.1.8`), cargo-llvm-cov `0.8.6`, and the pinned style toolchain `nightly-2026-06-05`. The parent process supplied no overrides for `CARGO_INCREMENTAL`, `RUSTFLAGS`, `RUSTDOCFLAGS`, `LLVM_PROFILE_FILE` or `RUST_TEST_THREADS`; coverage tools derive their instrumentation environment, and the test invocation explicitly uses one test thread. These parent-environment facts do not imply that the instrumented child variables are unset. The measured dependency was the local `qubit-event-bus` `0.16.0`; this run does not establish registry availability.
+CI6 ran `RS_INFRA_ARTIFACT_CLEANUP=0 ./.infra/bin/ci-check.sh` on `x86_64-unknown-linux-gnu`, using rustc `1.94.0` (`4a4ef493e`, LLVM `21.1.8`), cargo-llvm-cov `0.8.6`, and the pinned style toolchain `nightly-2026-06-05`. The parent process supplied no overrides for `CARGO_INCREMENTAL`, `RUSTFLAGS`, `RUSTDOCFLAGS`, `LLVM_PROFILE_FILE` or `RUST_TEST_THREADS`; coverage tools derive their instrumentation environment, and the test invocation explicitly uses one test thread. These parent-environment facts do not imply that the instrumented child variables are unset. The measured dependency was the local `qubit-event-bus` `0.16.0`; this run does not establish registry availability.
 
 | Artifact | SHA256 |
 | --- | --- |
@@ -53,8 +53,8 @@ The 306/312, 2,910/3,038 and 4,591/4,812 measurements below were recorded in com
 
 ## Historical coverage: 0.4.0 candidate snapshots
 
-The package coverage gate uses the metrics collected by `coverage.sh` and
-`ci-check.sh`. The 0.4.0 release-candidate measurement was:
+The package coverage gate uses the metrics collected by `.infra/bin/coverage.sh` and
+`.infra/bin/ci-check.sh`. The 0.4.0 release-candidate measurement was:
 
 | Metric | 0.4.0 candidate | Required |
 | --- | ---: | ---: |
@@ -63,11 +63,11 @@ The package coverage gate uses the metrics collected by `coverage.sh` and
 | Regions | 4,591/4,812 (95.41%) | above 85% |
 
 The historical report records that all three coverage thresholds passed. Function/line/region totals came from
-the then-current `ci-check.sh` coverage run. Region counts can vary slightly between runs
+the then-current `.infra/bin/ci-check.sh` coverage run. Region counts can vary slightly between runs
 because deadline and recovery interval tests exercise timed paths.
 
-Verification on 2026-09-29 used `./align-ci.sh` followed by the full
-`./ci-check.sh`, with the repository's pinned toolchains and default test
+Verification on 2026-09-29 used `./.infra/bin/align-ci.sh` followed by the full
+`./.infra/bin/ci-check.sh`, with the repository's pinned toolchains and default test
 concurrency. The run covered the default/all-feature test suite, the feature
 matrix, strict Clippy/Rustdoc, package verification, coverage, and dependency
 security checks. The report records that all thresholds passed. That run used the isolated local Cargo

@@ -87,10 +87,10 @@ cargo test
 cargo test --all-features
 
 # Project CI checks
-./ci-check.sh
+./.infra/bin/ci-check.sh
 
 # Check code coverage
-./coverage.sh
+./.infra/bin/coverage.sh
 ```
 
 ## License
@@ -103,8 +103,8 @@ full license text.
 ## Contributing
 
 Contributions are welcome. Please follow the Rust API guidelines, keep public
-API documentation and tests current, and run `./align-ci.sh` to format code and
-`./ci-check.sh` to satisfy CI requirements before submitting a pull request.
+API documentation and tests current, and run `./.infra/bin/align-ci.sh` to format code and
+`./.infra/bin/ci-check.sh` to satisfy CI requirements before submitting a pull request.
 
 ## Author
 

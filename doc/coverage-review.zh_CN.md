@@ -12,13 +12,13 @@
 | 行 | 3,755/3,913（95.96%） | 高于 90% |
 | 区域 | 5,821/6,160（94.50%） | 高于 85% |
 
-覆盖率执行链为 `ci-check.sh` → `project-hook` → `project-ci-check.sh` → `coverage.sh`，选择 `qubit-event-bus-redis`，使用 `--locked --all-features -- --test-threads=1`。文件汇总覆盖 39 个 provider `src` 文件，排除外部 `tests`、`src/tests`、`examples` 和上游包路径。被纳入文件中的内联私有测试与 helper 也参与 LLVM 汇总，因此这些指标不等于仅生产声明的覆盖率，其分母与手工 Rustdoc 声明计数不同。原始及处理后的报告、`ci-summary.json` 和 39 个文件汇总的函数、行及区域计数完全一致。
+覆盖率执行链为 `.infra/bin/ci-check.sh` → `project-hook` → `project-ci-check.sh` → `.infra/bin/coverage.sh`，选择 `qubit-event-bus-redis`，使用 `--locked --all-features -- --test-threads=1`。文件汇总覆盖 39 个 provider `src` 文件，排除外部 `tests`、`src/tests`、`examples` 和上游包路径。被纳入文件中的内联私有测试与 helper 也参与 LLVM 汇总，因此这些指标不等于仅生产声明的覆盖率，其分母与手工 Rustdoc 声明计数不同。原始及处理后的报告、`ci-summary.json` 和 39 个文件汇总的函数、行及区域计数完全一致。
 
-`coverage.sh` 在构建插桩示例及测量前清理 profile 数据。CI6 的全部 26 份 profile 都产生于本次开始时间 2026-09-29 13:54:33 UTC 之后，没有早于本次运行的 profile。实测源码 seal 包含 154 个 Rust 文件及 `coverage.sh`，共 155 项，SHA256 为 `02510d2bb99983c7a6b6977bebdec34bf99b83faaeaefc0a567bfab1eb7a9861`。基线 HEAD 为 `5e36aede24c5db5de2e282932546de2fe500e9c2`；实测变更当时尚未提交，因此该 HEAD 标识基线，不能代表全部实测源码。Cargo 版本仍为 `0.4.0`，变更尚未发布。
+`.infra/bin/coverage.sh` 在构建插桩示例及测量前清理 profile 数据。CI6 的全部 26 份 profile 都产生于本次开始时间 2026-09-29 13:54:33 UTC 之后，没有早于本次运行的 profile。实测源码 seal 包含 154 个 Rust 文件及 `.infra/bin/coverage.sh`，共 155 项，SHA256 为 `02510d2bb99983c7a6b6977bebdec34bf99b83faaeaefc0a567bfab1eb7a9861`。基线 HEAD 为 `5e36aede24c5db5de2e282932546de2fe500e9c2`；实测变更当时尚未提交，因此该 HEAD 标识基线，不能代表全部实测源码。Cargo 版本仍为 `0.4.0`，变更尚未发布。
 
 覆盖率 hook 执行 23 个 suite：302 项通过、0 项失败、1 项旧手工基准忽略。此前 verify 阶段有 310 项通过，包括 8 项 doctest，另有 1 项基准忽略。两组计数对应不同执行，不累计 feature matrix 重复次数。配置中的九种组合均通过：默认、无默认 feature、sync、async、sync+discovery、async+discovery、sync+conformance、async+conformance 及 all-features。完整 CI 还通过严格 style/Clippy/Rustdoc、README 检查、release 构建、打包验证，以及覆盖 148 个依赖的安全检查。另有五项 locked 最小 feature/discovery 检查也在独立运行中通过，其测试执行不重复累计到覆盖率 hook 的 302 项。
 
-CI6 在 `x86_64-unknown-linux-gnu` 上执行 `RS_INFRA_ARTIFACT_CLEANUP=0 ./ci-check.sh`，使用 rustc `1.94.0`（`4a4ef493e`，LLVM `21.1.8`）、cargo-llvm-cov `0.8.6` 及固定的 style toolchain `nightly-2026-06-05`。父进程未覆盖 `CARGO_INCREMENTAL`、`RUSTFLAGS`、`RUSTDOCFLAGS`、`LLVM_PROFILE_FILE` 或 `RUST_TEST_THREADS`；覆盖率工具会派生插桩环境，测试命令显式使用单测试线程。这些父进程环境事实不表示插桩子进程变量未设置。实测依赖为本地 `qubit-event-bus` `0.16.0`，此次运行不能证明 registry 已可用。
+CI6 在 `x86_64-unknown-linux-gnu` 上执行 `RS_INFRA_ARTIFACT_CLEANUP=0 ./.infra/bin/ci-check.sh`，使用 rustc `1.94.0`（`4a4ef493e`，LLVM `21.1.8`）、cargo-llvm-cov `0.8.6` 及固定的 style toolchain `nightly-2026-06-05`。父进程未覆盖 `CARGO_INCREMENTAL`、`RUSTFLAGS`、`RUSTDOCFLAGS`、`LLVM_PROFILE_FILE` 或 `RUST_TEST_THREADS`；覆盖率工具会派生插桩环境，测试命令显式使用单测试线程。这些父进程环境事实不表示插桩子进程变量未设置。实测依赖为本地 `qubit-event-bus` `0.16.0`，此次运行不能证明 registry 已可用。
 
 | 产物 | SHA256 |
 | --- | --- |
@@ -53,7 +53,7 @@ CI3 的覆盖率 hook 有 285 项通过、1 项基准忽略，随后因函数门
 
 ## 历史覆盖率：0.4.0 候选快照
 
-项目使用 `coverage.sh` 和 `ci-check.sh` 收集的包级指标执行覆盖率门槛检查。
+项目使用 `.infra/bin/coverage.sh` 和 `.infra/bin/ci-check.sh` 收集的包级指标执行覆盖率门槛检查。
 0.4.0 发布候选历史快照的结果如下：
 
 | 指标 | 0.4.0 候选版本 | 要求 |
@@ -62,12 +62,12 @@ CI3 的覆盖率 hook 有 285 项通过、1 项基准忽略，随后因函数门
 | 行 | 2,910/3,038（95.79%） | 高于 90% |
 | 区域 | 4,591/4,812（95.41%） | 高于 85% |
 
-历史报告记载该测量的三个门槛均通过。函数、行和区域总数来自当时完整 `ci-check.sh`
+历史报告记载该测量的三个门槛均通过。函数、行和区域总数来自当时完整 `.infra/bin/ci-check.sh`
 覆盖率运行。部分截止时间和恢复间隔测试依赖计时，区域计数在不同运行之间
 可能略有变化。
 
-2026-09-29 使用仓库固定的工具链及默认测试并发度，先运行 `./align-ci.sh`，
-再运行完整 `./ci-check.sh`。默认及 all-features 测试、feature matrix、严格
+2026-09-29 使用仓库固定的工具链及默认测试并发度，先运行 `./.infra/bin/align-ci.sh`，
+再运行完整 `./.infra/bin/ci-check.sh`。默认及 all-features 测试、feature matrix、严格
 Clippy/Rustdoc、打包验证、覆盖率和依赖安全检查均通过。当时使用了指向尚未
 发布的 `qubit-event-bus` 0.15.0 本地快照的隔离 Cargo patch；该结果不能证明
 上游 registry 已可用。当时未重新运行手工连接复用基准，历史报告引用的基准数据
