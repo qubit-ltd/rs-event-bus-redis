@@ -11,4 +11,4 @@ fuzz_version = "0.13.2"
 coverage_cfg_clippy = false
 audit_cached_fallback = true
 matrix = ".infra/ci/cargo-matrix.json"
-hook = "project-ci-check.sh"
+hook = ".infra/bin/project-ci-check.sh"
