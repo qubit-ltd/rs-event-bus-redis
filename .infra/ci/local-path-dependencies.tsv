@@ -1,2 +1,5 @@
 # relative git root<TAB>repository URL<TAB>default branch
 ../rs-event-bus	https://github.com/qubit-ltd/rs-event-bus	dev-starfish
+../rs-task	https://github.com/qubit-ltd/rs-task	dev-starfish
+../rs-codec	https://github.com/qubit-ltd/rs-codec	dev-starfish
+../rs-model-metadata	https://github.com/qubit-ltd/rs-model-metadata	dev-starfish
