@@ -261,13 +261,23 @@ fn test_markdown_fragments_and_programs_publish_settle_and_close() -> Result<(),
             let target = root.join("target/markdown-documentation/consumer-target");
             run_command(
                 Command::new("cargo")
-                    .args(["generate-lockfile", "--offline", "--manifest-path"])
+                    .args(["generate-lockfile", "--manifest-path"])
                     .arg(&cargo_manifest)
-                    .env("CARGO_TARGET_DIR", &target),
+                    .env("CARGO_TARGET_DIR", &target)
+                    .env("CARGO_NET_RETRY", "10"),
                 &evidence.join(format!("{id}-lock")),
-                Duration::from_secs(60),
+                Duration::from_secs(180),
             )?;
             fs::copy(project.path().join("Cargo.lock"), evidence.join(format!("{id}.lock")))?;
+            run_command(
+                Command::new("cargo")
+                    .args(["fetch", "--locked", "--manifest-path"])
+                    .arg(&cargo_manifest)
+                    .env("CARGO_TARGET_DIR", &target)
+                    .env("CARGO_NET_RETRY", "10"),
+                &evidence.join(format!("{id}-fetch")),
+                Duration::from_secs(180),
+            )?;
             let graph = run_command(
                 Command::new("cargo")
                     .args([
