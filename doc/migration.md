@@ -39,6 +39,33 @@ explains the `decode(&EncodedPayload)`, `PublishFailure`, and `PayloadLimits`
 API changes. Register migrated codecs with exact metadata validation, or an
 explicit documented historical schema allowlist.
 
+## Existing consumer group start position change
+
+This is a breaking behavior change for subscriptions that reuse a consumer
+group while requesting `StartPosition::Earliest` or `StartPosition::At(...)`.
+Redis keeps the cursor of an existing group and cannot apply the requested
+position during `XGROUP CREATE`. The default `redis.existing_group_start=reject`
+now returns the non-retryable `existing_group_start_position_ignored` error
+instead of silently resuming that cursor. `StartPosition::New` continues to
+resume an existing group's stored cursor. To create a group at a new position,
+choose a new group name. To deliberately preserve the old behavior and resume
+the existing cursor, add the explicit `resume` option:
+
+```rust
+use qubit_event_bus::model::{StartPosition, SubscribeOptions};
+
+let options = SubscribeOptions::<String>::builder()
+    .start_position(StartPosition::Earliest)
+    .provider_option("redis.existing_group_start", "resume")
+    .build();
+```
+
+`resume` never runs `XGROUP SETID`; it does not move the stored cursor. The
+option accepts only `reject` or `resume`, and an unknown `redis.*` key or
+invalid value fails before Redis network I/O. Do not retry
+`existing_group_start_position_ignored` unchanged: either select a new group
+name/start position, or explicitly opt in to `resume`.
+
 ## Migrate Redis command admission settings
 
 The short-command budget now defaults to 64 total slots, of which 8 are reserved

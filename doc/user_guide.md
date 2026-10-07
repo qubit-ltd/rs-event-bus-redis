@@ -334,7 +334,18 @@ Redis Streams provide at-least-once delivery, so make handlers idempotent. A slo
 
 Each subscription stops receiving new entries while its unsettled count reaches `redis.max_unsettled_per_subscription`. Settling or retrying an entry frees capacity. This bounds in-process delivery pressure; it does not limit Redis stream growth.
 
-`StartPosition::New` creates a group at the current stream tail. `Earliest` starts a new group at `0-0`. `At("milliseconds-sequence")` supplies a Redis Stream ID. Once a group exists, Redis retains its cursor, so changing the requested start position does not rewind that existing group.
+`StartPosition::New` creates a group at the current stream tail. If the group already exists, `New` resumes its stored cursor. `Earliest` starts a new group at `0-0`, and `At("milliseconds-sequence")` supplies a Redis Stream ID. Redis retains an existing group cursor, so the provider now rejects an existing group with `Earliest` or `At` using the non-retryable `existing_group_start_position_ignored` error; it does not silently ignore the requested start position. Use a different group name when you intend to create a group at a new position. If you intentionally want to resume the existing cursor while keeping an `Earliest` or `At` profile, opt in explicitly:
+
+```rust
+use qubit_event_bus::model::{StartPosition, SubscribeOptions};
+
+let options = SubscribeOptions::<String>::builder()
+    .start_position(StartPosition::Earliest)
+    .provider_option("redis.existing_group_start", "resume")
+    .build();
+```
+
+The default policy is `reject`; the only accepted values are `reject` and `resume`. `resume` accepts the existing Redis cursor and never issues `XGROUP SETID`, so it does not change or rewind that cursor. An unknown `redis.*` subscription option or an invalid value fails before Redis network I/O.
 
 Without `redis.stream_maxlen_approx`, the provider does not trim streams; it never deletes groups automatically. Monitor Redis memory and stream growth. Before deleting a stream or group, stop consumers and decide how to handle every pending event; deleting pending records can produce `ReceiveOutcome::Gap`. Configure Redis persistence and replication to match the application's recovery objectives: `Accepted` does not mean fsynced, and Sentinel replication can lose writes that were not replicated before promotion.
 

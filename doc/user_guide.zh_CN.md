@@ -334,7 +334,18 @@ Redis 提供至少一次投递，因此 handler 应具备幂等性。新消息�
 
 每个订阅第一次 `receive` 都会立即检查 pending。后续 receive 调用共享恢复截止时间：在 `redis.recovery_interval_ms`（默认 1,000 毫秒，范围 50–60,000）到期前只读新记录，不重复扫描；长时间等待的 receive 仍会在间隔到期时继续恢复扫描。Retry、receive 错误或已 poll 的 async receive 被取消时，会强制下一次调用执行恢复。调小间隔能更快接管达到 idle threshold 的 pending 消息，同时会增加 Redis 扫描命令。
 
-`StartPosition::New` 会在当前 stream 尾部创建 group；`Earliest` 会从 `0-0` 开始创建新 group；`At("milliseconds-sequence")` 使用 Redis Stream ID。group 一旦创建，读取游标由 Redis 保留；之后更改请求的 start position 不会重置现有 group。
+`StartPosition::New` 会在当前 stream 尾部创建 group；如果 group 已存在，则从已保存游标继续。`Earliest` 会从 `0-0` 开始创建新 group；`At("milliseconds-sequence")` 使用 Redis Stream ID。Redis 会保留已有 group 的游标，因此现在对已有 group 使用 `Earliest` 或 `At` 会返回不可重试的 `existing_group_start_position_ignored`，不会静默忽略请求的起始位置。若要从新位置建组，请更换 group 名称。若你明确要保留 `Earliest` 或 `At` 配置但继续读取旧游标，请显式启用：
+
+```rust
+use qubit_event_bus::model::{StartPosition, SubscribeOptions};
+
+let options = SubscribeOptions::<String>::builder()
+    .start_position(StartPosition::Earliest)
+    .provider_option("redis.existing_group_start", "resume")
+    .build();
+```
+
+默认策略为 `reject`，唯一合法值是 `reject` 和 `resume`。`resume` 接受 Redis 中已有游标，绝不会执行 `XGROUP SETID`，因此不会修改或回退该游标。未知的 `redis.*` 订阅选项或非法值会在 Redis 网络 I/O 前失败。
 
 未设置 `redis.stream_maxlen_approx` 时，provider 不会裁剪 stream，也不会自动删除 group。应监控 Redis 内存和 stream 增长。删除 stream 或 group 前，先停止 consumer 并决定如何处理 pending 消息；删除 pending record 可能导致 `ReceiveOutcome::Gap`。Redis persistence 和 replication 配置需符合业务恢复目标：`Accepted` 不代表已 fsync，Sentinel 切换也可能丢失尚未复制的写入。
 

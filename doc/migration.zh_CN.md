@@ -32,6 +32,30 @@ manifest 使用 core 0.20。把重复设置 `durability(Durable)`、`start_posit
 `PayloadLimits` 的迁移见[核心迁移指南](https://github.com/qubit-ltd/rs-event-bus/blob/main/doc/migration.zh_CN.md)。
 codec 应精确验证元数据；需要读取历史 schema 时，明确记录并实现允许的版本集合。
 
+## 已有消费组起始位置变更
+
+当订阅复用已有消费组，同时请求 `StartPosition::Earliest` 或
+`StartPosition::At(...)` 时，这是破坏性行为变更。Redis 会保留已有 group
+的游标，`XGROUP CREATE` 无法对已有 group 应用请求的起始位置。默认策略
+`redis.existing_group_start=reject` 现在会返回不可重试的
+`existing_group_start_position_ignored`，不再静默沿用旧游标。`StartPosition::New`
+仍会从已有 group 保存的游标继续。若要从新位置创建 group，请更换 group 名称；
+若要明确保留旧行为并继续读取已有游标，请显式设置 `resume`：
+
+```rust
+use qubit_event_bus::model::{StartPosition, SubscribeOptions};
+
+let options = SubscribeOptions::<String>::builder()
+    .start_position(StartPosition::Earliest)
+    .provider_option("redis.existing_group_start", "resume")
+    .build();
+```
+
+`resume` 不会执行 `XGROUP SETID`，也不会移动已保存游标。该 option 只接受
+`reject` 或 `resume`；未知的 `redis.*` 键或非法值会在 Redis 网络 I/O 前失败。
+不要原样重试 `existing_group_start_position_ignored`：应更换 group 名称或起始
+位置，或者显式选择 `resume`。
+
 ## 迁移 Redis 命令准入设置
 
 短命令总额度现在默认 64，其中 8 个名额保留给结算。专用 receiver 连接使用独立的 256 个默认上限，不占短命令额度。配置 `redis.max_concurrent_commands=1` 将被拒绝；没有保留旧行为的开关。总额度至少为 2。省略保留数时默认 `min(8, 总额 - 1)`；只有需要自定义保留数时才显式设置 `redis.reserved_settlement_commands`。命令限制属于每个已创建的 provider 实例，因此还须单独核算多个实例和其他 Redis 客户端。
