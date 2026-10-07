@@ -336,6 +336,7 @@ Each subscription stops receiving new entries while its unsettled count reaches 
 
 `StartPosition::New` creates a group at the current stream tail. If the group already exists, `New` resumes its stored cursor. `Earliest` starts a new group at `0-0`, and `At("milliseconds-sequence")` supplies a Redis Stream ID. Redis retains an existing group cursor, so the provider now rejects an existing group with `Earliest` or `At` using the non-retryable `existing_group_start_position_ignored` error; it does not silently ignore the requested start position. Use a different group name when you intend to create a group at a new position. If you intentionally want to resume the existing cursor while keeping an `Earliest` or `At` profile, opt in explicitly:
 
+<!-- doc-example: existing-group-resume -->
 ```rust
 use qubit_event_bus::model::{StartPosition, SubscribeOptions};
 

@@ -336,6 +336,7 @@ Redis 提供至少一次投递，因此 handler 应具备幂等性。新消息�
 
 `StartPosition::New` 会在当前 stream 尾部创建 group；如果 group 已存在，则从已保存游标继续。`Earliest` 会从 `0-0` 开始创建新 group；`At("milliseconds-sequence")` 使用 Redis Stream ID。Redis 会保留已有 group 的游标，因此现在对已有 group 使用 `Earliest` 或 `At` 会返回不可重试的 `existing_group_start_position_ignored`，不会静默忽略请求的起始位置。若要从新位置建组，请更换 group 名称。若你明确要保留 `Earliest` 或 `At` 配置但继续读取旧游标，请显式启用：
 
+<!-- doc-example: existing-group-resume -->
 ```rust
 use qubit_event_bus::model::{StartPosition, SubscribeOptions};
 

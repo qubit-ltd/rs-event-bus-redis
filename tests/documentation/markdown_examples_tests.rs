@@ -107,6 +107,7 @@ fn assemble(blocks: &[MarkdownBlock], tag: &str) -> String {
     match tag {
         "codec" | "sync-discovery" => format!("{codec}\n{}", code(blocks, "sync-discovery")),
         "async-discovery" => format!("{codec}\n{}", code(blocks, "async-discovery")),
+        "existing-group-resume" => format!("fn main() {{\n{}\n}}", code(blocks, tag)),
         "sync-manual" | "async-manual" => {
             let asynchronous = tag == "async-manual";
             let registry = if asynchronous {
@@ -260,7 +261,8 @@ fn test_markdown_fragments_and_programs_publish_settle_and_close() -> Result<(),
                 "sync-discovery",
                 "async-discovery",
                 "sync-manual",
-                "async-manual"
+                "async-manual",
+                "existing-group-resume"
             ],
             "every actual Markdown Rust block must be executed"
         );
@@ -342,6 +344,10 @@ fn test_markdown_fragments_and_programs_publish_settle_and_close() -> Result<(),
                 &evidence.join(format!("{id}-run")),
                 Duration::from_secs(15),
             )?;
+            if tag == "existing-group-resume" {
+                println!("validated Markdown {guide} block {tag}: options compile and execute");
+                continue;
+            }
             let expected = if tag.starts_with("async") {
                 "order-43"
             } else {
