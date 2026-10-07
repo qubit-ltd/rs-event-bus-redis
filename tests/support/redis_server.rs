@@ -16,6 +16,14 @@ use std::time::Duration;
 
 use redis::Client;
 
+/// Returns whether Redis accepts a command after opening a connection.
+fn responds_to_ping(url: &str) -> bool {
+    Client::open(url)
+        .and_then(|client| client.get_connection())
+        .and_then(|mut connection| redis::cmd("PING").query::<String>(&mut connection))
+        .is_ok_and(|reply| reply == "PONG")
+}
+
 /// Owns a Redis container and removes it when dropped.
 pub struct RedisServer {
     container_id: String,
@@ -56,7 +64,11 @@ impl RedisServer {
             ])
             .output()?;
         if !output.status.success() {
-            return Err(format!("docker run failed: {}", String::from_utf8_lossy(&output.stderr)).into());
+            return Err(format!(
+                "docker run failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )
+            .into());
         }
         let container_id = String::from_utf8(output.stdout)?.trim().to_owned();
         let server = Self {
@@ -64,10 +76,7 @@ impl RedisServer {
             url: format!("redis://127.0.0.1:{port}/"),
         };
         for _ in 0..50 {
-            if Client::open(server.url.as_str())
-                .and_then(|client| client.get_connection())
-                .is_ok()
-            {
+            if responds_to_ping(&server.url) {
                 return Ok(server);
             }
             sleep(Duration::from_millis(100));
@@ -81,7 +90,9 @@ impl RedisServer {
     /// Docker/Redis IO and returns process, unsuccessful restart, or
     /// readiness failure errors.
     pub fn restart(&mut self) -> Result<(), Box<dyn Error>> {
-        let output = Command::new("docker").args(["restart", &self.container_id]).output()?;
+        let output = Command::new("docker")
+            .args(["restart", &self.container_id])
+            .output()?;
         if !output.status.success() {
             return Err(format!(
                 "could not restart the isolated Redis server: {}",
@@ -90,10 +101,7 @@ impl RedisServer {
             .into());
         }
         for _ in 0..100 {
-            if Client::open(self.url.as_str())
-                .and_then(|client| client.get_connection())
-                .is_ok()
-            {
+            if responds_to_ping(&self.url) {
                 return Ok(());
             }
             sleep(Duration::from_millis(100));

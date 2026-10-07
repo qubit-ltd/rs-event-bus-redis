@@ -7,6 +7,10 @@
 // =============================================================================
 //! Public diagnostics and provider instance lifecycle.
 
+use std::sync::Mutex;
+use std::sync::MutexGuard;
+use std::sync::OnceLock;
+
 #[cfg(feature = "async")]
 use futures_lite::future::block_on;
 #[cfg(any(feature = "sync", feature = "async"))]
@@ -25,17 +29,29 @@ use qubit_spi::AsyncServiceProvider;
 #[cfg(feature = "sync")]
 use qubit_spi::ServiceProvider;
 
+/// Serializes tests that inspect the process-wide live-instance directory.
+fn lock_diagnostics_tests() -> MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// A sync and an async SPI each register their own correctly labeled instance.
 #[cfg(all(feature = "sync", feature = "async"))]
 #[test]
 fn test_snapshots_distinguish_sync_and_async_instances() {
-    let sync_options: ProviderOptions = [("redis.namespace".into(), "diagnostics_sync".into())].into();
-    let async_options: ProviderOptions = [("redis.namespace".into(), "diagnostics_async".into())].into();
+    let _guard = lock_diagnostics_tests();
+    let sync_options: ProviderOptions =
+        [("redis.namespace".into(), "diagnostics_sync".into())].into();
+    let async_options: ProviderOptions =
+        [("redis.namespace".into(), "diagnostics_async".into())].into();
     let sync = RedisEventBusProvider
         .create_configured(&EventBusConfig::default().with_provider_options(sync_options))
         .expect("create lazy sync provider");
     let asynchronous = block_on(
-        AsyncRedisEventBusProvider.create_configured(&EventBusConfig::default().with_provider_options(async_options)),
+        AsyncRedisEventBusProvider
+            .create_configured(&EventBusConfig::default().with_provider_options(async_options)),
     )
     .expect("create lazy async provider");
 
@@ -64,7 +80,9 @@ fn test_snapshots_distinguish_sync_and_async_instances() {
 #[cfg(feature = "sync")]
 #[test]
 fn test_snapshots_remove_dropped_spi() {
-    let options: ProviderOptions = [("redis.namespace".into(), "diagnostics_lifecycle".into())].into();
+    let _guard = lock_diagnostics_tests();
+    let options: ProviderOptions =
+        [("redis.namespace".into(), "diagnostics_lifecycle".into())].into();
     let id = {
         let bus = RedisEventBusProvider
             .create_configured(&EventBusConfig::default().with_provider_options(options))
@@ -75,7 +93,11 @@ fn test_snapshots_remove_dropped_spi() {
             .find(|snapshot| snapshot.namespace() == "diagnostics_lifecycle")
             .expect("new provider is registered")
             .instance_id();
-        assert!(snapshots.iter().any(|snapshot| snapshot.instance_id() == id));
+        assert!(
+            snapshots
+                .iter()
+                .any(|snapshot| snapshot.instance_id() == id)
+        );
         let _ = bus.capabilities();
         id
     };
@@ -92,6 +114,7 @@ fn test_snapshots_remove_dropped_spi() {
 #[cfg(feature = "sync")]
 #[test]
 fn test_snapshot_debug_redacts_connection_details() {
+    let _guard = lock_diagnostics_tests();
     let url = "redis://diagnostics-secret.example:6389/";
     let options: ProviderOptions = [
         ("redis.url".into(), url.into()),
@@ -122,9 +145,15 @@ fn test_snapshot_debug_redacts_connection_details() {
 #[cfg(feature = "async")]
 #[test]
 fn test_async_snapshot_lifecycle() {
-    let options: ProviderOptions = [("redis.namespace".into(), "diagnostics_async_lifecycle".into())].into();
+    let _guard = lock_diagnostics_tests();
+    let options: ProviderOptions = [(
+        "redis.namespace".into(),
+        "diagnostics_async_lifecycle".into(),
+    )]
+    .into();
     let config = EventBusConfig::default().with_provider_options(options);
-    let bus = block_on(AsyncRedisEventBusProvider.create_configured(&config)).expect("create lazy async provider");
+    let bus = block_on(AsyncRedisEventBusProvider.create_configured(&config))
+        .expect("create lazy async provider");
     let snapshots = RedisProviderDiagnostics::snapshots();
     let snapshot = snapshots
         .iter()
@@ -145,5 +174,6 @@ fn test_async_snapshot_lifecycle() {
 #[cfg(not(any(feature = "sync", feature = "async")))]
 #[test]
 fn test_snapshots_are_empty_without_provider_features() {
+    let _guard = lock_diagnostics_tests();
     assert!(RedisProviderDiagnostics::snapshots().is_empty());
 }
