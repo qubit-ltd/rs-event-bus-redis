@@ -243,11 +243,12 @@ fn test_sync_idle_pending_entry_reclaimed_after_subscription_clock_expires()
         recovering.receive(Duration::ZERO)?,
         ReceiveOutcome::TimedOut
     ));
-    let mut original = bus.subscribe(request(
+    let mut original = bus.subscribe(request_at(
         "events",
         "original-worker",
         "periodic-group",
         SubscriptionDurability::Durable,
+        StartPosition::New,
     )?)?;
     let _ = bus.publish(event("events", "periodic-pending", b"payload")?)?;
     let ReceiveOutcome::Message(_) = original.receive(Duration::ZERO)? else {
@@ -311,13 +312,31 @@ fn request(
     group: &str,
     durability: SubscriptionDurability,
 ) -> Result<SpiSubscriptionRequest, Box<dyn Error>> {
+    request_at(
+        topic,
+        subscriber,
+        group,
+        durability,
+        StartPosition::Earliest,
+    )
+}
+
+/// Builds a recovery request at `start_position` without network I/O;
+/// returns identifier validation errors before a receiver is opened.
+fn request_at(
+    topic: &str,
+    subscriber: &str,
+    group: &str,
+    durability: SubscriptionDurability,
+    start_position: StartPosition,
+) -> Result<SpiSubscriptionRequest, Box<dyn Error>> {
     Ok(SpiSubscriptionRequest::new(
         Id::new(SUBSCRIPTION_IDS.fetch_add(1, Ordering::Relaxed)),
         TopicAddress::new(topic)?,
         SubscriberId::new(subscriber)?,
         Some(ConsumerGroup::new(group)?),
         durability,
-        StartPosition::Earliest,
+        start_position,
         ProviderOptions::new(),
         TypeId::of::<Vec<u8>>(),
     ))
@@ -454,11 +473,12 @@ fn test_sync_rejects_foreign_settlement_and_is_idempotent_after_close() -> Resul
         "token-group",
         SubscriptionDurability::Durable,
     )?)?;
-    let mut other = bus.subscribe(request(
+    let mut other = bus.subscribe(request_at(
         "events",
         "token-other",
         "token-group",
         SubscriptionDurability::Durable,
+        StartPosition::New,
     )?)?;
     let ReceiveOutcome::Message(message) = owner.receive(Duration::from_secs(2))? else {
         return Err("message missing".into());
@@ -525,11 +545,12 @@ fn test_async_rejects_foreign_settlement_and_is_idempotent_after_close()
             )?)
             .await?;
         let mut other = bus
-            .subscribe(request(
+            .subscribe(request_at(
                 "events",
                 "token-other-async",
                 "token-group-async",
                 SubscriptionDurability::Durable,
+                StartPosition::New,
             )?)
             .await?;
         let ReceiveOutcome::Message(message) = owner.receive(Duration::from_secs(2)).await? else {
@@ -1398,11 +1419,12 @@ fn test_sync_long_receive_reclaims_after_idle_threshold_without_new_messages()
     assert_eq!(first_message.id().as_str(), "late-claim-sync");
     drop(first);
 
-    let mut second = bus.subscribe(request(
+    let mut second = bus.subscribe(request_at(
         "events",
         "second-worker",
         "late-claim-group",
         SubscriptionDurability::Durable,
+        StartPosition::New,
     )?)?;
     let ReceiveOutcome::Message(recovered) = second.receive(Duration::from_secs(3))? else {
         return Err("one long receive did not recover the idle pending message".into());
@@ -1437,11 +1459,12 @@ fn test_async_long_receive_reclaims_after_idle_threshold_without_new_messages()
         drop(first);
 
         let mut second = bus
-            .subscribe(request(
+            .subscribe(request_at(
                 "events",
                 "second-worker",
                 "late-claim-group",
                 SubscriptionDurability::Durable,
+                StartPosition::New,
             )?)
             .await?;
         let ReceiveOutcome::Message(recovered) = second.receive(Duration::from_secs(3)).await?
@@ -1642,11 +1665,12 @@ fn test_sync_tombstone_scan_counts_reported_quarantine_outcome() -> Result<(), B
             .query::<usize>(&mut observer)?,
         1
     );
-    let mut second = bus.subscribe(request(
+    let mut second = bus.subscribe(request_at(
         "events",
         "second-worker",
         "workers",
         SubscriptionDurability::Durable,
+        StartPosition::New,
     )?)?;
     // Simulate the quarantine status-1 reply to verify this protocol branch.
     proxy.replace_next_reply("EVAL", b":1\r\n");
@@ -1702,11 +1726,12 @@ fn test_async_tombstone_scan_counts_reported_quarantine_outcome() -> Result<(), 
             1
         );
         let mut second = bus
-            .subscribe(request(
+            .subscribe(request_at(
                 "events",
                 "second-worker",
                 "workers",
                 SubscriptionDurability::Durable,
+                StartPosition::New,
             )?)
             .await?;
         proxy.replace_next_reply("EVAL", b":1\r\n");

@@ -150,13 +150,18 @@ mod durable {
     /// Reuses one durable group while giving each receiver a fresh subscription
     /// ID.
     fn request(id: u64) -> SpiSubscriptionRequest {
+        request_at(id, StartPosition::Earliest)
+    }
+
+    /// Builds a durable request at `start_position` without Redis I/O.
+    fn request_at(id: u64, start_position: StartPosition) -> SpiSubscriptionRequest {
         SpiSubscriptionRequest::new(
             Id::new(id),
             TopicAddress::new("limits").unwrap(),
             SubscriberId::new("worker").unwrap(),
             Some(ConsumerGroup::new("group").unwrap()),
             SubscriptionDurability::Durable,
-            StartPosition::Earliest,
+            start_position,
             ProviderOptions::new(),
             TypeId::of::<Vec<u8>>(),
         )
@@ -215,7 +220,8 @@ mod durable {
             let count: usize = redis::cmd("XLEN").arg(&stream).query(&mut observer)?;
             assert_eq!(count, 1, "over-limit record was not deleted");
             let widened = bus(server.url(), &namespace, key, exact);
-            let mut recovered = widened.subscribe(request(20 + index as u64))?;
+            let mut recovered =
+                widened.subscribe(request_at(20 + index as u64, StartPosition::New))?;
             let ReceiveOutcome::Message(record) = recovered.receive(Duration::from_secs(2))? else {
                 panic!("record recovers at exact limit")
             };
@@ -433,7 +439,7 @@ mod durable {
             let _ = facade.shutdown(ShutdownMode::Graceful {
                 timeout: Duration::from_secs(3),
             })?;
-            let mut recovered = spi.subscribe(request(70 + index as u64))?;
+            let mut recovered = spi.subscribe(request_at(70 + index as u64, StartPosition::New))?;
             let ReceiveOutcome::Message(record) = recovered.receive(Duration::from_secs(2))? else {
                 panic!("durable source remains recoverable")
             };
@@ -492,8 +498,16 @@ mod durable {
                         )
                         .await
                         .unwrap();
+                    let start_position = if attempt == 0 {
+                        StartPosition::Earliest
+                    } else {
+                        StartPosition::New
+                    };
                     let mut receiver = spi
-                        .subscribe(request(100 + index as u64 * 2 + attempt as u64))
+                        .subscribe(request_at(
+                            100 + index as u64 * 2 + attempt as u64,
+                            start_position,
+                        ))
                         .await?;
                     if attempt == 0 {
                         let error = receiver

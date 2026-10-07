@@ -13,7 +13,8 @@ use qubit_event_bus::spi::SpiSubscriptionRequest;
 
 const OPTION: &str = "redis.existing_group_start";
 
-/// How to handle an existing group's cursor when a start position was requested.
+/// How to handle an existing group's cursor when a start position was
+/// requested.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ExistingGroupStartPolicy {
     /// Reject explicit positions that Redis cannot apply to an existing group.
@@ -127,8 +128,10 @@ mod tests {
             ("resume", ExistingGroupStartPolicy::Resume),
         ] {
             let value: &str = value;
-            let options: ProviderOptions =
-                ProviderOptions::from([("redis.existing_group_start".to_owned(), value.to_owned())]);
+            let options: ProviderOptions = ProviderOptions::from([(
+                "redis.existing_group_start".to_owned(),
+                value.to_owned(),
+            )]);
             let request = request(StartPosition::New, options);
             assert_eq!(
                 parse_existing_group_policy(&request).expect("supported policy is valid"),

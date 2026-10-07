@@ -161,7 +161,7 @@ impl Fixture {
             SubscriberId::new("recovery-consumer")?,
             Some(ConsumerGroup::new(&self.group)?),
             SubscriptionDurability::Durable,
-            StartPosition::Earliest,
+            StartPosition::New,
             ProviderOptions::new(),
             TypeId::of::<String>(),
         ))

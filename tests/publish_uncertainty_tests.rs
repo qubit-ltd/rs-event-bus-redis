@@ -734,7 +734,7 @@ fn applied_dlq_xadd_lost_reply_stops_and_preserves_durable_source()
         SubscriberId::new("worker")?,
         Some(ConsumerGroup::new("group")?),
         SubscriptionDurability::Durable,
-        StartPosition::Earliest,
+        StartPosition::New,
         ProviderOptions::new(),
         std::any::TypeId::of::<Vec<u8>>(),
     );
@@ -878,7 +878,7 @@ fn async_applied_dlq_reply_loss_preserves_durable_source() -> Result<(), Box<dyn
             SubscriberId::new("worker")?,
             Some(ConsumerGroup::new("group")?),
             SubscriptionDurability::Durable,
-            StartPosition::Earliest,
+            StartPosition::New,
             ProviderOptions::new(),
             std::any::TypeId::of::<Vec<u8>>(),
         );

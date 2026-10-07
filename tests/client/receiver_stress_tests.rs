@@ -39,7 +39,7 @@ fn request() -> SpiSubscriptionRequest {
         SubscriberId::new("admission-worker").expect("subscriber"),
         None,
         SubscriptionDurability::Durable,
-        StartPosition::Earliest,
+        StartPosition::New,
         ProviderOptions::new(),
         TypeId::of::<Vec<u8>>(),
     )

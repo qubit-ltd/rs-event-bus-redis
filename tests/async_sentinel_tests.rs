@@ -178,7 +178,7 @@ fn test_async_sentinel_claims_unsettled_record_after_promotion() -> Result<(), B
             SubscriberId::new("worker-two")?,
             Some(ConsumerGroup::new("sentinel-workers")?),
             SubscriptionDurability::Durable,
-            StartPosition::Earliest,
+            StartPosition::New,
             ProviderOptions::new(),
             TypeId::of::<Vec<u8>>(),
         );

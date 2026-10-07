@@ -684,8 +684,12 @@ async fn check_async_durable_recovery(server: &RedisServer) -> Result<(), String
     let recovered_bus = create_bus(server).map_err(|error| error.to_string())?;
     let mut recovered = recovered_bus
         .subscribe(
-            request("conformance-recovery", "recovery-after-close")
-                .map_err(|error| error.to_string())?,
+            request_at(
+                "conformance-recovery",
+                "recovery-after-close",
+                StartPosition::New,
+            )
+            .map_err(|error| error.to_string())?,
         )
         .await
         .map_err(|error| error.to_string())?;

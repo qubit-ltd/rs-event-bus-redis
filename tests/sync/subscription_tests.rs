@@ -121,7 +121,7 @@ fn test_receive_provider_attempt_distinguishes_new_pending_and_claimed() -> Test
         Some(1)
     );
     drop(first_receiver);
-    let mut claiming_receiver = claim_bus.subscribe(request()?)?;
+    let mut claiming_receiver = claim_bus.subscribe(request_at(StartPosition::New)?)?;
     let ReceiveOutcome::Message(claimed_message) =
         claiming_receiver.receive(Duration::from_secs(2))?
     else {
@@ -150,13 +150,19 @@ fn message(id: &str) -> Result<OutboundMessage, Box<dyn Error>> {
 /// Builds a durable earliest-position request without I/O; returns fixed
 /// identifier validation errors before any receiver is opened.
 fn request() -> Result<SpiSubscriptionRequest, Box<dyn Error>> {
+    request_at(StartPosition::Earliest)
+}
+
+/// Builds a durable request with `start_position` without I/O; returns fixed
+/// identifier validation errors before any receiver is opened.
+fn request_at(start_position: StartPosition) -> Result<SpiSubscriptionRequest, Box<dyn Error>> {
     Ok(SpiSubscriptionRequest::new(
         Id::new(1),
         TopicAddress::new("settlement")?,
         SubscriberId::new("worker")?,
         Some(ConsumerGroup::new("group")?),
         SubscriptionDurability::Durable,
-        StartPosition::Earliest,
+        start_position,
         ProviderOptions::new(),
         TypeId::of::<Vec<u8>>(),
     ))

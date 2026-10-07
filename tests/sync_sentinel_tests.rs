@@ -99,7 +99,11 @@ fn test_sync_sentinel_reconnects_after_master_failover() -> Result<(), Box<dyn E
         stream_length, 2,
         "promoted master must contain both stream records"
     );
-    let mut second = bus.subscribe(subscription_request(1002, "worker-two")?)?;
+    let mut second = bus.subscribe(subscription_request_at(
+        1002,
+        "worker-two",
+        StartPosition::New,
+    )?)?;
     let ReceiveOutcome::Message(mut pending) = second.receive(Duration::from_secs(10))? else {
         return Err("new consumer did not claim the pre-failover pending record".into());
     };
@@ -140,13 +144,23 @@ fn subscription_request(
     id: u64,
     subscriber: &str,
 ) -> Result<SpiSubscriptionRequest, Box<dyn Error>> {
+    subscription_request_at(id, subscriber, StartPosition::Earliest)
+}
+
+/// Builds a durable fixed-group request at `start_position` with `id` and
+/// `subscriber`; returns metadata validation errors without I/O.
+fn subscription_request_at(
+    id: u64,
+    subscriber: &str,
+    start_position: StartPosition,
+) -> Result<SpiSubscriptionRequest, Box<dyn Error>> {
     Ok(SpiSubscriptionRequest::new(
         Id::new(id),
         TopicAddress::new("events")?,
         SubscriberId::new(subscriber)?,
         Some(ConsumerGroup::new("sentinel-group")?),
         SubscriptionDurability::Durable,
-        StartPosition::Earliest,
+        start_position,
         ProviderOptions::new(),
         TypeId::of::<Vec<u8>>(),
     ))

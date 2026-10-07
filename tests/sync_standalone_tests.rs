@@ -614,7 +614,7 @@ fn check_sync_durable_recovery(server: &RedisServer) -> Result<(), String> {
                 "conformance-recovery",
                 "recovery-after-close",
                 Some("recovery"),
-                StartPosition::Earliest,
+                StartPosition::New,
             )
             .map_err(|error| error.to_string())?,
         )
@@ -691,7 +691,9 @@ fn test_sync_existing_consumer_group_is_not_retried() -> Result<(), Box<dyn Erro
     };
     assert_eq!(received.id().as_str(), "busy-a");
     first.settle(
-        received.settlement().ok_or("event A has no settlement token")?,
+        received
+            .settlement()
+            .ok_or("event A has no settlement token")?,
         DeliveryDisposition::Accept,
     )?;
     first.close()?;
@@ -716,10 +718,7 @@ fn test_sync_existing_consumer_group_is_not_retried() -> Result<(), Box<dyn Erro
     );
 
     let before_resume = xgroup_command_calls(&server)?;
-    let options = ProviderOptions::from([(
-        "redis.existing_group_start".into(),
-        "resume".into(),
-    )]);
+    let options = ProviderOptions::from([("redis.existing_group_start".into(), "resume".into())]);
     let mut resumed = bus.subscribe(request_with_options(
         "busy-group",
         "worker-c",
@@ -733,7 +732,9 @@ fn test_sync_existing_consumer_group_is_not_retried() -> Result<(), Box<dyn Erro
     };
     assert_eq!(received.id().as_str(), "busy-b");
     resumed.settle(
-        received.settlement().ok_or("event B has no settlement token")?,
+        received
+            .settlement()
+            .ok_or("event B has no settlement token")?,
         DeliveryDisposition::Accept,
     )?;
     assert!(matches!(

@@ -64,13 +64,19 @@ fn bus_options(server: &RedisServer, namespace: &str) -> ProviderOptions {
 /// Builds the fixed durable group request without I/O; returns metadata
 /// validation errors if any fixture identifier is rejected.
 fn request() -> Result<SpiSubscriptionRequest, Box<dyn Error>> {
+    request_at(StartPosition::Earliest)
+}
+
+/// Builds a durable request at `start_position` without I/O; returns metadata
+/// validation errors if any fixture identifier is rejected.
+fn request_at(start_position: StartPosition) -> Result<SpiSubscriptionRequest, Box<dyn Error>> {
     Ok(SpiSubscriptionRequest::new(
         Id::new(1),
         TopicAddress::new("events")?,
         SubscriberId::new("worker")?,
         Some(ConsumerGroup::new("workers")?),
         SubscriptionDurability::Durable,
-        StartPosition::Earliest,
+        start_position,
         ProviderOptions::new(),
         TypeId::of::<Vec<u8>>(),
     ))
@@ -109,7 +115,7 @@ fn test_sync_separate_buses_do_not_share_consumer_identity() -> Result<(), Box<d
         .map_err(|failure| failure.into_error())?;
     let _ = first_bus.publish(message()?)?;
     let mut first = first_bus.subscribe(request()?)?;
-    let mut second = second_bus.subscribe(request()?)?;
+    let mut second = second_bus.subscribe(request_at(StartPosition::New)?)?;
 
     assert!(matches!(
         first.receive(Duration::from_secs(2))?,
@@ -149,7 +155,9 @@ fn test_async_separate_buses_do_not_share_consumer_identity() -> Result<(), Box<
             .map_err(|failure| failure.into_error())?;
         let _ = first_bus.publish(message()?).await?;
         let mut first = first_bus.subscribe(request()?).await?;
-        let mut second = second_bus.subscribe(request()?).await?;
+        let mut second = second_bus
+            .subscribe(request_at(StartPosition::New)?)
+            .await?;
 
         assert!(matches!(
             first.receive(Duration::from_secs(2)).await?,
