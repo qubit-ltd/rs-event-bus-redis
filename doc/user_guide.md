@@ -484,6 +484,20 @@ Random consumer names accumulate across restarts; the provider does not automati
 
 Redis persistence and replication are deployment responsibilities. `Accepted` proves acceptance of XADD, not fsync, replica durability, handler success, or billing commit. A `WAIT` issued on a new observer connection does not fence writes sent through a different provider connection. Sentinel promotion may lose unreplicated writes or group state; inspect actual cursor, pending IDs and owners when validating recovery.
 
+### Deployment readiness checklist
+
+Before rollout and after a Redis failover, review the deployment's recovery objectives and collect these read-only observations using the actual stream key and consumer group:
+
+| Check | Read-only command | What to observe and how to judge it |
+| --- | --- | --- |
+| Persistence and restart recovery | `INFO persistence` | Review the configured persistence activity and recent save/write status fields exposed by this Redis version. Confirm they match the deployment's recovery objectives; this output does not prove that a particular event was fsynced. |
+| Replication and failover | `INFO replication` | Review the node role, replica link/synchronization state, and replication offsets. Compare the current topology and recovery expectations; an offset or connected replica does not prove that every accepted event survives promotion. |
+| Stream retention and growth | `XLEN <stream-key>` | Record the stream length over time and compare its growth with retention and capacity plans. Length alone says nothing about unread or pending work. |
+| Consumer-group progress | `XINFO GROUPS <stream-key>` | Check the groups that actually exist, their pending counts and last-delivered positions; use `lag` only when the server version provides it. Compare group progress with application processing and replay needs. |
+| Pending delivery and recovery ownership | `XPENDING <stream-key> <group>` and `XPENDING <stream-key> <group> - + 100` | Review pending count, consumer ownership, delivery age, and entries across pages. Continue each page after its last returned ID without repeating the boundary entry. Decide whether work is progressing or needs investigation against handler duration and recovery policy. |
+
+Keep the stages of completion separate when setting expectations: `Accepted` means Redis replied that `XADD` was accepted; persistence and fsync depend on Redis deployment settings; replica confirmation is a separate replication event and does not itself prove replica disk persistence; consumer ACK (`XACK`) settles delivery after handling but is not an application database commit; and the business commit is owned by the application. The provider does not make these stages atomic. Delivery is at least once, so make consumer side effects idempotent—for example, deduplicate by business ID and retain the highest `state_version` where versioned notifications are used. Treat `XADD MAXLEN ~` as explicitly lossy: it can remove unread or pending history, so enable it only after the retention review above accepts that loss.
+
 With typed `qubit-task` notifications, consumers should deduplicate by `TaskId` and retain the highest `state_version`, ignoring duplicate/older notifications and querying the task service for authoritative state. The typed SQLite task service can use its optional outbox integration to capture lifecycle changes with its own state transaction and retry Redis publication. Delivery remains at least once, and this does not make unrelated application business transactions atomic with task state or Redis.
 
 ## 12. Upgrade from provider 0.6

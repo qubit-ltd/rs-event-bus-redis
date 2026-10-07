@@ -484,6 +484,20 @@ INFO MEMORY
 
 Redis 持久化和复制由部署负责。`Accepted` 只证明 XADD 被接受，不证明 fsync、副本持久化、handler 成功或账单提交。在新 observer 连接执行 `WAIT`，不能为另一条 provider 连接的写入提供 fencing 保证。Sentinel 提升可能丢失尚未复制的写入或消费组状态；恢复验收须检查实际游标、pending ID 和 owner。
 
+### 部署就绪检查表
+
+上线前和 Redis 故障转移后，都应结合部署的恢复目标，用实际 stream key 和消费组执行以下只读检查：
+
+| 检查项 | 只读命令 | 观察内容与运维判断 |
+| --- | --- | --- |
+| 持久化与重启恢复 | `INFO persistence` | 查看当前 Redis 版本提供的持久化活动、最近保存/写入状态等字段，并确认它们符合部署的恢复目标。该输出不能证明某条具体事件已经 fsync。 |
+| 复制与故障转移 | `INFO replication` | 查看节点角色、副本连接/同步状态和复制偏移量。结合当前拓扑评估恢复预期；副本已连接或偏移量已更新，都不能证明每条已接纳事件在主从提升后仍然存在。 |
+| Stream 保留与增长 | `XLEN <stream-key>` | 连续记录长度并与保留和容量规划对照。单看长度无法判断还有多少未读或 pending 工作。 |
+| 消费组进度 | `XINFO GROUPS <stream-key>` | 检查实际存在的消费组、pending 数量和最后投递位置；只有服务端版本提供 `lag` 时才查看该字段。将组进度与应用处理情况、回放需求对照。 |
+| 待处理投递与恢复归属 | `XPENDING <stream-key> <group>` 和 `XPENDING <stream-key> <group> - + 100` | 检查 pending 数量、consumer 归属、投递等待时间，并翻页覆盖所有记录；后续页从上一页最后返回的 ID 之后继续，避免重复边界记录。结合 handler 时长和恢复策略判断工作是否持续推进，或需要调查。 |
+
+验收时要区分不同完成阶段：`Accepted` 表示 Redis 已回复接受 `XADD`；持久化和 fsync 取决于 Redis 部署设置；副本确认是独立的复制事件，本身也不代表副本已落盘；消费者 ACK（`XACK`）是在处理后结算投递，不等于应用数据库事务提交；业务提交由应用负责。provider 不会把这些阶段合并成原子操作。投递语义是至少一次，因此消费者的业务副作用应可幂等，例如按业务 ID 去重，并在使用带版本通知时只保留最高 `state_version`。`XADD MAXLEN ~` 明确属于有损保留策略，可能裁掉未读或 pending 历史；只有完成上文的保留评估并接受相应丢失后才能启用。
+
 处理 typed `qubit-task` 通知时，consumer 应按 `TaskId` 去重并保留最高 `state_version`，忽略重复、旧版本通知，并查询任务服务取得权威状态。typed SQLite task service 可启用可选 outbox，在自己的状态事务中捕获生命周期变更，并重试向 Redis 发布。投递仍是至少一次；这不会令无关的应用业务事务与任务状态或 Redis 原子提交。
 
 ## 12. 从 provider 0.6 升级
