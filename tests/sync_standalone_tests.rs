@@ -263,6 +263,18 @@ fn request(
     group: Option<&str>,
     position: StartPosition,
 ) -> Result<SpiSubscriptionRequest, Box<dyn Error>> {
+    request_with_options(topic, subscriber, group, position, ProviderOptions::new())
+}
+
+/// Builds a durable request with subscription-scoped provider options;
+/// returns identifier validation errors without network I/O.
+fn request_with_options(
+    topic: &str,
+    subscriber: &str,
+    group: Option<&str>,
+    position: StartPosition,
+    options: ProviderOptions,
+) -> Result<SpiSubscriptionRequest, Box<dyn Error>> {
     Ok(SpiSubscriptionRequest::new(
         Id::new(SUBSCRIPTION_IDS.fetch_add(1, Ordering::Relaxed)),
         TopicAddress::new(topic)?,
@@ -270,7 +282,7 @@ fn request(
         group.map(ConsumerGroup::new).transpose()?,
         SubscriptionDurability::Durable,
         position,
-        ProviderOptions::new(),
+        options,
         TypeId::of::<Vec<u8>>(),
     ))
 }
@@ -667,26 +679,81 @@ fn test_sync_retry_remains_in_pending_entries() -> Result<(), Box<dyn Error>> {
 fn test_sync_existing_consumer_group_is_not_retried() -> Result<(), Box<dyn Error>> {
     let server = RedisServer::start()?;
     let bus = create_bus(&server)?;
-    let first = bus.subscribe(request(
+    let _ = bus.publish(message("busy-group", "busy-a", b"a")?)?;
+    let mut first = bus.subscribe(request(
         "busy-group",
         "worker-a",
         Some("shared"),
         StartPosition::Earliest,
     )?)?;
+    let ReceiveOutcome::Message(received) = first.receive(Duration::from_secs(2))? else {
+        return Err("first consumer did not receive event A".into());
+    };
+    assert_eq!(received.id().as_str(), "busy-a");
+    first.settle(
+        received.settlement().ok_or("event A has no settlement token")?,
+        DeliveryDisposition::Accept,
+    )?;
+    first.close()?;
+    let _ = bus.publish(message("busy-group", "busy-b", b"b")?)?;
+
     let before_second = xgroup_command_calls(&server)?;
-    let second = bus.subscribe(request(
+    let error = match bus.subscribe(request(
         "busy-group",
         "worker-b",
         Some("shared"),
         StartPosition::Earliest,
-    )?)?;
+    )?) {
+        Ok(_) => return Err("existing group accepted Earliest without resume".into()),
+        Err(error) => error,
+    };
+    assert_eq!(error.kind(), "existing_group_start_position_ignored");
     let after_second = xgroup_command_calls(&server)?;
     assert_eq!(
         after_second - before_second,
         1,
         "BUSYGROUP must not trigger a repeated XGROUP CREATE"
     );
-    drop((first, second));
+
+    let before_resume = xgroup_command_calls(&server)?;
+    let options = ProviderOptions::from([(
+        "redis.existing_group_start".into(),
+        "resume".into(),
+    )]);
+    let mut resumed = bus.subscribe(request_with_options(
+        "busy-group",
+        "worker-c",
+        Some("shared"),
+        StartPosition::Earliest,
+        options,
+    )?)?;
+    assert_eq!(xgroup_command_calls(&server)? - before_resume, 1);
+    let ReceiveOutcome::Message(received) = resumed.receive(Duration::from_secs(2))? else {
+        return Err("resumed group did not receive event B".into());
+    };
+    assert_eq!(received.id().as_str(), "busy-b");
+    resumed.settle(
+        received.settlement().ok_or("event B has no settlement token")?,
+        DeliveryDisposition::Accept,
+    )?;
+    assert!(matches!(
+        resumed.receive(Duration::ZERO)?,
+        ReceiveOutcome::TimedOut
+    ));
+    resumed.close()?;
+
+    let before_new = xgroup_command_calls(&server)?;
+    let mut newest = bus.subscribe(request(
+        "busy-group",
+        "worker-d",
+        Some("shared"),
+        StartPosition::New,
+    )?)?;
+    assert_eq!(xgroup_command_calls(&server)? - before_new, 1);
+    assert!(matches!(
+        newest.receive(Duration::ZERO)?,
+        ReceiveOutcome::TimedOut
+    ));
     Ok(())
 }
 
@@ -737,7 +804,7 @@ fn test_sync_unsettled_message_is_claimed_after_consumer_reconnect() -> Result<(
         "recovery",
         "worker-two",
         Some("stable-group"),
-        StartPosition::Earliest,
+        StartPosition::New,
     )?)?;
     let ReceiveOutcome::Message(received) = second.receive(Duration::from_secs(2))? else {
         return Err("reconnected consumer did not claim the pending event".into());
@@ -798,7 +865,7 @@ fn test_sync_groups_fan_out_and_share_work() -> Result<(), Box<dyn Error>> {
         "groups",
         "worker-b",
         Some("billing"),
-        StartPosition::Earliest,
+        StartPosition::New,
     )?)?;
     let mut audit = bus.subscribe(request(
         "groups",
@@ -909,7 +976,7 @@ fn test_sync_reports_gap_for_removed_pending_entries() -> Result<(), Box<dyn Err
         "gaps",
         "gap-worker-two",
         Some("gap-group"),
-        StartPosition::Earliest,
+        StartPosition::New,
     )?)?;
     let outcome = second.receive(Duration::from_secs(1))?;
     assert!(matches!(outcome, ReceiveOutcome::Gap(_)));
@@ -1019,7 +1086,7 @@ fn test_sync_redis_command_failures_are_returned_without_details() -> Result<(),
         "wrong-type",
         "duplicate-group-worker",
         None,
-        StartPosition::Earliest,
+        StartPosition::New,
     )?)?;
     first.close()?;
     second.close()?;
@@ -1132,7 +1199,7 @@ fn test_sync_recovers_pending_message_after_redis_restart() -> Result<(), Box<dy
         "restart",
         "after-restart",
         Some("restart-group"),
-        StartPosition::Earliest,
+        StartPosition::New,
     )?)?;
     let ReceiveOutcome::Message(received) = recovered.receive(Duration::from_secs(3))? else {
         return Err("pending event was not recovered after Redis restart".into());

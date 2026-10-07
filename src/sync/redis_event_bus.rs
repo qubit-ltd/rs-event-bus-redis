@@ -48,6 +48,8 @@ use crate::error::RedisProviderError;
 use crate::error::invalid_publish_reply;
 use crate::error::query_publish_error;
 use crate::error::to_publish_error;
+use crate::existing_group_start::ensure_existing_group_start;
+use crate::existing_group_start::parse_existing_group_policy;
 use crate::internal::RecoveryState;
 use crate::internal::WireLimits;
 use crate::naming::group_name;
@@ -167,9 +169,9 @@ impl EventBusSpi for RedisEventBus {
 
     /// Creates the group if needed and returns a blocking stream receiver.
     ///
-    /// Redis retains an existing group's cursor even if a later request asks
-    /// for a different start position. Closing the receiver does not
-    /// acknowledge its pending entries.
+    /// Redis retains an existing group's cursor. A later explicit start
+    /// position requires `redis.existing_group_start=resume`; `New` resumes
+    /// without the option. Closing does not acknowledge pending entries.
     ///
     /// # Parameters
     ///
@@ -182,8 +184,8 @@ impl EventBusSpi for RedisEventBus {
     ///
     /// # Errors
     ///
-    /// Returns an SPI error if Redis cannot connect or create the consumer
-    /// group.
+    /// Returns an SPI error for invalid options, an incompatible existing
+    /// group cursor, or a failure to connect or create the consumer group.
     fn subscribe(
         &self,
         request: SpiSubscriptionRequest,
@@ -225,6 +227,7 @@ impl EventBusSpi for RedisEventBus {
                 source: Box::new(RedisProviderError::Configuration("invalid Redis stream ID")),
             });
         }
+        let policy = parse_existing_group_policy(&request)?;
         let receiver_permit = self
             .client
             .try_receiver()
@@ -264,9 +267,9 @@ impl EventBusSpi for RedisEventBus {
         } else {
             result
         };
-        if let Err(error) = result
-            && error.code() != Some("BUSYGROUP")
-        {
+        if matches!(&result, Err(error) if error.code() == Some("BUSYGROUP")) {
+            ensure_existing_group_start(&request, policy)?;
+        } else if let Err(error) = result {
             return Err(spi_error(
                 "subscribe",
                 Some(&topic),
