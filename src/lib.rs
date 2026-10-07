@@ -23,6 +23,9 @@ pub mod config;
 /// Unique Redis consumer identity generation.
 #[cfg(any(feature = "sync", feature = "async"))]
 mod consumer_identity;
+/// Shared existing-group start-position policy.
+#[cfg(any(feature = "sync", feature = "async"))]
+mod existing_group_start;
 /// Process-local diagnostics for live Redis provider instances.
 pub mod diagnostics;
 /// Shared provider discovery submissions.
