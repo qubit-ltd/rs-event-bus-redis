@@ -68,18 +68,15 @@ impl RedisCredentials {
     ///
     /// Returns a generic configuration error if a referenced environment
     /// variable is unavailable.
-    pub(super) fn from_env_references(
-        options: &ProviderOptions,
-        prefix: &str,
-    ) -> Result<Self, RedisProviderError> {
+    pub(super) fn from_env_references(options: &ProviderOptions, prefix: &str) -> Result<Self, RedisProviderError> {
         let read = |key: &str| -> Result<Option<String>, RedisProviderError> {
             let option = format!("{prefix}.{key}_env");
             let Some(name) = options.get(&option) else {
                 return Ok(None);
             };
-            env::var(name).map(Some).map_err(|_| {
-                RedisProviderError::Configuration("credential environment variable is unavailable")
-            })
+            env::var(name)
+                .map(Some)
+                .map_err(|_| RedisProviderError::Configuration("credential environment variable is unavailable"))
         };
         Ok(Self {
             username: read("username")?,

@@ -44,11 +44,7 @@ fn message(payload: &[u8], headers: Headers, timestamp: SystemTime) -> OutboundM
 #[test]
 fn test_wire_limits_payload_rejection_precedes_header_encoding_and_timestamp_validation() {
     let headers = [("large".into(), "x".repeat(4096))].into();
-    let outbound = message(
-        &[0, 1],
-        headers,
-        SystemTime::UNIX_EPOCH - Duration::from_secs(1),
-    );
+    let outbound = message(&[0, 1], headers, SystemTime::UNIX_EPOCH - Duration::from_secs(1));
     assert!(matches!(
         encode_bounded(
             &outbound,
@@ -65,11 +61,7 @@ fn test_wire_limits_payload_rejection_precedes_header_encoding_and_timestamp_val
 #[test]
 fn test_wire_limits_headers_are_bounded_before_wire_fields_are_constructed() {
     let headers = [("large".into(), "x".repeat(4096))].into();
-    let outbound = message(
-        &[],
-        headers,
-        SystemTime::UNIX_EPOCH - Duration::from_secs(1),
-    );
+    let outbound = message(&[], headers, SystemTime::UNIX_EPOCH - Duration::from_secs(1));
     assert!(matches!(
         encode_bounded(
             &outbound,

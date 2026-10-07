@@ -24,10 +24,7 @@ fn test_parse_auto_claim_moves_wire_buffer_without_clone() {
         Value::BulkString(b"0-0".to_vec()),
         Value::Array(vec![Value::Array(vec![
             Value::BulkString(b"1-0".to_vec()),
-            Value::Array(vec![
-                Value::BulkString(b"wire".to_vec()),
-                Value::BulkString(wire),
-            ]),
+            Value::Array(vec![Value::BulkString(b"wire".to_vec()), Value::BulkString(wire)]),
         ])]),
         Value::Array(Vec::new()),
     ]);
@@ -56,29 +53,18 @@ fn test_parse_read_group_moves_resp2_and_resp3_wire_buffers() {
         let allocation = wire.as_ptr();
         let capacity = wire.capacity();
         let fields = if resp3 {
-            Value::Map(vec![(
-                Value::BulkString(b"wire".to_vec()),
-                Value::BulkString(wire),
-            )])
+            Value::Map(vec![(Value::BulkString(b"wire".to_vec()), Value::BulkString(wire))])
         } else {
-            Value::Array(vec![
-                Value::BulkString(b"wire".to_vec()),
-                Value::BulkString(wire),
-            ])
+            Value::Array(vec![Value::BulkString(b"wire".to_vec()), Value::BulkString(wire)])
         };
-        let rows = Value::Array(vec![Value::Array(vec![
-            Value::BulkString(b"1-0".to_vec()),
-            fields,
-        ])]);
+        let rows = Value::Array(vec![Value::Array(vec![Value::BulkString(b"1-0".to_vec()), fields])]);
         let key = Value::BulkString(b"events".to_vec());
         let reply = if resp3 {
             Value::Map(vec![(key, rows)])
         } else {
             Value::Array(vec![Value::Array(vec![key, rows])])
         };
-        let parsed = parse_read_group(reply)
-            .expect("supported RESP reply")
-            .expect("entries");
+        let parsed = parse_read_group(reply).expect("supported RESP reply").expect("entries");
         assert_eq!(parsed.keys[0].key, "events");
         let Value::BulkString(wire) = parsed.keys[0].ids[0].map.get("wire").expect("wire") else {
             panic!("bulk wire");
@@ -97,10 +83,7 @@ fn test_parse_range_moves_wire_and_keeps_pending_tombstones() {
     let rows = Value::Array(vec![
         Value::Array(vec![
             Value::BulkString(b"1-0".to_vec()),
-            Value::Array(vec![
-                Value::BulkString(b"wire".to_vec()),
-                Value::BulkString(wire),
-            ]),
+            Value::Array(vec![Value::BulkString(b"wire".to_vec()), Value::BulkString(wire)]),
         ]),
         Value::Array(vec![Value::BulkString(b"2-0".to_vec()), Value::Nil]),
     ]);

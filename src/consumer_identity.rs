@@ -20,8 +20,5 @@ use qubit_id::UuidV4Generator;
 ///
 /// Returns an error if the operating system random source is unavailable.
 pub(crate) fn new_consumer_name() -> Result<String, IdGenerationError> {
-    Ok(format!(
-        "qubit:consumer:{}",
-        UuidV4Generator::new().generate()?
-    ))
+    Ok(format!("qubit:consumer:{}", UuidV4Generator::new().generate()?))
 }

@@ -40,10 +40,7 @@ pub(super) trait ReceiveCommand {
     ///
     /// Returns sanitized setup/top-level rejection or an unknown receive
     /// outcome for I/O or malformed conversion replies.
-    fn query_receive<T: FromRedisValue>(
-        &self,
-        connection: &mut PooledConnection,
-    ) -> Result<T, RedisProviderError>;
+    fn query_receive<T: FromRedisValue>(&self, connection: &mut PooledConnection) -> Result<T, RedisProviderError>;
 }
 impl ReceiveCommand for Cmd {
     /// Applies the receiver-command contract to Redis command bytes.
@@ -64,24 +61,17 @@ impl ReceiveCommand for Cmd {
     ///
     /// Returns setup errors, classified top-level rejections, or
     /// outcome-unknown after uncertain I/O or nested/protocol failures.
-    fn query_receive<T: FromRedisValue>(
-        &self,
-        connection: &mut PooledConnection,
-    ) -> Result<T, RedisProviderError> {
+    fn query_receive<T: FromRedisValue>(&self, connection: &mut PooledConnection) -> Result<T, RedisProviderError> {
         let raw = connection
             .req_command(self)
-            .map_err(|_| RedisProviderError::OutcomeUnknown {
-                operation: "receive",
-            })?;
+            .map_err(|_| RedisProviderError::OutcomeUnknown { operation: "receive" })?;
         if let Value::ServerError(error) = raw {
             let error: RedisError = error.into();
             return Err(from_redis_error("receive", &error));
         }
         T::from_owned_redis_value(raw).map_err(|_| {
             connection.discard();
-            RedisProviderError::OutcomeUnknown {
-                operation: "receive",
-            }
+            RedisProviderError::OutcomeUnknown { operation: "receive" }
         })
     }
 }
@@ -121,47 +111,33 @@ mod tests {
         ]
         .into();
         let client =
-            Client::new(&RedisEventBusConfig::from_provider_options(&options).expect("settings"))
-                .expect("client");
+            Client::new(&RedisEventBusConfig::from_provider_options(&options).expect("settings")).expect("client");
         let mut command = cmd("ECHO");
         command.arg("bad");
         // A complete malformed reply must discard even an open socket.
-        let mut pooled = client
-            .get_connection(CommandClass::General)
-            .expect("pooled lease");
+        let mut pooled = client.get_connection(CommandClass::General).expect("pooled lease");
         let error = command
             .query_receive::<u64>(&mut pooled)
             .expect_err("invalid integer reply");
         assert!(matches!(
             error,
-            RedisProviderError::OutcomeUnknown {
-                operation: "receive"
-            }
+            RedisProviderError::OutcomeUnknown { operation: "receive" }
         ));
-        assert!(
-            pooled.is_open(),
-            "full malformed response leaves the socket open"
-        );
+        assert!(pooled.is_open(), "full malformed response leaves the socket open");
         drop(pooled);
         drop(
             client
                 .get_connection(CommandClass::General)
                 .expect("conversion failure discards idle lease and releases general permit"),
         );
-        let mut dedicated = client
-            .get_dedicated_connection()
-            .expect("dedicated receiver socket");
-        let held = client
-            .try_command(CommandClass::General)
-            .expect("occupy general slot");
+        let mut dedicated = client.get_dedicated_connection().expect("dedicated receiver socket");
+        let held = client.try_command(CommandClass::General).expect("occupy general slot");
         let error = command
             .query_receive::<u64>(&mut dedicated)
             .expect_err("typed conversion fails");
         assert!(matches!(
             error,
-            RedisProviderError::OutcomeUnknown {
-                operation: "receive"
-            }
+            RedisProviderError::OutcomeUnknown { operation: "receive" }
         ));
         assert!(matches!(
             client.try_command(CommandClass::General),
@@ -169,18 +145,9 @@ mod tests {
         ));
         drop(held);
         let observed = server.finish();
+        assert_eq!(observed.iter().filter(|command| command[0] == "SELECT").count(), 3);
         assert_eq!(
-            observed
-                .iter()
-                .filter(|command| command[0] == "SELECT")
-                .count(),
-            3
-        );
-        assert_eq!(
-            observed
-                .iter()
-                .filter(|command| command[0] == "ECHO")
-                .count(),
+            observed.iter().filter(|command| command[0] == "ECHO").count(),
             2,
             "dedicated receiver sends despite general saturation"
         );

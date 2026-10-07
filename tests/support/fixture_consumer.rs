@@ -31,10 +31,7 @@ pub fn run(fixture: &str, url: &str, production_async: bool) -> Result<(), Box<d
         .arg(&manifest)
         .env("CARGO_TARGET_DIR", &target)
         .output()?;
-    fs::write(
-        evidence.join(format!("{fixture}-features.txt")),
-        &graph.stdout,
-    )?;
+    fs::write(evidence.join(format!("{fixture}-features.txt")), &graph.stdout)?;
     assert!(
         graph.status.success(),
         "fixture feature graph failed: {}",
@@ -58,14 +55,8 @@ pub fn run(fixture: &str, url: &str, production_async: bool) -> Result<(), Box<d
         .arg(url)
         .env("CARGO_TARGET_DIR", &target)
         .output()?;
-    fs::write(
-        evidence.join(format!("{fixture}-stdout.log")),
-        &output.stdout,
-    )?;
-    fs::write(
-        evidence.join(format!("{fixture}-stderr.log")),
-        &output.stderr,
-    )?;
+    fs::write(evidence.join(format!("{fixture}-stdout.log")), &output.stdout)?;
+    fs::write(evidence.join(format!("{fixture}-stderr.log")), &output.stderr)?;
     assert!(
         output.status.success(),
         "fixture {fixture} failed:\n{}\n{}",

@@ -43,14 +43,9 @@ fn test_capabilities_and_shutdown_are_available_without_redis() {
             .expect("default settings create a lazy Redis SPI");
 
         assert_eq!(bus.capabilities().payload_modes(), PayloadModes::Encoded);
+        assert_eq!(bus.capabilities().subscription_modes(), SubscriptionModes::DURABLE);
         assert_eq!(
-            bus.capabilities().subscription_modes(),
-            SubscriptionModes::DURABLE
-        );
-        assert_eq!(
-            bus.shutdown(ShutdownMode::Immediate)
-                .await
-                .expect("shutdown succeeds"),
+            bus.shutdown(ShutdownMode::Immediate).await.expect("shutdown succeeds"),
             ShutdownOutcome::Complete
         );
     });

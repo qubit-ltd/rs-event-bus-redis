@@ -17,9 +17,7 @@ use qubit_spi::ProviderMetadata;
 #[test]
 fn test_provider_metadata_has_the_expected_identifier() {
     assert_eq!(
-        ProviderMetadata::descriptor(&AsyncRedisEventBusProvider)
-            .id()
-            .as_str(),
+        ProviderMetadata::descriptor(&AsyncRedisEventBusProvider).id().as_str(),
         "redis-streams"
     );
 }
@@ -34,8 +32,7 @@ fn test_configured_provider_validates_options_without_connecting() {
             .expect("default settings create a lazy Redis SPI");
         let _capabilities = bus.capabilities();
 
-        let options: ProviderOptions =
-            [("redis.max_unsettled_per_subscription".into(), "0".into())].into();
+        let options: ProviderOptions = [("redis.max_unsettled_per_subscription".into(), "0".into())].into();
         let invalid = EventBusConfig::default().with_provider_options(options);
         assert!(provider.create_configured(&invalid).await.is_err());
     });
@@ -49,10 +46,7 @@ fn test_async_provider_returns_invalid_configuration_without_connecting() {
     assert!(block_on(AsyncRedisEventBusProvider.create_configured(&config)).is_err());
 
     let options: ProviderOptions = [
-        (
-            "redis.sentinel.nodes".into(),
-            "invalid:port/not-a-db".into(),
-        ),
+        ("redis.sentinel.nodes".into(), "invalid:port/not-a-db".into()),
         ("redis.sentinel.service_name".into(), "primary".into()),
     ]
     .into();
