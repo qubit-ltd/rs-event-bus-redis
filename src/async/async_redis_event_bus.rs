@@ -112,7 +112,10 @@ impl AsyncEventBusSpi for AsyncRedisEventBus {
     /// admission is exhausted, a connection cannot be opened, or Redis rejects
     /// `XADD`. A missing or malformed reply after send returns
     /// outcome-unknown without replay.
-    fn publish<'a>(&'a self, message: OutboundMessage) -> SpiFuture<'a, Result<PublishAcknowledgement, SpiError>> {
+    fn publish<'a>(
+        &'a self,
+        message: OutboundMessage,
+    ) -> SpiFuture<'a, Result<PublishAcknowledgement, SpiError>> {
         Box::pin(async move {
             let topic = message.topic().clone();
             let payload = encode_bounded(&message, WireLimits::from_config(&self.settings))
@@ -134,7 +137,9 @@ impl AsyncEventBusSpi for AsyncRedisEventBus {
                 Ok(Value::BulkString(bytes)) => match String::from_utf8(bytes) {
                     Ok(id) if valid_stream_id(&id) && id != "0-0" => id,
                     _ => {
-                        self.client.invalidate_async_connection(connection.generation).await;
+                        self.client
+                            .invalidate_async_connection(connection.generation)
+                            .await;
                         let error = invalid_publish_reply(&topic);
                         if let Some(diagnostics) = self.client.diagnostics() {
                             diagnostics.increment(RedisDiagnosticCounter::PublishUnknown);
@@ -153,7 +158,9 @@ impl AsyncEventBusSpi for AsyncRedisEventBus {
                     return Err(error);
                 }
                 Ok(_) => {
-                    self.client.invalidate_async_connection(connection.generation).await;
+                    self.client
+                        .invalidate_async_connection(connection.generation)
+                        .await;
                     let error = invalid_publish_reply(&topic);
                     if let Some(diagnostics) = self.client.diagnostics() {
                         diagnostics.increment(RedisDiagnosticCounter::PublishUnknown);
@@ -161,7 +168,9 @@ impl AsyncEventBusSpi for AsyncRedisEventBus {
                     return Err(error);
                 }
                 Err(error) => {
-                    self.client.invalidate_async_connection(connection.generation).await;
+                    self.client
+                        .invalidate_async_connection(connection.generation)
+                        .await;
                     let error = query_publish_error(&topic, &error);
                     if error.kind() == "outcome_unknown"
                         && let Some(diagnostics) = self.client.diagnostics()
@@ -272,7 +281,9 @@ impl AsyncEventBusSpi for AsyncRedisEventBus {
                 .as_ref()
                 .is_err_and(|error| error.is_io_error() || error.is_timeout())
             {
-                self.client.invalidate_async_connection(connection.generation).await;
+                self.client
+                    .invalidate_async_connection(connection.generation)
+                    .await;
                 drop(connection);
                 let mut retry_connection = self
                     .client
@@ -320,7 +331,9 @@ impl AsyncEventBusSpi for AsyncRedisEventBus {
                 subscription_id: request.subscription_id(),
                 closed: false,
                 claim_min_idle_ms: self.settings.claim_min_idle_ms(),
-                recovery_interval: Duration::from_millis(self.settings.recovery_interval_ms() as u64),
+                recovery_interval: Duration::from_millis(
+                    self.settings.recovery_interval_ms() as u64
+                ),
                 max_unsettled: self.settings.max_unsettled_per_subscription(),
                 recovery: Arc::new(Mutex::new(RecoveryState::new())),
             }) as Box<dyn AsyncEventSubscriptionSpi>)
@@ -347,7 +360,10 @@ impl AsyncEventBusSpi for AsyncRedisEventBus {
     /// The returned future always resolves successfully; pending PEL state is
     /// untouched.
     #[inline]
-    fn shutdown<'a>(&'a self, _mode: ShutdownMode) -> SpiFuture<'a, Result<ShutdownOutcome, SpiError>> {
+    fn shutdown<'a>(
+        &'a self,
+        _mode: ShutdownMode,
+    ) -> SpiFuture<'a, Result<ShutdownOutcome, SpiError>> {
         Box::pin(async { Ok(ShutdownOutcome::Complete) })
     }
 }
@@ -396,7 +412,10 @@ mod tests {
     fn test_stream_id_validation_rejects_malformed_components() {
         assert!(super::valid_stream_id("123-0"));
         for value in ["", "123", "-0", "123-", "a-0", "1-b", "1-2-3"] {
-            assert!(!super::valid_stream_id(value), "accepted malformed ID {value:?}");
+            assert!(
+                !super::valid_stream_id(value),
+                "accepted malformed ID {value:?}"
+            );
         }
     }
 
@@ -406,7 +425,9 @@ mod tests {
             let settings = RedisEventBusConfig::new("redis://127.0.0.1:1/", "connection-errors")
                 .expect("valid test configuration");
             let bus = AsyncRedisEventBus {
-                client: Arc::new(Client::new(&settings).expect("unreachable Redis URL is syntactically valid")),
+                client: Arc::new(
+                    Client::new(&settings).expect("unreachable Redis URL is syntactically valid"),
+                ),
                 settings,
             };
             let mut receiver = super::Subscription {

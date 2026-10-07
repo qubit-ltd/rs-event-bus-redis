@@ -29,6 +29,8 @@ fn test_transport_policy_response_timeout_checked_add() {
     );
     assert!(matches!(
         policy.response_timeout(Some(Duration::MAX)),
-        Err(RedisProviderError::Configuration("response timeout overflow"))
+        Err(RedisProviderError::Configuration(
+            "response timeout overflow"
+        ))
     ));
 }

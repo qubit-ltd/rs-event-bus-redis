@@ -38,7 +38,10 @@ fn test_commit_poisoned_recovery_retains_pending_intent_and_active_slot() {
         panic!("poison recovery before local commit");
     })
     .join();
-    assert_eq!(state.commit(DeliveryDisposition::Accept), Err("recovery lock"));
+    assert_eq!(
+        state.commit(DeliveryDisposition::Accept),
+        Err("recovery lock")
+    );
     assert_eq!(
         *state.progress.lock().expect("progress remains healthy"),
         SettlementProgress::AckPending(DeliveryDisposition::Accept)
@@ -57,7 +60,14 @@ fn test_commit_poisoned_recovery_retains_pending_intent_and_active_slot() {
     state
         .commit(DeliveryDisposition::Accept)
         .expect("same intent can complete after lock repair");
-    assert_eq!(state.recovery.lock().expect("recovery repaired").active_len(), 0);
+    assert_eq!(
+        state
+            .recovery
+            .lock()
+            .expect("recovery repaired")
+            .active_len(),
+        0
+    );
     assert_eq!(
         *state.progress.lock().expect("progress healthy"),
         SettlementProgress::Applied(DeliveryDisposition::Accept)
@@ -73,6 +83,16 @@ fn test_commit_poisoned_progress_never_releases_active_slot() {
         panic!("poison progress before local commit");
     })
     .join();
-    assert_eq!(state.commit(DeliveryDisposition::Retry), Err("settlement lock"));
-    assert_eq!(state.recovery.lock().expect("recovery stays healthy").active_len(), 1);
+    assert_eq!(
+        state.commit(DeliveryDisposition::Retry),
+        Err("settlement lock")
+    );
+    assert_eq!(
+        state
+            .recovery
+            .lock()
+            .expect("recovery stays healthy")
+            .active_len(),
+        1
+    );
 }

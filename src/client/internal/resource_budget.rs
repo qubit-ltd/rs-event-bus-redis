@@ -74,7 +74,11 @@ impl ResourceBudget {
     /// Zeroed counters; no queue, connection, or network work is created.
     #[must_use]
     #[inline]
-    pub(crate) fn new(max_commands: usize, reserved_settlements: usize, max_receivers: usize) -> Self {
+    pub(crate) fn new(
+        max_commands: usize,
+        reserved_settlements: usize,
+        max_receivers: usize,
+    ) -> Self {
         Self {
             commands: AtomicUsize::new(0),
             reserved_settlements: AtomicUsize::new(0),
@@ -94,14 +98,23 @@ impl ResourceBudget {
     /// # Errors
     ///
     /// Returns `ResourceLimit { resource: "commands" }` when admission is full.
-    pub(crate) fn try_command(self: &Arc<Self>, class: CommandClass) -> Result<CommandPermit, RedisProviderError> {
+    pub(crate) fn try_command(
+        self: &Arc<Self>,
+        class: CommandClass,
+    ) -> Result<CommandPermit, RedisProviderError> {
         let lane = match class {
             CommandClass::General => {
                 acquire(&self.commands, self.max_commands, "commands")?;
                 CommandLane::General
             }
             CommandClass::Settlement => {
-                if acquire(&self.reserved_settlements, self.max_reserved_settlements, "commands").is_ok() {
+                if acquire(
+                    &self.reserved_settlements,
+                    self.max_reserved_settlements,
+                    "commands",
+                )
+                .is_ok()
+                {
                     CommandLane::ReservedSettlement
                 } else {
                     acquire(&self.commands, self.max_commands, "commands")?;
@@ -147,7 +160,11 @@ impl ResourceBudget {
 /// # Errors
 ///
 /// Returns resource exhaustion without changing the counter when it is full.
-fn acquire(counter: &AtomicUsize, limit: usize, resource: &'static str) -> Result<(), RedisProviderError> {
+fn acquire(
+    counter: &AtomicUsize,
+    limit: usize,
+    resource: &'static str,
+) -> Result<(), RedisProviderError> {
     counter
         .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
             (current < limit).then_some(current + 1)
@@ -174,18 +191,26 @@ mod tests {
     fn test_reserved_settlement_lane_survives_general_saturation() {
         let budget = Arc::new(ResourceBudget::new(4, 1, 4));
         let general: Vec<_> = (0..3)
-            .map(|_| budget.try_command(CommandClass::General).expect("general permit"))
+            .map(|_| {
+                budget
+                    .try_command(CommandClass::General)
+                    .expect("general permit")
+            })
             .collect();
         assert!(matches!(
             budget.try_command(CommandClass::General),
-            Err(RedisProviderError::ResourceLimit { resource: "commands" })
+            Err(RedisProviderError::ResourceLimit {
+                resource: "commands"
+            })
         ));
         let settlement = budget
             .try_command(CommandClass::Settlement)
             .expect("reserved settlement permit");
         assert!(matches!(
             budget.try_command(CommandClass::Settlement),
-            Err(RedisProviderError::ResourceLimit { resource: "commands" })
+            Err(RedisProviderError::ResourceLimit {
+                resource: "commands"
+            })
         ));
         drop(settlement);
         drop(general);
@@ -228,7 +253,9 @@ mod tests {
     fn test_reserved_settlement_permit_released_by_panic_unwind() {
         let budget = Arc::new(ResourceBudget::new(2, 1, 1));
         let result = catch_unwind(AssertUnwindSafe(|| {
-            let _permit = budget.try_command(CommandClass::Settlement).expect("reserved permit");
+            let _permit = budget
+                .try_command(CommandClass::Settlement)
+                .expect("reserved permit");
             panic!("intentional unwind after admission");
         }));
         assert!(result.is_err());

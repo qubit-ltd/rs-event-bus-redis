@@ -115,7 +115,10 @@ fn test_sync_separate_buses_do_not_share_consumer_identity() -> Result<(), Box<d
         first.receive(Duration::from_secs(2))?,
         ReceiveOutcome::Message(_)
     ));
-    assert!(matches!(second.receive(Duration::ZERO)?, ReceiveOutcome::TimedOut));
+    assert!(matches!(
+        second.receive(Duration::ZERO)?,
+        ReceiveOutcome::TimedOut
+    ));
 
     let group = group_name(namespace, "events", "worker", Some("workers"));
     let mut connection = Client::open(server.url())?.get_connection()?;

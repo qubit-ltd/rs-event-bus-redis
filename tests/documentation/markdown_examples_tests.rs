@@ -75,7 +75,11 @@ fn rust_blocks(path: &Path) -> Result<Vec<MarkdownBlock>, Box<dyn Error>> {
             blocks.push(MarkdownBlock { tag, code });
         }
     }
-    assert!(marker.is_none(), "{} has a trailing unused marker", path.display());
+    assert!(
+        marker.is_none(),
+        "{} has a trailing unused marker",
+        path.display()
+    );
     Ok(blocks)
 }
 
@@ -128,7 +132,9 @@ fn assemble(blocks: &[MarkdownBlock], tag: &str) -> String {
                 1,
                 "manual instructions must name one discovery call"
             );
-            let main = main.replace(&import, "").replace(&creation, "order_registry()?");
+            let main = main
+                .replace(&import, "")
+                .replace(&creation, "order_registry()?");
             format!("{codec}\n{}\n{main}", code(blocks, tag))
         }
         _ => panic!("undocumented assembly for block {tag}"),
@@ -142,7 +148,11 @@ fn assemble(blocks: &[MarkdownBlock], tag: &str) -> String {
 /// briefly sleeps while waiting. Spawn/log/kill errors or watchdog expiry
 /// return an error; a nonzero subprocess status panics with both logs. On
 /// expiry it kills and waits for its owned child before returning.
-fn run_command(command: &mut Command, log: &Path, timeout: Duration) -> Result<String, Box<dyn Error>> {
+fn run_command(
+    command: &mut Command,
+    log: &Path,
+    timeout: Duration,
+) -> Result<String, Box<dyn Error>> {
     let stdout_path = log.with_extension("stdout.log");
     let stderr_path = log.with_extension("stderr.log");
     command.stdout(Stdio::from(File::create(&stdout_path)?));
@@ -195,7 +205,11 @@ fn manifest(root: &Path, tag: &str) -> String {
     let provider_path = to_string(&root.to_string_lossy()).expect("path string serializes");
     let facade_root = std::env::var_os("QUBIT_EVENT_BUS_PATH")
         .map(PathBuf::from)
-        .unwrap_or_else(|| root.parent().expect("sibling facade parent").join("rs-event-bus"));
+        .unwrap_or_else(|| {
+            root.parent()
+                .expect("sibling facade parent")
+                .join("rs-event-bus")
+        });
     let facade_path = to_string(&facade_root.to_string_lossy()).expect("path string serializes");
     format!(
         "[package]\nname = \"markdown-consumer\"\nversion = \"0.0.0\"\nedition = \"2024\"\npublish = false\n\n[workspace]\n\n[dependencies]\nqubit-event-bus-redis = {{ path = {provider_path}, default-features = false, features = {provider_features} }}\nqubit-event-bus = {{ path = {facade_path}, default-features = false, features = {facade_features} }}\nqubit-spi = \"0.13\"\nfutures-lite = \"2\"\nfutures-channel = \"0.3\"\n"
@@ -233,7 +247,10 @@ fn test_markdown_fragments_and_programs_publish_settle_and_close() -> Result<(),
     let mut observer = Client::open(redis.url())?.get_connection()?;
     observer.set_read_timeout(Some(Duration::from_secs(2)))?;
     observer.set_write_timeout(Some(Duration::from_secs(2)))?;
-    for (language, guide) in [("en", "doc/user_guide.md"), ("zh", "doc/user_guide.zh_CN.md")] {
+    for (language, guide) in [
+        ("en", "doc/user_guide.md"),
+        ("zh", "doc/user_guide.zh_CN.md"),
+    ] {
         let blocks = rust_blocks(&root.join(guide))?;
         let tags: Vec<_> = blocks.iter().map(|block| block.tag.as_str()).collect();
         assert_eq!(
@@ -268,7 +285,10 @@ fn test_markdown_fragments_and_programs_publish_settle_and_close() -> Result<(),
                 &evidence.join(format!("{id}-lock")),
                 Duration::from_secs(180),
             )?;
-            fs::copy(project.path().join("Cargo.lock"), evidence.join(format!("{id}.lock")))?;
+            fs::copy(
+                project.path().join("Cargo.lock"),
+                evidence.join(format!("{id}.lock")),
+            )?;
             run_command(
                 Command::new("cargo")
                     .args(["fetch", "--locked", "--manifest-path"])
@@ -312,7 +332,9 @@ fn test_markdown_fragments_and_programs_publish_settle_and_close() -> Result<(),
                 Duration::from_secs(300),
             )?;
             let namespace = format!("markdown-{id}");
-            let binary = target.join("debug").join(format!("markdown-consumer{}", EXE_SUFFIX));
+            let binary = target
+                .join("debug")
+                .join(format!("markdown-consumer{}", EXE_SUFFIX));
             let output = run_command(
                 Command::new(binary)
                     .env("REDIS_URL", redis.url())
@@ -330,15 +352,25 @@ fn test_markdown_fragments_and_programs_publish_settle_and_close() -> Result<(),
                 "{id} did not consume its own event"
             );
             let stream = stream_key(&namespace, "orders.created");
-            let group = group_name(&namespace, "orders.created", "billing-worker", Some("billing"));
+            let group = group_name(
+                &namespace,
+                "orders.created",
+                "billing-worker",
+                Some("billing"),
+            );
             let length: usize = cmd("XLEN").arg(&stream).query(&mut observer)?;
             assert_eq!(length, 1, "{id} must publish one real stream record");
-            let pending: Value = cmd("XPENDING").arg(&stream).arg(group).query(&mut observer)?;
+            let pending: Value = cmd("XPENDING")
+                .arg(&stream)
+                .arg(group)
+                .query(&mut observer)?;
             assert!(
                 matches!(pending, Value::Array(ref values) if matches!(values.first(), Some(Value::Int(0)))),
                 "{id} shutdown must finish settlement; actual PEL: {pending:?}"
             );
-            println!("validated Markdown {guide} block {tag}: consumed {expected}, PEL empty, shutdown complete");
+            println!(
+                "validated Markdown {guide} block {tag}: consumed {expected}, PEL empty, shutdown complete"
+            );
         }
     }
     Ok(())

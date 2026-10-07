@@ -66,7 +66,8 @@ fn test_redis_connection_reuse_benchmark() -> Result<(), Box<dyn Error>> {
         ("redis.max_unsettled_per_subscription".into(), "1".into()),
     ]
     .into();
-    let bus = RedisEventBusProvider.create_configured(&EventBusConfig::default().with_provider_options(options))?;
+    let bus = RedisEventBusProvider
+        .create_configured(&EventBusConfig::default().with_provider_options(options))?;
 
     let mut idle_receivers = Vec::with_capacity(IDLE_CONSUMERS);
     for index in 0..IDLE_CONSUMERS {
@@ -102,7 +103,9 @@ fn test_redis_connection_reuse_benchmark() -> Result<(), Box<dyn Error>> {
         })
         .collect::<Vec<_>>();
     for worker in workers {
-        worker.join().map_err(|_| "idle benchmark worker panicked")??;
+        worker
+            .join()
+            .map_err(|_| "idle benchmark worker panicked")??;
     }
     let idle_elapsed = started.elapsed();
     let idle_connections_after = total_connections(&mut observer)?;
@@ -113,7 +116,11 @@ fn test_redis_connection_reuse_benchmark() -> Result<(), Box<dyn Error>> {
         idle_connection_delta as f64 / idle_elapsed.as_secs_f64()
     );
 
-    let mut receiver = bus.subscribe(request("message-events", "message-worker", "message-group")?)?;
+    let mut receiver = bus.subscribe(request(
+        "message-events",
+        "message-worker",
+        "message-group",
+    )?)?;
     let mut latencies = Vec::with_capacity(MESSAGES);
     let started = Instant::now();
     for index in 0..MESSAGES {
@@ -123,7 +130,9 @@ fn test_redis_connection_reuse_benchmark() -> Result<(), Box<dyn Error>> {
         let ReceiveOutcome::Message(delivery) = receiver.receive(Duration::from_secs(3))? else {
             return Err(format!("message {message_id} was not received").into());
         };
-        let token = delivery.settlement().ok_or("delivery omitted settlement token")?;
+        let token = delivery
+            .settlement()
+            .ok_or("delivery omitted settlement token")?;
         receiver.settle(token, DeliveryDisposition::Accept)?;
         latencies.push(sent.elapsed());
     }
@@ -143,7 +152,11 @@ fn test_redis_connection_reuse_benchmark() -> Result<(), Box<dyn Error>> {
 }
 
 /// Builds a durable new-position receiver for one historical workload identity.
-fn request(topic: &str, subscriber: &str, group: &str) -> Result<SpiSubscriptionRequest, Box<dyn Error>> {
+fn request(
+    topic: &str,
+    subscriber: &str,
+    group: &str,
+) -> Result<SpiSubscriptionRequest, Box<dyn Error>> {
     Ok(SpiSubscriptionRequest::new(
         Id::new(u64::from(subscriber.as_bytes()[0])),
         TopicAddress::new(topic)?,

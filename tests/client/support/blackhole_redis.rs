@@ -46,7 +46,10 @@ impl BlackholeRedis {
     /// failures.
     pub fn start(setup_reply: bool, reply: Option<&'static [u8]>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind TCP fixture");
-        let url = format!("redis://{}/", listener.local_addr().expect("listener address"));
+        let url = format!(
+            "redis://{}/",
+            listener.local_addr().expect("listener address")
+        );
         listener.set_nonblocking(true).expect("nonblocking accept");
         let stop = Arc::new(AtomicBool::new(false));
         let sockets = Arc::new(Mutex::new(Vec::new()));
@@ -89,7 +92,9 @@ impl BlackholeRedis {
                             }
                         }));
                     }
-                    Err(error) if error.kind() == ErrorKind::WouldBlock => sleep(Duration::from_millis(1)),
+                    Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                        sleep(Duration::from_millis(1))
+                    }
                     Err(_) => break,
                 }
             }

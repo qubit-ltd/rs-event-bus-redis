@@ -122,7 +122,10 @@ fn receive_faults() -> Vec<ReceiveFault> {
             timeout: Duration::ZERO,
             expected_kind: "redis_error",
             expected_retryable: None,
-            steps: vec![Step::reply("XAUTOCLAIM", EMPTY_CLAIM), Step::reply("XREADGROUP", FAULT)],
+            steps: vec![
+                Step::reply("XAUTOCLAIM", EMPTY_CLAIM),
+                Step::reply("XREADGROUP", FAULT),
+            ],
         },
         ReceiveFault {
             name: "nonblocking XREADGROUP failure",
@@ -189,7 +192,12 @@ fn request() -> SpiSubscriptionRequest {
 
 /// Checks retry policy, exact provider category, and removal of raw
 /// diagnostics.
-fn assert_failure(error: SpiError, expected_operation: &str, expected_kind: &str, expected_retryable: Option<bool>) {
+fn assert_failure(
+    error: SpiError,
+    expected_operation: &str,
+    expected_kind: &str,
+    expected_retryable: Option<bool>,
+) {
     let SpiError::Operation {
         provider_id,
         operation,
@@ -236,16 +244,27 @@ async fn async_bus(server: &ScriptedRedis) -> Arc<dyn AsyncEventBusSpi> {
 #[test]
 fn test_sync_receive_protocol_faults_are_sanitized_and_retryable() {
     for fault in receive_faults() {
-        let server = ScriptedRedis::start(receive_script(fault.steps)).expect("start RESP endpoint");
+        let server =
+            ScriptedRedis::start(receive_script(fault.steps)).expect("start RESP endpoint");
         let bus = sync_bus(&server);
-        let mut subscription = bus.subscribe(request()).expect("scripted group creation succeeds");
+        let mut subscription = bus
+            .subscribe(request())
+            .expect("scripted group creation succeeds");
         let error = match subscription.receive(fault.timeout) {
             Err(error) => error,
             Ok(_) => panic!("{} should fail", fault.name),
         };
-        assert_failure(error, "receive", fault.expected_kind, fault.expected_retryable);
+        assert_failure(
+            error,
+            "receive",
+            fault.expected_kind,
+            fault.expected_retryable,
+        );
         assert!(
-            matches!(subscription.receive(Duration::ZERO), Ok(ReceiveOutcome::TimedOut)),
+            matches!(
+                subscription.receive(Duration::ZERO),
+                Ok(ReceiveOutcome::TimedOut)
+            ),
             "{} must permit retry",
             fault.name
         );
@@ -258,7 +277,8 @@ fn test_sync_receive_protocol_faults_are_sanitized_and_retryable() {
 fn test_async_receive_protocol_faults_are_sanitized_and_retryable() {
     block_on(async {
         for fault in receive_faults() {
-            let server = ScriptedRedis::start(receive_script(fault.steps)).expect("start RESP endpoint");
+            let server =
+                ScriptedRedis::start(receive_script(fault.steps)).expect("start RESP endpoint");
             let bus = async_bus(&server).await;
             let mut subscription = bus
                 .subscribe(request())
@@ -268,9 +288,17 @@ fn test_async_receive_protocol_faults_are_sanitized_and_retryable() {
                 Err(error) => error,
                 Ok(_) => panic!("{} should fail", fault.name),
             };
-            assert_failure(error, "receive", fault.expected_kind, fault.expected_retryable);
+            assert_failure(
+                error,
+                "receive",
+                fault.expected_kind,
+                fault.expected_retryable,
+            );
             assert!(
-                matches!(subscription.receive(Duration::ZERO).await, Ok(ReceiveOutcome::TimedOut)),
+                matches!(
+                    subscription.receive(Duration::ZERO).await,
+                    Ok(ReceiveOutcome::TimedOut)
+                ),
                 "{} must permit retry",
                 fault.name
             );
@@ -297,8 +325,20 @@ fn test_sync_zero_timeout_skips_tombstone_maintenance() {
         Ok(ReceiveOutcome::TimedOut)
     ));
     let commands = server.finish();
-    assert_eq!(commands.iter().filter(|command| command[0] == "XAUTOCLAIM").count(), 1);
-    assert_eq!(commands.iter().filter(|command| command[0] == "XREADGROUP").count(), 2);
+    assert_eq!(
+        commands
+            .iter()
+            .filter(|command| command[0] == "XAUTOCLAIM")
+            .count(),
+        1
+    );
+    assert_eq!(
+        commands
+            .iter()
+            .filter(|command| command[0] == "XREADGROUP")
+            .count(),
+        2
+    );
     assert!(!commands.iter().any(|command| command[0] == "XPENDING"));
     assert!(!commands.iter().any(|command| command[0] == "XRANGE"));
     assert!(!commands.iter().any(|command| command[0] == "EVAL"));
@@ -316,15 +356,30 @@ fn test_async_zero_timeout_skips_tombstone_maintenance() {
         ])
         .expect("start RESP endpoint");
         let bus = async_bus(&server).await;
-        let mut subscription = bus.subscribe(request()).await.expect("create scripted group");
+        let mut subscription = bus
+            .subscribe(request())
+            .await
+            .expect("create scripted group");
 
         assert!(matches!(
             subscription.receive(Duration::ZERO).await,
             Ok(ReceiveOutcome::TimedOut)
         ));
         let commands = server.finish();
-        assert_eq!(commands.iter().filter(|command| command[0] == "XAUTOCLAIM").count(), 1);
-        assert_eq!(commands.iter().filter(|command| command[0] == "XREADGROUP").count(), 2);
+        assert_eq!(
+            commands
+                .iter()
+                .filter(|command| command[0] == "XAUTOCLAIM")
+                .count(),
+            1
+        );
+        assert_eq!(
+            commands
+                .iter()
+                .filter(|command| command[0] == "XREADGROUP")
+                .count(),
+            2
+        );
         assert!(!commands.iter().any(|command| command[0] == "XPENDING"));
         assert!(!commands.iter().any(|command| command[0] == "XRANGE"));
         assert!(!commands.iter().any(|command| command[0] == "EVAL"));
@@ -333,10 +388,15 @@ fn test_async_zero_timeout_skips_tombstone_maintenance() {
 
 /// Verifies the failed read stage, independently of the common error category.
 fn verify_receive_commands(commands: &[Vec<String>], scenario: &str) {
-    let read_commands: Vec<_> = commands.iter().filter(|command| command[0] == "XREADGROUP").collect();
+    let read_commands: Vec<_> = commands
+        .iter()
+        .filter(|command| command[0] == "XREADGROUP")
+        .collect();
     if scenario == "pending XREADGROUP failure" {
         assert_eq!(read_commands[0].last().map(String::as_str), Some("0-0"));
-    } else if scenario == "nonblocking XREADGROUP failure" || scenario == "blocking XREADGROUP failure" {
+    } else if scenario == "nonblocking XREADGROUP failure"
+        || scenario == "blocking XREADGROUP failure"
+    {
         let failed_read = read_commands[1];
         assert_eq!(failed_read.last().map(String::as_str), Some(">"));
         assert_eq!(
@@ -384,7 +444,9 @@ fn test_async_subscribe_retries_transport_loss_and_reports_reconnection_failure(
             let server = ScriptedRedis::start(script).expect("start RESP endpoint");
             let bus = async_bus(&server).await;
             match bus.subscribe(request()).await {
-                Ok(mut subscription) if !refuse => subscription.close().await.expect("close succeeds"),
+                Ok(mut subscription) if !refuse => {
+                    subscription.close().await.expect("close succeeds")
+                }
                 Err(error) if refuse => assert_failure(error, "subscribe", "transport", Some(true)),
                 _ => panic!("unexpected subscribe result for refuse={refuse}"),
             }
@@ -462,8 +524,14 @@ fn test_sync_gap_preserves_a_claimed_record_without_another_redis_read() {
         };
         assert_eq!(message.id().as_str(), "claimed-event");
         assert!(message.settlement().is_some());
-        assert_eq!(server.finish().len(), 2, "deferred delivery needs no Redis command");
-        completed.send(()).expect("test still waits for deferred delivery");
+        assert_eq!(
+            server.finish().len(),
+            2,
+            "deferred delivery needs no Redis command"
+        );
+        completed
+            .send(())
+            .expect("test still waits for deferred delivery");
     });
     received
         .recv_timeout(Duration::from_secs(3))
@@ -481,17 +549,25 @@ fn test_async_gap_preserves_a_claimed_record_without_another_redis_read() {
         ])
         .expect("start RESP endpoint");
         let bus = async_bus(&server).await;
-        let mut subscription = bus.subscribe(request()).await.expect("group creation succeeds");
+        let mut subscription = bus
+            .subscribe(request())
+            .await
+            .expect("group creation succeeds");
         assert!(matches!(
             subscription.receive(Duration::ZERO).await,
             Ok(ReceiveOutcome::Gap(_))
         ));
-        let Ok(ReceiveOutcome::Message(message)) = subscription.receive(Duration::ZERO).await else {
+        let Ok(ReceiveOutcome::Message(message)) = subscription.receive(Duration::ZERO).await
+        else {
             panic!("claimed record must survive the preceding gap");
         };
         assert_eq!(message.id().as_str(), "claimed-event");
         assert!(message.settlement().is_some());
-        assert_eq!(server.finish().len(), 2, "deferred delivery needs no Redis command");
+        assert_eq!(
+            server.finish().len(),
+            2,
+            "deferred delivery needs no Redis command"
+        );
     });
 }
 
@@ -551,8 +627,12 @@ fn test_async_settlement_connection_failure_keeps_the_token_unapplied() {
         ])
         .expect("start RESP endpoint");
         let bus = async_bus(&server).await;
-        let mut subscription = bus.subscribe(request()).await.expect("group creation succeeds");
-        let Ok(ReceiveOutcome::Message(message)) = subscription.receive(Duration::ZERO).await else {
+        let mut subscription = bus
+            .subscribe(request())
+            .await
+            .expect("group creation succeeds");
+        let Ok(ReceiveOutcome::Message(message)) = subscription.receive(Duration::ZERO).await
+        else {
             panic!("claimed record must be delivered");
         };
         let token = message.settlement().expect("settlement token");
@@ -591,7 +671,10 @@ fn test_async_settlement_connection_failure_keeps_the_token_unapplied() {
 
 /// Checks an invalid receive timeout before any recovery command can be issued.
 fn assert_timeout_overflow(error: SpiError) {
-    let SpiError::Operation { operation, source, .. } = error else {
+    let SpiError::Operation {
+        operation, source, ..
+    } = error
+    else {
         panic!("expected an operation error");
     };
     assert_eq!(operation, "receive");
@@ -604,27 +687,43 @@ fn assert_timeout_overflow(error: SpiError) {
 #[cfg(feature = "sync")]
 #[test]
 fn test_sync_receive_rejects_timeout_overflow_before_recovery() {
-    let server = ScriptedRedis::start(vec![Step::reply("XGROUP", b"+OK\r\n")]).expect("start RESP endpoint");
+    let server =
+        ScriptedRedis::start(vec![Step::reply("XGROUP", b"+OK\r\n")]).expect("start RESP endpoint");
     let bus = sync_bus(&server);
     let mut subscription = bus.subscribe(request()).expect("group creation succeeds");
     match subscription.receive(Duration::from_secs(u64::MAX - 1)) {
         Err(error) => assert_timeout_overflow(error),
         Ok(_) => panic!("overflowing finite timeout must fail"),
     }
-    assert_eq!(server.finish().len(), 1, "overflow must fail before recovery commands");
+    assert_eq!(
+        server.finish().len(),
+        1,
+        "overflow must fail before recovery commands"
+    );
 }
 
 #[cfg(feature = "async")]
 #[test]
 fn test_async_receive_rejects_timeout_overflow_before_recovery() {
     block_on(async {
-        let server = ScriptedRedis::start(vec![Step::reply("XGROUP", b"+OK\r\n")]).expect("start RESP endpoint");
+        let server = ScriptedRedis::start(vec![Step::reply("XGROUP", b"+OK\r\n")])
+            .expect("start RESP endpoint");
         let bus = async_bus(&server).await;
-        let mut subscription = bus.subscribe(request()).await.expect("group creation succeeds");
-        match subscription.receive(Duration::from_secs(u64::MAX - 1)).await {
+        let mut subscription = bus
+            .subscribe(request())
+            .await
+            .expect("group creation succeeds");
+        match subscription
+            .receive(Duration::from_secs(u64::MAX - 1))
+            .await
+        {
             Err(error) => assert_timeout_overflow(error),
             Ok(_) => panic!("overflowing finite timeout must fail"),
         }
-        assert_eq!(server.finish().len(), 1, "overflow must fail before recovery commands");
+        assert_eq!(
+            server.finish().len(),
+            1,
+            "overflow must fail before recovery commands"
+        );
     });
 }

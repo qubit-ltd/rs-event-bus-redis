@@ -112,7 +112,13 @@ fn pending(observer: &mut Connection, namespace: &str) -> Result<Vec<Value>, Red
 }
 
 /// Verifies bytes, reason, source association, and acknowledgement together.
-fn assert_quarantined(observer: &mut Connection, namespace: &str, id: &str, wire: &[u8], reason: &str) -> TestResult {
+fn assert_quarantined(
+    observer: &mut Connection,
+    namespace: &str,
+    id: &str,
+    wire: &[u8],
+    reason: &str,
+) -> TestResult {
     assert!(
         pending(observer, namespace)?.is_empty(),
         "successful quarantine must clear source PEL"
@@ -138,7 +144,10 @@ fn assert_quarantined(observer: &mut Connection, namespace: &str, id: &str, wire
         Some(&Value::BulkString(id.as_bytes().to_vec()))
     );
     assert_eq!(fields.get("wire"), Some(&Value::BulkString(wire.to_vec())));
-    assert_eq!(fields.get("wire_missing"), Some(&Value::BulkString(b"0".to_vec())));
+    assert_eq!(
+        fields.get("wire_missing"),
+        Some(&Value::BulkString(b"0".to_vec()))
+    );
     Ok(())
 }
 
@@ -177,7 +186,12 @@ fn malformed_cases() -> Vec<(Vec<u8>, &'static str)> {
         (to_vec(&payload).expect("wire"), "oversized_payload"),
         (vec![255], "invalid_wire_field"),
         (
-            format!("{{\"version\":1,\"payload\":{}0{}}}", "[".repeat(129), "]".repeat(129)).into_bytes(),
+            format!(
+                "{{\"version\":1,\"payload\":{}0{}}}",
+                "[".repeat(129),
+                "]".repeat(129)
+            )
+            .into_bytes(),
             "invalid_json",
         ),
     ]
@@ -237,7 +251,10 @@ fn test_sync_historical_valid_wire_is_inclusive_at_exact_byte_limit() -> TestRes
                 panic!("encoded payload");
             };
             assert_eq!(payload.bytes(), [255]);
-            receiver.settle(message.settlement().expect("token"), DeliveryDisposition::Accept)?;
+            receiver.settle(
+                message.settlement().expect("token"),
+                DeliveryDisposition::Accept,
+            )?;
             assert!(pending(&mut observer, &namespace)?.is_empty());
         }
     }
@@ -286,7 +303,10 @@ fn test_async_historical_valid_wire_is_inclusive_at_exact_byte_limit() -> TestRe
                 };
                 assert_eq!(payload.bytes(), [255]);
                 receiver
-                    .settle(message.settlement().expect("token"), DeliveryDisposition::Accept)
+                    .settle(
+                        message.settlement().expect("token"),
+                        DeliveryDisposition::Accept,
+                    )
                     .await?;
                 assert!(pending(&mut observer, &namespace)?.is_empty());
             }
@@ -321,9 +341,15 @@ fn test_sync_historical_oversize_is_retained_and_malformed_wire_is_quarantined()
             );
             assert_retained(&mut observer, &namespace, &id)?;
         } else {
-            assert!(matches!(outcome?, ReceiveOutcome::Gap(_)), "{reason} must return Gap");
+            assert!(
+                matches!(outcome?, ReceiveOutcome::Gap(_)),
+                "{reason} must return Gap"
+            );
             assert_quarantined(&mut observer, &namespace, &id, &wire, reason)?;
-            assert!(matches!(receiver.receive(Duration::ZERO)?, ReceiveOutcome::TimedOut));
+            assert!(matches!(
+                receiver.receive(Duration::ZERO)?,
+                ReceiveOutcome::TimedOut
+            ));
         }
     }
     Ok(())
@@ -357,7 +383,10 @@ fn test_async_historical_oversize_is_retained_and_malformed_wire_is_quarantined(
                 );
                 assert_retained(&mut observer, &namespace, &id)?;
             } else {
-                assert!(matches!(outcome?, ReceiveOutcome::Gap(_)), "{reason} must return Gap");
+                assert!(
+                    matches!(outcome?, ReceiveOutcome::Gap(_)),
+                    "{reason} must return Gap"
+                );
                 assert_quarantined(&mut observer, &namespace, &id, &wire, reason)?;
                 assert!(matches!(
                     receiver.receive(Duration::ZERO).await?,
@@ -499,7 +528,10 @@ fn test_sync_quarantine_reply_loss_reports_unknown_after_real_copy_and_ack() -> 
         ),
         "lost EVAL reply may conceal a successful copy and ACK"
     );
-    assert!(matches!(receiver.receive(Duration::ZERO)?, ReceiveOutcome::TimedOut));
+    assert!(matches!(
+        receiver.receive(Duration::ZERO)?,
+        ReceiveOutcome::TimedOut
+    ));
     assert_quarantined(&mut observer, namespace, &id, wire, "invalid_json")?;
     Ok(())
 }
@@ -513,8 +545,9 @@ fn test_async_quarantine_reply_loss_reports_unknown_after_real_copy_and_ack() ->
     let mut observer = Client::open(server.url())?.get_connection()?;
     let wire = b"invalid JSON";
     let id = inject(&mut observer, namespace, wire)?;
-    let bus = block_on(AsyncRedisEventBusProvider.create_configured(&config(&proxy.url(), namespace)))
-        .map_err(|failure| failure.into_error())?;
+    let bus =
+        block_on(AsyncRedisEventBusProvider.create_configured(&config(&proxy.url(), namespace)))
+            .map_err(|failure| failure.into_error())?;
     let mut receiver = block_on(bus.subscribe(request()))?;
     let gate = proxy.pause_after_reply("EVAL");
     let worker = spawn(move || {
@@ -570,14 +603,20 @@ fn test_sync_source_removed_before_quarantine_reports_gap_without_fabricated_cop
         .query::<usize>(&mut observer)?;
     gate.release();
     assert!(
-        matches!(worker.join().expect("receive worker")?, ReceiveOutcome::Gap(_)),
+        matches!(
+            worker.join().expect("receive worker")?,
+            ReceiveOutcome::Gap(_)
+        ),
         "removed source should produce SourceGone gap"
     );
     let group = group_name(namespace, "events", "worker", Some("group"));
     let copies: usize = cmd("XLEN")
         .arg(poison_key(namespace, "events", &group))
         .query(&mut observer)?;
-    assert_eq!(copies, 0, "Lua must not fabricate wire when source disappeared");
+    assert_eq!(
+        copies, 0,
+        "Lua must not fabricate wire when source disappeared"
+    );
     Ok(())
 }
 
@@ -682,7 +721,10 @@ fn test_async_duplicate_wire_quarantines_the_last_value_used_for_decoding() -> T
             .map_err(|failure| failure.into_error())?;
         let mut receiver = bus.subscribe(request()).await?;
         assert!(
-            matches!(receiver.receive(Duration::ZERO).await?, ReceiveOutcome::Gap(_)),
+            matches!(
+                receiver.receive(Duration::ZERO).await?,
+                ReceiveOutcome::Gap(_)
+            ),
             "last malformed wire decides decoding"
         );
         assert_quarantined(&mut observer, namespace, &id, invalid, "invalid_json")?;
@@ -720,7 +762,10 @@ fn test_sync_json_depth_limit_applies_to_unknown_v1_fields() -> TestResult {
             let ReceiveOutcome::Message(message) = outcome else {
                 panic!("127 total containers remain within default depth budget");
             };
-            receiver.settle(message.settlement().expect("token"), DeliveryDisposition::Accept)?;
+            receiver.settle(
+                message.settlement().expect("token"),
+                DeliveryDisposition::Accept,
+            )?;
         } else {
             assert!(
                 matches!(outcome, ReceiveOutcome::Gap(_)),
@@ -754,7 +799,10 @@ fn test_async_json_depth_limit_applies_to_unknown_v1_fields() -> TestResult {
                     panic!("127 total containers remain within default depth budget");
                 };
                 receiver
-                    .settle(message.settlement().expect("token"), DeliveryDisposition::Accept)
+                    .settle(
+                        message.settlement().expect("token"),
+                        DeliveryDisposition::Accept,
+                    )
                     .await?;
             } else {
                 assert!(
@@ -776,7 +824,10 @@ fn test_json_depth_scan_ignores_structural_characters_inside_escaped_strings() -
     let namespace = "quoted-json-depth";
     let wire = String::from_utf8(boundary_wire()).expect("wire JSON");
     let quoted = to_string(&"[{\\\"".repeat(128))?;
-    let wire = format!("{},\"extra\":{quoted}}}", wire.strip_suffix('}').expect("object"));
+    let wire = format!(
+        "{},\"extra\":{quoted}}}",
+        wire.strip_suffix('}').expect("object")
+    );
     let mut observer = Client::open(server.url())?.get_connection()?;
     inject(&mut observer, namespace, wire.as_bytes())?;
     let bus = RedisEventBusProvider
@@ -786,7 +837,10 @@ fn test_json_depth_scan_ignores_structural_characters_inside_escaped_strings() -
     let ReceiveOutcome::Message(message) = receiver.receive(Duration::ZERO)? else {
         panic!("quoted delimiters must not count as containers");
     };
-    receiver.settle(message.settlement().expect("token"), DeliveryDisposition::Accept)?;
+    receiver.settle(
+        message.settlement().expect("token"),
+        DeliveryDisposition::Accept,
+    )?;
     assert!(pending(&mut observer, namespace)?.is_empty());
     Ok(())
 }

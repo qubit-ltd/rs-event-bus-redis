@@ -61,7 +61,10 @@ fn examples_dir() -> Result<PathBuf, Box<dyn Error>> {
         }
         Ok(examples)
     });
-    result.as_ref().cloned().map_err(|error| error.clone().into())
+    result
+        .as_ref()
+        .cloned()
+        .map_err(|error| error.clone().into())
 }
 
 /// Confirms both published codec snippets match the helper compiled by every
@@ -103,7 +106,9 @@ fn marked_snippet<'text>(text: &'text str, start: &str, end: &str) -> &'text str
         "snippet must contain exactly one end marker: {end}"
     );
     let (_, body) = text.split_once(start).expect("start marker was checked");
-    let (snippet, _) = body.split_once(end).expect("end marker must follow the start marker");
+    let (snippet, _) = body
+        .split_once(end)
+        .expect("end marker must follow the start marker");
     snippet
 }
 
@@ -143,7 +148,10 @@ fn test_standalone_examples_publish_consume_and_close() -> Result<(), Box<dyn Er
             break;
         }
     }
-    assert!(saw_delivery, "async example exited without consuming its event");
+    assert!(
+        saw_delivery,
+        "async example exited without consuming its event"
+    );
     asynchronous
         .stdin
         .take()
@@ -173,6 +181,8 @@ fn test_sentinel_example_resolves_and_uses_the_master() -> Result<(), Box<dyn Er
         "Sentinel example failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(String::from_utf8_lossy(&output.stdout).contains("consumed Sentinel order event: order-44"));
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("consumed Sentinel order event: order-44")
+    );
     Ok(())
 }

@@ -157,15 +157,27 @@ impl SentinelServer {
     /// owner. Performs blocking Redis IO; returns connection, command, or
     /// missing-group errors. Panics unless the sole pending ID exactly
     /// equals the group delivery cursor.
-    pub fn pending_identity(&self, port: u16, stream: &str, group: &str) -> Result<(String, String), Box<dyn Error>> {
+    pub fn pending_identity(
+        &self,
+        port: u16,
+        stream: &str,
+        group: &str,
+    ) -> Result<(String, String), Box<dyn Error>> {
         let (cursor, pending) = group_state(port, stream, group)?;
         assert_eq!(
             pending.ids.len(),
             1,
             "the delivered record must be the sole pending entry"
         );
-        let entry = pending.ids.into_iter().next().ok_or("missing pending entry")?;
-        assert_eq!(cursor, entry.id, "group cursor must identify the pending delivery");
+        let entry = pending
+            .ids
+            .into_iter()
+            .next()
+            .ok_or("missing pending entry")?;
+        assert_eq!(
+            cursor, entry.id,
+            "group cursor must identify the pending delivery"
+        );
         eprintln!(
             "R13 node={port} cursor={cursor} pending={} owner={}",
             entry.id, entry.consumer
@@ -219,9 +231,17 @@ impl SentinelServer {
     /// Returns success after blocking Redis reads, or
     /// connection/command/missing-group errors. Panics if ACK has left any
     /// entry in the observed PEL.
-    pub fn assert_pending_empty(&self, port: u16, stream: &str, group: &str) -> Result<(), Box<dyn Error>> {
+    pub fn assert_pending_empty(
+        &self,
+        port: u16,
+        stream: &str,
+        group: &str,
+    ) -> Result<(), Box<dyn Error>> {
         let (_, pending) = group_state(port, stream, group)?;
-        assert!(pending.ids.is_empty(), "ACK must empty the PEL: {pending:?}");
+        assert!(
+            pending.ids.is_empty(),
+            "ACK must empty the PEL: {pending:?}"
+        );
         eprintln!("R13 ACK node={port} PEL=[]");
         Ok(())
     }
@@ -312,7 +332,11 @@ impl SentinelServer {
             });
             let replica_ready = Client::open(format!("redis://127.0.0.1:{}/", self.master_port))
                 .and_then(|client| client.get_connection())
-                .and_then(|mut connection| cmd("INFO").arg("replication").query::<String>(&mut connection))
+                .and_then(|mut connection| {
+                    cmd("INFO")
+                        .arg("replication")
+                        .query::<String>(&mut connection)
+                })
                 .is_ok_and(|info| info.contains("connected_slaves:1"));
             if all_sentinels_ready && replica_ready {
                 return Ok(());
@@ -386,12 +410,19 @@ fn free_port() -> Result<u16, Box<dyn Error>> {
 /// Performs blocking Redis IO with one-second connection/read/write timeouts.
 /// Returns client, connection, timeout-setting, command, or missing-group
 /// errors.
-fn group_state(port: u16, stream: &str, group: &str) -> Result<(String, StreamPendingCountReply), Box<dyn Error>> {
+fn group_state(
+    port: u16,
+    stream: &str,
+    group: &str,
+) -> Result<(String, StreamPendingCountReply), Box<dyn Error>> {
     let client = Client::open(format!("redis://127.0.0.1:{port}/"))?;
     let mut connection = client.get_connection_with_timeout(Duration::from_secs(1))?;
     connection.set_read_timeout(Some(Duration::from_secs(1)))?;
     connection.set_write_timeout(Some(Duration::from_secs(1)))?;
-    let groups: StreamInfoGroupsReply = cmd("XINFO").arg("GROUPS").arg(stream).query(&mut connection)?;
+    let groups: StreamInfoGroupsReply = cmd("XINFO")
+        .arg("GROUPS")
+        .arg(stream)
+        .query(&mut connection)?;
     let cursor = groups
         .groups
         .into_iter()

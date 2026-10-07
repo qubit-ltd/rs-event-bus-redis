@@ -40,8 +40,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let rounds = number("REDIS_BENCH_ROUNDS", 3);
     let first_round = number("REDIS_BENCH_FIRST_ROUND", 1);
     let label = env::var("REDIS_BENCH_LABEL").unwrap_or_else(|_| "after".into());
-    let output =
-        PathBuf::from(env::var("REDIS_BENCH_OUTPUT").unwrap_or_else(|_| "/tmp/redis-workload-benchmark".into()));
+    let output = PathBuf::from(
+        env::var("REDIS_BENCH_OUTPUT").unwrap_or_else(|_| "/tmp/redis-workload-benchmark".into()),
+    );
     let mut evidence = Evidence::new(&output, &label)?;
     let external = env::var("REDIS_BENCH_URL").ok();
     let fixture = if external.is_none() {
@@ -79,7 +80,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                             continue;
                         }
                         for round in first_round..first_round + rounds {
-                            let namespace = format!("bench-{}-{mode}-{limits}-{payload}-{concurrency}-{round}", id());
+                            let namespace = format!(
+                                "bench-{}-{mode}-{limits}-{payload}-{concurrency}-{round}",
+                                id()
+                            );
                             let mut options = options(&url, &namespace);
                             if limits == "limited" {
                                 options.insert("redis.max_concurrent_commands".into(), "32".into());
@@ -116,7 +120,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                 for round in first_round..first_round + rounds {
                     let bus = Backend::new(
                         mode,
-                        options(&url, &format!("bench-idle-{}-{mode}-{concurrency}-{round}", id())),
+                        options(
+                            &url,
+                            &format!("bench-idle-{}-{mode}-{concurrency}-{round}", id()),
+                        ),
                     )?;
                     measure(
                         &mut evidence,
@@ -140,7 +147,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         if label != "before" && selected("REDIS_BENCH_SCENARIOS", "command_limit") {
             for round in first_round..first_round + rounds {
-                let mut settings = options(&url, &format!("bench-command-limit-{}-{mode}-{round}", id()));
+                let mut settings = options(
+                    &url,
+                    &format!("bench-command-limit-{}-{mode}-{round}", id()),
+                );
                 settings.insert("redis.max_concurrent_commands".into(), "2".into());
                 settings.insert("redis.max_idle_connections".into(), "1".into());
                 let bus = Backend::new(mode, settings)?;
@@ -292,7 +302,9 @@ fn sentinel(
             let attempt_started = Instant::now();
             let result = receiver.receive_accept(&event_id);
             let succeeded = result == "ok";
-            let terminal = result.starts_with("settle:") || result == "event_id_mismatch" || result == "missing_token";
+            let terminal = result.starts_with("settle:")
+                || result == "event_id_mismatch"
+                || result == "missing_token";
             attempts.push(Sample {
                 nanos: attempt_started.elapsed().as_nanos(),
                 outcome: result,

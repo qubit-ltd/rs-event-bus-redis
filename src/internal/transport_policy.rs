@@ -59,12 +59,19 @@ impl TransportPolicy {
     ///
     /// Returns a configuration error if the duration addition overflows.
     #[inline]
-    pub(crate) fn response_timeout(&self, block: Option<Duration>) -> Result<Duration, RedisProviderError> {
+    pub(crate) fn response_timeout(
+        &self,
+        block: Option<Duration>,
+    ) -> Result<Duration, RedisProviderError> {
         match block {
             None => Ok(self.command_timeout),
-            Some(block) => block
-                .checked_add(self.command_timeout)
-                .ok_or(RedisProviderError::Configuration("response timeout overflow")),
+            Some(block) => {
+                block
+                    .checked_add(self.command_timeout)
+                    .ok_or(RedisProviderError::Configuration(
+                        "response timeout overflow",
+                    ))
+            }
         }
     }
 }

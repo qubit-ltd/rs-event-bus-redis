@@ -31,7 +31,10 @@ impl Drop for CommandPermit {
     fn drop(&mut self) {
         match self.lane {
             CommandLane::General => self.budget.commands.fetch_sub(1, Ordering::AcqRel),
-            CommandLane::ReservedSettlement => self.budget.reserved_settlements.fetch_sub(1, Ordering::AcqRel),
+            CommandLane::ReservedSettlement => self
+                .budget
+                .reserved_settlements
+                .fetch_sub(1, Ordering::AcqRel),
         };
     }
 }

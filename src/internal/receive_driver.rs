@@ -121,13 +121,19 @@ impl ReceiveDriver {
         loop {
             match self.stage {
                 ReceiveStage::Claim => {
-                    if self.budget.take_recovery_command(RecoveryScanStage::Claim, now) {
+                    if self
+                        .budget
+                        .take_recovery_command(RecoveryScanStage::Claim, now)
+                    {
                         return ReceiveAction::Claim;
                     }
                     self.stage = ReceiveStage::Pending;
                 }
                 ReceiveStage::Pending => {
-                    if self.budget.take_recovery_command(RecoveryScanStage::Pending, now) {
+                    if self
+                        .budget
+                        .take_recovery_command(RecoveryScanStage::Pending, now)
+                    {
                         return ReceiveAction::Pending;
                     }
                     self.stage = ReceiveStage::ReadNew;
@@ -186,7 +192,9 @@ impl ReceiveDriver {
                 self.completed_round = self.claim_at_end;
                 self.stage = ReceiveStage::ReadNew;
             }
-            (ReceiveStage::ReadNew, ReceiveReply::NewEntry | ReceiveReply::NewEmpty) if self.timeout.is_zero() => {
+            (ReceiveStage::ReadNew, ReceiveReply::NewEntry | ReceiveReply::NewEmpty)
+                if self.timeout.is_zero() =>
+            {
                 self.stage = ReceiveStage::TimedOut;
             }
             (ReceiveStage::ReadNew, ReceiveReply::NewEntry | ReceiveReply::NewEmpty) => {}
