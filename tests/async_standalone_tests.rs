@@ -262,13 +262,22 @@ fn message(topic: &str, id: &str, payload: &[u8]) -> Result<OutboundMessage, Box
 /// Builds a durable earliest-position request for `topic` and `subscriber`;
 /// returns identifier validation errors without network I/O.
 fn request(topic: &str, subscriber: &str) -> Result<SpiSubscriptionRequest, Box<dyn Error>> {
+    request_at(topic, subscriber, StartPosition::Earliest)
+}
+
+/// Builds a durable request with a caller-selected start position.
+fn request_at(
+    topic: &str,
+    subscriber: &str,
+    start_position: StartPosition,
+) -> Result<SpiSubscriptionRequest, Box<dyn Error>> {
     Ok(SpiSubscriptionRequest::new(
         Id::new(SUBSCRIPTION_IDS.fetch_add(1, Ordering::Relaxed)),
         TopicAddress::new(topic)?,
         SubscriberId::new(subscriber)?,
         Some(ConsumerGroup::new("workers")?),
         SubscriptionDurability::Durable,
-        StartPosition::Earliest,
+        start_position,
         ProviderOptions::new(),
         TypeId::of::<Vec<u8>>(),
     ))
@@ -943,7 +952,11 @@ fn test_async_claim_cancellation_after_owner_transfer_recovers_message()
         let gate = proxy.pause_after_reply("XAUTOCLAIM");
         let bus = create_bus_url(&proxy.url())?;
         let mut receiver = bus
-            .subscribe(request("async-claim-cancel", "worker-after-claim")?)
+            .subscribe(request_at(
+                "async-claim-cancel",
+                "worker-after-claim",
+                StartPosition::New,
+            )?)
             .await?;
         let cancel = Arc::new(CancelReceive::default());
         let worker_cancel = Arc::clone(&cancel);
@@ -1206,18 +1219,155 @@ fn test_async_existing_consumer_group_is_not_retried() -> Result<(), Box<dyn Err
     let server = RedisServer::start()?;
     let bus = create_bus(&server)?;
     block_on(async {
-        let first = bus.subscribe(request("busy-group", "worker-a")?).await?;
+        let _ = bus.publish(message("busy-group", "busy-a", b"A")?).await?;
+        let mut first = bus.subscribe(request("busy-group", "worker-a")?).await?;
+        let ReceiveOutcome::Message(first_message) = first.receive(Duration::from_secs(2)).await?
+        else {
+            return Err("first group consumer did not receive A".into());
+        };
+        assert_eq!(first_message.id().as_str(), "busy-a");
+        first
+            .settle(
+                first_message
+                    .settlement()
+                    .ok_or("missing settlement token for A")?,
+                DeliveryDisposition::Accept,
+            )
+            .await?;
+        first.close().await?;
+
+        let _ = bus.publish(message("busy-group", "busy-b", b"B")?).await?;
         let before_second = xgroup_command_calls(&server)?;
-        let second = bus.subscribe(request("busy-group", "worker-b")?).await?;
+        let second = bus.subscribe(request("busy-group", "worker-b")?).await;
+        let error = match second {
+            Ok(_) => return Err("existing group unexpectedly accepted Earliest".into()),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), "existing_group_start_position_ignored");
+        assert_eq!(error.retryable(), Some(false));
         let after_second = xgroup_command_calls(&server)?;
         assert_eq!(
             after_second - before_second,
             1,
             "BUSYGROUP must not trigger a repeated XGROUP CREATE"
         );
-        drop((first, second));
+
+        let before_resume = xgroup_command_calls(&server)?;
+        let resume_options =
+            ProviderOptions::from([("redis.existing_group_start".into(), "resume".into())]);
+        let mut resumed = bus
+            .subscribe(SpiSubscriptionRequest::new(
+                Id::new(SUBSCRIPTION_IDS.fetch_add(1, Ordering::Relaxed)),
+                TopicAddress::new("busy-group")?,
+                SubscriberId::new("worker-c")?,
+                Some(ConsumerGroup::new("workers")?),
+                SubscriptionDurability::Durable,
+                StartPosition::Earliest,
+                resume_options,
+                TypeId::of::<Vec<u8>>(),
+            ))
+            .await?;
+        assert_eq!(xgroup_command_calls(&server)? - before_resume, 1);
+        let ReceiveOutcome::Message(second_message) =
+            resumed.receive(Duration::from_secs(2)).await?
+        else {
+            return Err("resumed group did not receive B".into());
+        };
+        assert_eq!(second_message.id().as_str(), "busy-b");
+        resumed
+            .settle(
+                second_message
+                    .settlement()
+                    .ok_or("missing settlement token for B")?,
+                DeliveryDisposition::Accept,
+            )
+            .await?;
+        assert!(matches!(
+            resumed.receive(Duration::ZERO).await?,
+            ReceiveOutcome::TimedOut
+        ));
+        resumed.close().await?;
+
+        let before_new = xgroup_command_calls(&server)?;
+        let mut newest = bus
+            .subscribe(SpiSubscriptionRequest::new(
+                Id::new(SUBSCRIPTION_IDS.fetch_add(1, Ordering::Relaxed)),
+                TopicAddress::new("busy-group")?,
+                SubscriberId::new("worker-d")?,
+                Some(ConsumerGroup::new("workers")?),
+                SubscriptionDurability::Durable,
+                StartPosition::New,
+                ProviderOptions::new(),
+                TypeId::of::<Vec<u8>>(),
+            ))
+            .await?;
+        assert_eq!(xgroup_command_calls(&server)? - before_new, 1);
+        assert!(matches!(
+            newest.receive(Duration::ZERO).await?,
+            ReceiveOutcome::TimedOut
+        ));
+        let _ = bus.publish(message("busy-group", "busy-c", b"C")?).await?;
+        let ReceiveOutcome::Message(third_message) = newest.receive(Duration::from_secs(2)).await?
+        else {
+            return Err("New resume did not receive C".into());
+        };
+        assert_eq!(third_message.id().as_str(), "busy-c");
         Ok::<(), Box<dyn Error>>(())
     })
+}
+
+#[test]
+fn test_async_cancelled_subscribe_releases_receiver_permit() -> Result<(), Box<dyn Error>> {
+    let server = RedisServer::start()?;
+    let proxy = ControlledRedis::start(server.url())?;
+    let options = ProviderOptions::from([
+        ("redis.url".into(), proxy.url()),
+        ("redis.namespace".into(), "async-cancel-subscribe".into()),
+        ("redis.max_active_receivers".into(), "1".into()),
+    ]);
+    let bus = block_on(
+        AsyncRedisEventBusProvider
+            .create_configured(&EventBusConfig::default().with_provider_options(options)),
+    )
+    .map_err(|failure| failure.into_error())?;
+    let gate = proxy.pause_after_reply("XGROUP");
+    let cancel = Arc::new(CancelReceive::default());
+    let (result_tx, result_rx) = channel();
+    scope(|scope| -> Result<(), Box<dyn Error>> {
+        let worker_bus = Arc::clone(&bus);
+        let worker_cancel = Arc::clone(&cancel);
+        scope.spawn(move || {
+            let result = block_on(race(
+                async {
+                    Some(
+                        worker_bus
+                            .subscribe(group_request("subscribe-cancel", "worker-a", "workers"))
+                            .await,
+                    )
+                },
+                async {
+                    WaitForCancel(worker_cancel).await;
+                    None
+                },
+            ));
+            let _ = result_tx.send(result.is_none());
+        });
+        let reached = gate.wait_until_reached(Duration::from_secs(3));
+        cancel.cancel();
+        let cancelled = result_rx.recv_timeout(Duration::from_secs(2))?;
+        gate.release();
+        assert!(reached, "XGROUP reply gate was not reached");
+        assert!(cancelled, "subscribe future was not cancelled");
+        Ok(())
+    })?;
+    let mut resumed = block_on(bus.subscribe(group_request_at(
+        "subscribe-cancel",
+        "worker-b",
+        "workers",
+        StartPosition::New,
+    )))?;
+    block_on(resumed.close())?;
+    Ok(())
 }
 
 /// Reads the XGROUP call counter from `server` with blocking Redis I/O;
@@ -1255,7 +1405,9 @@ fn test_async_unsettled_message_is_claimed_after_consumer_reconnect() -> Result<
             return Err("initial consumer did not receive the event".into());
         };
         first.close().await?;
-        let mut second = bus.subscribe(request("recovery", "worker-two")?).await?;
+        let mut second = bus
+            .subscribe(request_at("recovery", "worker-two", StartPosition::New)?)
+            .await?;
         let ReceiveOutcome::Message(received) = second.receive(Duration::from_secs(2)).await?
         else {
             return Err("reconnected consumer did not claim the pending event".into());
@@ -1320,7 +1472,12 @@ fn test_async_groups_fan_out_and_share_work() -> Result<(), Box<dyn Error>> {
             .subscribe(group_request("async-groups", "worker-a", "billing"))
             .await?;
         let mut worker_b = bus
-            .subscribe(group_request("async-groups", "worker-b", "billing"))
+            .subscribe(group_request_at(
+                "async-groups",
+                "worker-b",
+                "billing",
+                StartPosition::New,
+            ))
             .await?;
         let mut audit = bus
             .subscribe(group_request("async-groups", "audit", "audit"))
@@ -1454,7 +1611,12 @@ fn test_async_reports_gap_for_removed_pending_entries() -> Result<(), Box<dyn Er
             .arg(0)
             .query::<usize>(&mut connection)?;
         let mut second = bus
-            .subscribe(group_request("async-gaps", "gap-worker-two", "gap-group"))
+            .subscribe(group_request_at(
+                "async-gaps",
+                "gap-worker-two",
+                "gap-group",
+                StartPosition::New,
+            ))
             .await?;
         let outcome = second.receive(Duration::from_secs(1)).await?;
         assert!(matches!(outcome, ReceiveOutcome::Gap(_)));
@@ -1573,10 +1735,11 @@ fn test_async_redis_command_failures_are_returned_without_details() -> Result<()
             ))
             .await?;
         let mut second = bus
-            .subscribe(group_request(
+            .subscribe(group_request_at(
                 "async-wrong-type",
                 "duplicate-group-worker",
                 "group",
+                StartPosition::New,
             ))
             .await?;
         first.close().await?;
@@ -1705,7 +1868,12 @@ fn test_async_recovers_pending_message_after_redis_restart() -> Result<(), Box<d
 
         server.restart()?;
         let mut recovered = bus
-            .subscribe(group_request("restart", "after-restart", "restart-group"))
+            .subscribe(group_request_at(
+                "restart",
+                "after-restart",
+                "restart-group",
+                StartPosition::New,
+            ))
             .await?;
         let ReceiveOutcome::Message(received) = recovered.receive(Duration::from_secs(3)).await?
         else {
@@ -1727,13 +1895,23 @@ fn test_async_recovers_pending_message_after_redis_restart() -> Result<(), Box<d
 /// Returns a durable request for `topic`, `subscriber`, and `group` without
 /// I/O; panics if a fixed fixture identifier fails validation.
 fn group_request(topic: &str, subscriber: &str, group: &str) -> SpiSubscriptionRequest {
+    group_request_at(topic, subscriber, group, StartPosition::Earliest)
+}
+
+/// Returns a durable group request with a caller-selected start position.
+fn group_request_at(
+    topic: &str,
+    subscriber: &str,
+    group: &str,
+    start_position: StartPosition,
+) -> SpiSubscriptionRequest {
     SpiSubscriptionRequest::new(
         Id::new(SUBSCRIPTION_IDS.fetch_add(1, Ordering::Relaxed)),
         TopicAddress::new(topic).expect("static topic is valid"),
         SubscriberId::new(subscriber).expect("static subscriber is valid"),
         Some(ConsumerGroup::new(group).expect("static group is valid")),
         SubscriptionDurability::Durable,
-        StartPosition::Earliest,
+        start_position,
         ProviderOptions::new(),
         TypeId::of::<Vec<u8>>(),
     )

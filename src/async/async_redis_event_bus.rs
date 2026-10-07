@@ -48,6 +48,8 @@ use crate::error::RedisProviderError;
 use crate::error::invalid_publish_reply;
 use crate::error::query_publish_error;
 use crate::error::to_publish_error;
+use crate::existing_group_start::ensure_existing_group_start;
+use crate::existing_group_start::parse_existing_group_policy;
 use crate::internal::RecoveryState;
 use crate::internal::WireLimits;
 use crate::naming::group_name;
@@ -193,7 +195,8 @@ impl AsyncEventBusSpi for AsyncRedisEventBus {
     /// Creates or reuses a consumer group and returns its async receiver.
     ///
     /// A group's cursor is created only when Redis has not seen the group
-    /// before; subsequent requests retain the cursor already stored by Redis.
+    /// before. For an existing group, `New` or the explicit `resume` policy
+    /// retains its cursor; an explicit position otherwise returns an error.
     /// Unsettled entries remain in the pending entries list when a read future
     /// is cancelled or a receiver is closed.
     ///
@@ -212,8 +215,9 @@ impl AsyncEventBusSpi for AsyncRedisEventBus {
     ///
     /// # Errors
     ///
-    /// Returns an SPI error if Redis cannot open a connection or create the
-    /// requested consumer group.
+    /// Returns an SPI error if subscription options are invalid, an existing
+    /// group's cursor conflicts with an explicit start position, or Redis
+    /// cannot open a connection or create the requested consumer group.
     fn subscribe<'a>(
         &'a self,
         request: SpiSubscriptionRequest,
@@ -255,6 +259,7 @@ impl AsyncEventBusSpi for AsyncRedisEventBus {
                     source: Box::new(RedisProviderError::Configuration("invalid Redis stream ID")),
                 });
             }
+            let policy = parse_existing_group_policy(&request)?;
             let receiver_permit = self
                 .client
                 .try_receiver()
@@ -301,14 +306,18 @@ impl AsyncEventBusSpi for AsyncRedisEventBus {
             } else {
                 result
             };
-            if let Err(error) = result
-                && error.code() != Some("BUSYGROUP")
-            {
-                return Err(spi_error(
-                    "subscribe",
-                    Some(&topic),
-                    from_redis_error("subscribe", &error),
-                ));
+            match result {
+                Ok(()) => {}
+                Err(error) if error.code() == Some("BUSYGROUP") => {
+                    ensure_existing_group_start(&request, policy)?;
+                }
+                Err(error) => {
+                    return Err(spi_error(
+                        "subscribe",
+                        Some(&topic),
+                        from_redis_error("subscribe", &error),
+                    ));
+                }
             }
             let consumer = new_consumer_name().map_err(|_| SpiError::Operation {
                 provider_id: "redis-streams".into(),
