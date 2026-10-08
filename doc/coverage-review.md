@@ -2,30 +2,32 @@
 
 [简体中文](coverage-review.zh_CN.md)
 
-## Current refactor acceptance
+## Latest CI verification
 
-The sixth full CI attempt on 2026-09-29 exited with status 0. Its clean package coverage measurement passes the unchanged gates:
+The full CI run on 2026-10-09 (Asia/Shanghai) exited with status 0. The clean package coverage measurement passes the existing gates:
 
-| Metric | CI6 measured result | Gate |
+| Metric | Latest measured result | Gate |
 | --- | ---: | ---: |
-| Functions | 384/402 (95.52%) | at least 95% |
-| Lines | 3,755/3,913 (95.96%) | above 90% |
-| Regions | 5,821/6,160 (94.50%) | above 85% |
+| Functions | 508/534 (95.13%) | at least 95% |
+| Lines | 4,865/5,063 (96.09%) | above 90% |
+| Regions | 7,566/7,976 (94.86%) | above 85% |
 
-Coverage runs through `.infra/bin/ci-check.sh` → `project-hook` → `project-ci-check.sh` → `.infra/bin/coverage.sh`, selecting `qubit-event-bus-redis` with `--locked --all-features -- --test-threads=1`. The file summaries cover 39 provider `src` files, excluding external `tests`, `src/tests`, `examples` and upstream package paths. Inline private tests and helpers in the included source files participate in the LLVM summaries, so these metrics are not coverage of production declarations alone. Their denominator differs from the manual Rustdoc declaration count. The raw and processed totals, `ci-summary.json`, and sums of the 39 file summaries agree for functions, lines and regions.
+Coverage runs through `.infra/bin/ci-check.sh` → `project-hook` → `project-ci-check.sh` → `.infra/bin/coverage.sh`, selecting `qubit-event-bus-redis` with `--locked --all-features -- --test-threads=1`. The package-level totals include the source files selected by the coverage configuration; inline private tests and helpers in those files participate in LLVM summaries, so these metrics are not coverage of production declarations alone. Their denominator differs from the manual Rustdoc declaration count. The generated `coverage.json` and `ci-summary.json` agree on function, line and region totals. CI cleanup removed the raw profile report after successful collection.
 
-`.infra/bin/coverage.sh` cleans profile data before building the instrumented examples and measuring coverage. All 26 profiles in CI6 were created after its start at 2026-09-29 13:54:33 UTC; none predates this attempt. The measured source seal contains 154 Rust files and `.infra/bin/coverage.sh` (155 entries), SHA256 `02510d2bb99983c7a6b6977bebdec34bf99b83faaeaefc0a567bfab1eb7a9861`. Baseline HEAD was `5e36aede24c5db5de2e282932546de2fe500e9c2`; the measured changes were still uncommitted, so that HEAD identifies the baseline, not the complete measured source. Cargo remains at `0.4.0`, and these changes are unreleased.
+`.infra/bin/coverage.sh` cleans profile data before building the instrumented examples and measuring coverage. The measurement used the uncommitted implementation on branch `codex/redis-provider-improvements-20261009`, based on baseline HEAD `214cca830b6e3c8ff03d28dd3545387e88057f55`. Its reproducible source seal is SHA256 `6b86ea82115554016bc3601eeff59881fdfb9f6665e01761fc5e8ffe5b95fd4b` over 202 sorted relative paths and file contents: Rust files under `src`, `tests`, `examples`, `benches` and `fuzz/fuzz_targets`; root `Cargo.lock`, `fuzz/Cargo.lock` and all fixture `Cargo.lock` files; root `Cargo.toml`; and `.infra/bin/coverage.sh` and `.infra/bin/ci-check.sh`. The local `qubit-event-bus` and `qubit-task` dependencies were pinned to commits `387f16df9a1b380946dd559ad7632c66b8c19fa1` and `87148632e07ce4136ca1db5eef78db3365f2c27a`. Cargo remains at `0.4.0`, and these changes are unreleased.
 
-The coverage hook ran 23 suites: 302 passed, zero failed and one ignored legacy manual benchmark. The earlier verification phase passed 310 tests including eight doctests, with one ignored benchmark. These counts describe separate executions and exclude feature-matrix repetitions. The configured nine variants passed: default, no default features, sync, async, sync+discovery, async+discovery, sync+conformance, async+conformance and all features. Full CI also passed strict style/Clippy/Rustdoc, README checks, release build, package verification and the dependency audit of 148 dependencies. Five additional locked minimal/discovery checks also passed in separate runs; their test executions are not added to the 302 coverage-hook tests.
+The coverage hook and full test suite passed, including the TLS transport, TLS Sentinel failover and downstream outbox TLS regressions. All nine configured feature variants passed: default, no default features, sync, async, sync+discovery, async+discovery, sync+conformance, async+conformance and all features. Full CI also passed style/Clippy/Rustdoc, README checks, release build, package verification and fuzz smoke checks. The dependency audit scanned 180 dependencies using the cached 1,295-advisory database; refreshing that database from GitHub failed due to a network error, so the audit did not use freshly fetched advisory data.
 
-CI6 ran `RS_INFRA_ARTIFACT_CLEANUP=0 ./.infra/bin/ci-check.sh` on `x86_64-unknown-linux-gnu`, using rustc `1.94.0` (`4a4ef493e`, LLVM `21.1.8`), cargo-llvm-cov `0.8.6`, and the pinned style toolchain `nightly-2026-06-05`. The parent process supplied no overrides for `CARGO_INCREMENTAL`, `RUSTFLAGS`, `RUSTDOCFLAGS`, `LLVM_PROFILE_FILE` or `RUST_TEST_THREADS`; coverage tools derive their instrumentation environment, and the test invocation explicitly uses one test thread. These parent-environment facts do not imply that the instrumented child variables are unset. The measured dependency was the local `qubit-event-bus` `0.16.0`; this run does not establish registry availability.
+The run used `x86_64-unknown-linux-gnu`, rustc `1.94.0` (`4a4ef493e`, LLVM `21.1.8`), cargo-llvm-cov `0.8.6`, and the pinned style toolchain `nightly-2026-06-05`. Cargo resolved the pinned local event-bus checkout; this run does not establish registry availability.
 
 | Artifact | SHA256 |
 | --- | --- |
-| `target/infra/coverage/raw.json` and `coverage.json` (identical bytes) | `2f557b11291b3e306b64bacd89733f05d77137ada777e6bb132c243e9b52d025` |
-| `ci-summary.json` | `de63bce0b50cf2fb759a88750acfacefdfaad8f0491cf6783c762958e4f21f88` |
+| `coverage.json` | `d920a0de2d6738a9cb5949f1e12c0271ecf9b86fbaadfc09aaf2737cd5c3bd32` |
+| `ci-summary.json` | `5635b7354c2d561950e8d22002c1f9eb1da864b3b7be6fcf3780e46b8d7736f1` |
 
-## Current gaps in file summaries
+The reports were written to the repository root as `coverage.json` and `ci-summary.json`; the detailed `target/infra/coverage/raw.json` report was removed by CI artifact cleanup after successful collection.
+
+## Earlier CI6 gaps in file summaries
 
 Only these seven files have uncovered functions in the CI6 LLVM file summaries:
 

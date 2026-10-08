@@ -2,30 +2,32 @@
 
 [English](coverage-review.md)
 
-## 当前重构的验收
+## 最新 CI 验证
 
-2026-09-29 第六次完整 CI 以状态 0 退出。其干净包级覆盖率测量通过原有门槛：
+2026-10-09（Asia/Shanghai）完整 CI 以状态 0 退出。干净的包级覆盖率测量通过现有门槛：
 
-| 指标 | CI6 实测结果 | 门槛 |
+| 指标 | 最新实测结果 | 门槛 |
 | --- | ---: | ---: |
-| 函数 | 384/402（95.52%） | 至少 95% |
-| 行 | 3,755/3,913（95.96%） | 高于 90% |
-| 区域 | 5,821/6,160（94.50%） | 高于 85% |
+| 函数 | 508/534（95.13%） | 至少 95% |
+| 行 | 4,865/5,063（96.09%） | 高于 90% |
+| 区域 | 7,566/7,976（94.86%） | 高于 85% |
 
-覆盖率执行链为 `.infra/bin/ci-check.sh` → `project-hook` → `project-ci-check.sh` → `.infra/bin/coverage.sh`，选择 `qubit-event-bus-redis`，使用 `--locked --all-features -- --test-threads=1`。文件汇总覆盖 39 个 provider `src` 文件，排除外部 `tests`、`src/tests`、`examples` 和上游包路径。被纳入文件中的内联私有测试与 helper 也参与 LLVM 汇总，因此这些指标不等于仅生产声明的覆盖率，其分母与手工 Rustdoc 声明计数不同。原始及处理后的报告、`ci-summary.json` 和 39 个文件汇总的函数、行及区域计数完全一致。
+覆盖率执行链为 `.infra/bin/ci-check.sh` → `project-hook` → `project-ci-check.sh` → `.infra/bin/coverage.sh`，选择 `qubit-event-bus-redis`，使用 `--locked --all-features -- --test-threads=1`。包级汇总覆盖 coverage 配置选定的源码文件；这些文件中的内联私有测试与 helper 也参与 LLVM 汇总，因此这些指标不等于仅生产声明的覆盖率，其分母与手工 Rustdoc 声明计数不同。生成的 `coverage.json` 与 `ci-summary.json` 函数、行及区域计数一致。CI 清理在成功采集后移除了原始 profile 报告。
 
-`.infra/bin/coverage.sh` 在构建插桩示例及测量前清理 profile 数据。CI6 的全部 26 份 profile 都产生于本次开始时间 2026-09-29 13:54:33 UTC 之后，没有早于本次运行的 profile。实测源码 seal 包含 154 个 Rust 文件及 `.infra/bin/coverage.sh`，共 155 项，SHA256 为 `02510d2bb99983c7a6b6977bebdec34bf99b83faaeaefc0a567bfab1eb7a9861`。基线 HEAD 为 `5e36aede24c5db5de2e282932546de2fe500e9c2`；实测变更当时尚未提交，因此该 HEAD 标识基线，不能代表全部实测源码。Cargo 版本仍为 `0.4.0`，变更尚未发布。
+`.infra/bin/coverage.sh` 在构建插桩示例及测量前清理 profile 数据。测量使用分支 `codex/redis-provider-improvements-20261009` 上尚未提交的实现，基线 HEAD 为 `214cca830b6e3c8ff03d28dd3545387e88057f55`。可复现源码 seal 的 SHA256 为 `6b86ea82115554016bc3601eeff59881fdfb9f6665e01761fc5e8ffe5b95fd4b`，由 202 个排序后的相对路径及文件内容计算：`src`、`tests`、`examples`、`benches`、`fuzz/fuzz_targets` 下的 Rust 文件；根 `Cargo.lock`、`fuzz/Cargo.lock` 和所有 fixture `Cargo.lock`；根 `Cargo.toml`；以及 `.infra/bin/coverage.sh` 和 `.infra/bin/ci-check.sh`。本地 `qubit-event-bus` 与 `qubit-task` 依赖固定在 commit `387f16df9a1b380946dd559ad7632c66b8c19fa1` 和 `87148632e07ce4136ca1db5eef78db3365f2c27a`。Cargo 版本仍为 `0.4.0`，变更尚未发布。
 
-覆盖率 hook 执行 23 个 suite：302 项通过、0 项失败、1 项旧手工基准忽略。此前 verify 阶段有 310 项通过，包括 8 项 doctest，另有 1 项基准忽略。两组计数对应不同执行，不累计 feature matrix 重复次数。配置中的九种组合均通过：默认、无默认 feature、sync、async、sync+discovery、async+discovery、sync+conformance、async+conformance 及 all-features。完整 CI 还通过严格 style/Clippy/Rustdoc、README 检查、release 构建、打包验证，以及覆盖 148 个依赖的安全检查。另有五项 locked 最小 feature/discovery 检查也在独立运行中通过，其测试执行不重复累计到覆盖率 hook 的 302 项。
+覆盖率 hook 及完整测试套件均通过，包括 TLS 传输、TLS Sentinel 故障转移和 TLS 下游 outbox 回归。配置中的九种组合均通过：默认、无默认 feature、sync、async、sync+discovery、async+discovery、sync+conformance、async+conformance 及 all-features。完整 CI 还通过 style/Clippy/Rustdoc、README 检查、release 构建、打包验证和 fuzz smoke 检查。依赖审计使用本地缓存的 1,295 条 advisory 数据库扫描了 180 个依赖；从 GitHub 刷新数据库时遇到网络错误，因此本次审计没有使用最新下载的数据。
 
-CI6 在 `x86_64-unknown-linux-gnu` 上执行 `RS_INFRA_ARTIFACT_CLEANUP=0 ./.infra/bin/ci-check.sh`，使用 rustc `1.94.0`（`4a4ef493e`，LLVM `21.1.8`）、cargo-llvm-cov `0.8.6` 及固定的 style toolchain `nightly-2026-06-05`。父进程未覆盖 `CARGO_INCREMENTAL`、`RUSTFLAGS`、`RUSTDOCFLAGS`、`LLVM_PROFILE_FILE` 或 `RUST_TEST_THREADS`；覆盖率工具会派生插桩环境，测试命令显式使用单测试线程。这些父进程环境事实不表示插桩子进程变量未设置。实测依赖为本地 `qubit-event-bus` `0.16.0`，此次运行不能证明 registry 已可用。
+本次运行使用 `x86_64-unknown-linux-gnu`、rustc `1.94.0`（`4a4ef493e`，LLVM `21.1.8`）、cargo-llvm-cov `0.8.6` 及固定的 style toolchain `nightly-2026-06-05`。Cargo 使用固定的本地 event-bus checkout；此次运行不能证明 registry 已可用。
 
 | 产物 | SHA256 |
 | --- | --- |
-| `target/infra/coverage/raw.json` 与 `coverage.json`（字节相同） | `2f557b11291b3e306b64bacd89733f05d77137ada777e6bb132c243e9b52d025` |
-| `ci-summary.json` | `de63bce0b50cf2fb759a88750acfacefdfaad8f0491cf6783c762958e4f21f88` |
+| `coverage.json` | `d920a0de2d6738a9cb5949f1e12c0271ecf9b86fbaadfc09aaf2737cd5c3bd32` |
+| `ci-summary.json` | `5635b7354c2d561950e8d22002c1f9eb1da864b3b7be6fcf3780e46b8d7736f1` |
 
-## 当前文件汇总中的缺口
+报告产物位于仓库根目录：`coverage.json` 和 `ci-summary.json`。详细报告 `target/infra/coverage/raw.json` 在成功采集后由 CI 产物清理移除。
+
+## 先前 CI6 文件汇总中的缺口
 
 CI6 的 LLVM 文件汇总中，仅以下七个文件存在未覆盖函数：
 
