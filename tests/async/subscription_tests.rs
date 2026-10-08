@@ -64,7 +64,10 @@ fn create_bus_with_claim_min_idle(
     let options: ProviderOptions = [
         ("redis.url".into(), url.into()),
         ("redis.namespace".into(), "settlement-tests".into()),
-        ("redis.claim_min_idle_ms".into(), claim_min_idle_ms.to_string()),
+        (
+            "redis.claim_min_idle_ms".into(),
+            claim_min_idle_ms.to_string(),
+        ),
         ("redis.max_unsettled_per_subscription".into(), "1".into()),
     ]
     .into();
@@ -83,17 +86,26 @@ fn test_receive_provider_attempt_distinguishes_new_pending_and_claimed() -> Test
         let pending_bus = create_bus_with_claim_min_idle(pending_server.url(), 60_000)?;
         let _ = pending_bus.publish(message("pending-attempt")?).await?;
         let mut pending_receiver = pending_bus.subscribe(request()?).await?;
-        let ReceiveOutcome::Message(new_message) = pending_receiver.receive(Duration::from_secs(2)).await? else {
+        let ReceiveOutcome::Message(new_message) =
+            pending_receiver.receive(Duration::from_secs(2)).await?
+        else {
             return Err("new message missing".into());
         };
-        assert_eq!(new_message.provider_attempt().map(|attempt| attempt.get()), Some(1));
+        assert_eq!(
+            new_message.provider_attempt().map(|attempt| attempt.get()),
+            Some(1)
+        );
         pending_receiver
             .settle(
-                new_message.settlement().ok_or("new message settlement token missing")?,
+                new_message
+                    .settlement()
+                    .ok_or("new message settlement token missing")?,
                 DeliveryDisposition::Retry,
             )
             .await?;
-        let ReceiveOutcome::Message(pending_message) = pending_receiver.receive(Duration::from_secs(2)).await? else {
+        let ReceiveOutcome::Message(pending_message) =
+            pending_receiver.receive(Duration::from_secs(2)).await?
+        else {
             return Err("pending message missing".into());
         };
         assert_eq!(pending_message.provider_attempt(), None);
@@ -102,13 +114,22 @@ fn test_receive_provider_attempt_distinguishes_new_pending_and_claimed() -> Test
         let claim_bus = create_bus(claim_server.url())?;
         let _ = claim_bus.publish(message("claimed-attempt")?).await?;
         let mut first_receiver = claim_bus.subscribe(request()?).await?;
-        let ReceiveOutcome::Message(first_message) = first_receiver.receive(Duration::from_secs(2)).await? else {
+        let ReceiveOutcome::Message(first_message) =
+            first_receiver.receive(Duration::from_secs(2)).await?
+        else {
             return Err("first claimed message delivery missing".into());
         };
-        assert_eq!(first_message.provider_attempt().map(|attempt| attempt.get()), Some(1));
+        assert_eq!(
+            first_message
+                .provider_attempt()
+                .map(|attempt| attempt.get()),
+            Some(1)
+        );
         drop(first_receiver);
         let mut claiming_receiver = claim_bus.subscribe(request_at(StartPosition::New)?).await?;
-        let ReceiveOutcome::Message(claimed_message) = claiming_receiver.receive(Duration::from_secs(2)).await? else {
+        let ReceiveOutcome::Message(claimed_message) =
+            claiming_receiver.receive(Duration::from_secs(2)).await?
+        else {
             return Err("claimed message missing".into());
         };
         assert_eq!(claimed_message.provider_attempt(), None);
@@ -158,7 +179,12 @@ fn assert_ack_applied(server: &RedisServer) -> TestResult {
     let mut observer = Client::open(server.url())?.get_connection()?;
     let pending: Vec<Value> = cmd("XPENDING")
         .arg(stream_key("settlement-tests", "settlement"))
-        .arg(group_name("settlement-tests", "settlement", "worker", Some("group")))
+        .arg(group_name(
+            "settlement-tests",
+            "settlement",
+            "worker",
+            Some("group"),
+        ))
         .arg("-")
         .arg("+")
         .arg(10)
@@ -171,7 +197,8 @@ fn assert_ack_applied(server: &RedisServer) -> TestResult {
 }
 
 #[test]
-fn test_settle_cancelled_applied_xack_preserves_intent_and_same_retry_releases_slot() -> TestResult {
+fn test_settle_cancelled_applied_xack_preserves_intent_and_same_retry_releases_slot() -> TestResult
+{
     let server = RedisServer::start()?;
     let proxy = ControlledRedis::start(server.url())?;
     let bus = create_bus(&proxy.url())?;
@@ -179,7 +206,8 @@ fn test_settle_cancelled_applied_xack_preserves_intent_and_same_retry_releases_s
         let _ = bus.publish(message("first")?).await?;
         let _ = bus.publish(message("second")?).await?;
         let mut receiver = bus.subscribe(request()?).await?;
-        let ReceiveOutcome::Message(received) = receiver.receive(Duration::from_secs(2)).await? else {
+        let ReceiveOutcome::Message(received) = receiver.receive(Duration::from_secs(2)).await?
+        else {
             return Err("first event missing".into());
         };
         let token = received.settlement().ok_or("token missing")?;
@@ -193,14 +221,23 @@ fn test_settle_cancelled_applied_xack_preserves_intent_and_same_retry_releases_s
         )
         .await;
         gate.release_without_reply();
-        assert!(result.is_none(), "settlement is cancelled after Redis applies XACK");
+        assert!(
+            result.is_none(),
+            "settlement is cancelled after Redis applies XACK"
+        );
         assert_ack_applied(&server)?;
         assert!(
-            receiver.settle(token, DeliveryDisposition::Retry).await.is_err(),
+            receiver
+                .settle(token, DeliveryDisposition::Retry)
+                .await
+                .is_err(),
             "unknown Accept must reject direct Retry"
         );
         assert!(
-            receiver.settle(token, DeliveryDisposition::Reject).await.is_err(),
+            receiver
+                .settle(token, DeliveryDisposition::Reject)
+                .await
+                .is_err(),
             "unknown Accept must reject direct Reject"
         );
         assert!(matches!(
@@ -227,7 +264,8 @@ fn test_settle_unpolled_future_and_first_explicit_rejection_allow_retry() -> Tes
     block_on(async {
         let _ = bus.publish(message("rejected")?).await?;
         let mut receiver = bus.subscribe(request()?).await?;
-        let ReceiveOutcome::Message(received) = receiver.receive(Duration::from_secs(2)).await? else {
+        let ReceiveOutcome::Message(received) = receiver.receive(Duration::from_secs(2)).await?
+        else {
             return Err("event missing".into());
         };
         let token = received.settlement().ok_or("token missing")?;
@@ -237,7 +275,12 @@ fn test_settle_unpolled_future_and_first_explicit_rejection_allow_retry() -> Tes
             .arg(stream_key("settlement-tests", "settlement"))
             .arg("wrong type")
             .query::<()>(&mut observer)?;
-        assert!(receiver.settle(token, DeliveryDisposition::Accept).await.is_err());
+        assert!(
+            receiver
+                .settle(token, DeliveryDisposition::Accept)
+                .await
+                .is_err()
+        );
         receiver.settle(token, DeliveryDisposition::Retry).await?;
         Ok(())
     })
@@ -251,7 +294,8 @@ fn test_settle_explicit_rejection_after_cancelled_xack_never_unlocks_intent() ->
     block_on(async {
         let _ = bus.publish(message("unknown")?).await?;
         let mut receiver = bus.subscribe(request()?).await?;
-        let ReceiveOutcome::Message(received) = receiver.receive(Duration::from_secs(2)).await? else {
+        let ReceiveOutcome::Message(received) = receiver.receive(Duration::from_secs(2)).await?
+        else {
             return Err("event missing".into());
         };
         let token = received.settlement().ok_or("token missing")?;
@@ -273,14 +317,25 @@ fn test_settle_explicit_rejection_after_cancelled_xack_never_unlocks_intent() ->
             .arg("wrong type")
             .query::<()>(&mut observer)?;
         assert!(
-            receiver.settle(token, DeliveryDisposition::Accept).await.is_err(),
+            receiver
+                .settle(token, DeliveryDisposition::Accept)
+                .await
+                .is_err(),
             "retry now receives explicit WRONGTYPE"
         );
         assert!(
-            receiver.settle(token, DeliveryDisposition::Retry).await.is_err(),
+            receiver
+                .settle(token, DeliveryDisposition::Retry)
+                .await
+                .is_err(),
             "later rejection cannot disprove earlier applied XACK"
         );
-        assert!(receiver.settle(token, DeliveryDisposition::Reject).await.is_err());
+        assert!(
+            receiver
+                .settle(token, DeliveryDisposition::Reject)
+                .await
+                .is_err()
+        );
         Ok(())
     })
 }
@@ -303,11 +358,21 @@ fn test_zero_timeout_claim_cursor_preserves_pending_and_new_reads() -> TestResul
         ));
         let commands = server.finish_allow_remaining();
         assert_eq!(
-            commands.iter().map(|command| command[0].as_str()).collect::<Vec<_>>(),
+            commands
+                .iter()
+                .map(|command| command[0].as_str())
+                .collect::<Vec<_>>(),
             vec!["XGROUP", "XAUTOCLAIM", "XREADGROUP", "XREADGROUP"]
         );
-        let reads: Vec<_> = commands.iter().filter(|command| command[0] == "XREADGROUP").collect();
-        assert_eq!(reads.len(), 2, "own pending and new reads must both dispatch");
+        let reads: Vec<_> = commands
+            .iter()
+            .filter(|command| command[0] == "XREADGROUP")
+            .collect();
+        assert_eq!(
+            reads.len(),
+            2,
+            "own pending and new reads must both dispatch"
+        );
         assert_eq!(reads[0].last().map(String::as_str), Some("0-0"));
         assert_eq!(reads[1].last().map(String::as_str), Some(">"));
         assert!(
@@ -326,7 +391,8 @@ fn test_zero_timeout_claim_cursor_preserves_pending_and_new_reads() -> TestResul
 
 #[cfg(feature = "async")]
 #[test]
-fn test_async_subscribe_rejects_invalid_stream_position_before_connecting() -> Result<(), Box<dyn Error>> {
+fn test_async_subscribe_rejects_invalid_stream_position_before_connecting()
+-> Result<(), Box<dyn Error>> {
     block_on(async {
         let bus = AsyncRedisEventBusProvider
             .create_configured(&EventBusConfig::default())
@@ -354,7 +420,12 @@ fn test_settle_rejects_an_unrecognized_token_state() -> TestResult {
     block_on(async {
         let mut receiver = bus.subscribe(request()?).await?;
         let token = SettlementToken::new(Id::new(1), StartPosition::New);
-        assert!(receiver.settle(&token, DeliveryDisposition::Accept).await.is_err());
+        assert!(
+            receiver
+                .settle(&token, DeliveryDisposition::Accept)
+                .await
+                .is_err()
+        );
         Ok(())
     })
 }
@@ -381,13 +452,19 @@ fn test_retry_settlement_is_idempotent_and_rejects_a_conflicting_disposition() -
     block_on(async {
         let _ = bus.publish(message("retry-contract")?).await?;
         let mut receiver = bus.subscribe(request()?).await?;
-        let ReceiveOutcome::Message(received) = receiver.receive(Duration::from_secs(2)).await? else {
+        let ReceiveOutcome::Message(received) = receiver.receive(Duration::from_secs(2)).await?
+        else {
             return Err("event missing".into());
         };
         let token = received.settlement().ok_or("token missing")?;
         receiver.settle(token, DeliveryDisposition::Retry).await?;
         receiver.settle(token, DeliveryDisposition::Retry).await?;
-        assert!(receiver.settle(token, DeliveryDisposition::Accept).await.is_err());
+        assert!(
+            receiver
+                .settle(token, DeliveryDisposition::Accept)
+                .await
+                .is_err()
+        );
         Ok(())
     })
 }
@@ -451,7 +528,10 @@ fn test_receive_malformed_range_pending_and_new_replies_recover_safely() -> Test
                     source,
                 } = error
                 else {
-                    return Err(format!("malformed {stage} reply returned the wrong error variant").into());
+                    return Err(format!(
+                        "malformed {stage} reply returned the wrong error variant"
+                    )
+                    .into());
                 };
                 assert_eq!(provider_id.as_ref(), "redis-streams");
                 assert_eq!(operation, "receive");
@@ -459,14 +539,20 @@ fn test_receive_malformed_range_pending_and_new_replies_recover_safely() -> Test
                 assert_eq!(kind, "outcome_unknown", "{stage}");
                 assert_eq!(retryable, Some(true));
                 assert!(!source.to_string().contains("fault-secret"));
-                assert!(source.source().is_none(), "raw protocol diagnostics must not escape");
+                assert!(
+                    source.source().is_none(),
+                    "raw protocol diagnostics must not escape"
+                );
                 assert!(matches!(
                     receiver.receive(Duration::ZERO).await?,
                     ReceiveOutcome::TimedOut
                 ));
                 let commands = server.finish();
                 assert_eq!(
-                    commands.iter().map(|command| command[0].as_str()).collect::<Vec<_>>(),
+                    commands
+                        .iter()
+                        .map(|command| command[0].as_str())
+                        .collect::<Vec<_>>(),
                     expected
                 );
                 assert_eq!(
@@ -475,16 +561,22 @@ fn test_receive_malformed_range_pending_and_new_replies_recover_safely() -> Test
                     "the retry must resume the last completed claim cursor"
                 );
                 assert_eq!(
-                    commands[failure_command_count + 1].last().map(String::as_str),
+                    commands[failure_command_count + 1]
+                        .last()
+                        .map(String::as_str),
                     Some("0-0")
                 );
                 assert_eq!(
-                    commands[failure_command_count + 2].last().map(String::as_str),
+                    commands[failure_command_count + 2]
+                        .last()
+                        .map(String::as_str),
                     Some(">")
                 );
                 if stage == "pending" || stage == "new" {
                     assert_eq!(
-                        commands[failure_command_count - 1].last().map(String::as_str),
+                        commands[failure_command_count - 1]
+                            .last()
+                            .map(String::as_str),
                         Some(if stage == "pending" { "0-0" } else { ">" })
                     );
                 }

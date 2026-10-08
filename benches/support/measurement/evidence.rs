@@ -89,7 +89,11 @@ impl Evidence {
         latencies.sort_unstable();
         failed_latencies.sort_unstable();
         let failure_percentile = |percent: usize| {
-            let rank = failed_latencies.len().saturating_mul(percent).div_ceil(100).max(1);
+            let rank = failed_latencies
+                .len()
+                .saturating_mul(percent)
+                .div_ceil(100)
+                .max(1);
             failed_latencies.get(rank - 1).copied().unwrap_or(0)
         };
         let percentile = |percent: usize| {

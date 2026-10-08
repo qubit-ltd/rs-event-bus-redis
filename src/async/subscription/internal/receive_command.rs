@@ -74,15 +74,18 @@ impl ReceiveCommand for Cmd {
         connection: &'a mut MultiplexedConnection,
     ) -> SpiFuture<'a, Result<T, RedisProviderError>> {
         Box::pin(async move {
-            let raw = connection
-                .send_packed_command(self)
-                .await
-                .map_err(|_| RedisProviderError::OutcomeUnknown { operation: "receive" })?;
+            let raw = connection.send_packed_command(self).await.map_err(|_| {
+                RedisProviderError::OutcomeUnknown {
+                    operation: "receive",
+                }
+            })?;
             if let Value::ServerError(error) = raw {
                 let error: RedisError = error.into();
                 return Err(from_redis_error("receive", &error));
             }
-            T::from_owned_redis_value(raw).map_err(|_| RedisProviderError::OutcomeUnknown { operation: "receive" })
+            T::from_owned_redis_value(raw).map_err(|_| RedisProviderError::OutcomeUnknown {
+                operation: "receive",
+            })
         })
     }
 }
@@ -119,7 +122,8 @@ mod tests {
         ]
         .into();
         let client =
-            Client::new(&RedisEventBusConfig::from_provider_options(&options).expect("settings")).expect("client");
+            Client::new(&RedisEventBusConfig::from_provider_options(&options).expect("settings"))
+                .expect("client");
         let mut command = cmd("ECHO");
         command.arg("bad");
         block_on(async {
@@ -127,14 +131,18 @@ mod tests {
                 .get_async_dedicated_connection()
                 .await
                 .expect("dedicated receiver socket");
-            let held = client.try_command(CommandClass::General).expect("occupy general slot");
+            let held = client
+                .try_command(CommandClass::General)
+                .expect("occupy general slot");
             let error = command
                 .query_receive::<u64>(&mut connection)
                 .await
                 .expect_err("invalid integer reply");
             assert!(matches!(
                 error,
-                RedisProviderError::OutcomeUnknown { operation: "receive" }
+                RedisProviderError::OutcomeUnknown {
+                    operation: "receive"
+                }
             ));
             assert!(matches!(
                 client.try_command(CommandClass::General),

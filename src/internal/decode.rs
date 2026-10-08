@@ -71,12 +71,13 @@ pub(crate) fn decode_entry(
     limits
         .check_wire(bytes.len())
         .map_err(|_| DecodeFailure::LimitExceeded)?;
-    let encoded = from_utf8(bytes).map_err(|_| DecodeFailure::Poison(PoisonReason::InvalidWireField))?;
+    let encoded =
+        from_utf8(bytes).map_err(|_| DecodeFailure::Poison(PoisonReason::InvalidWireField))?;
     let fields = WireFields::decode_wire(encoded, limits).map_err(|error| match error {
         RedisProviderError::UnsupportedWireVersion => DecodeFailure::UnsupportedVersion,
-        RedisProviderError::LimitExceeded | RedisProviderError::WireTooLarge | RedisProviderError::PayloadTooLarge => {
-            DecodeFailure::LimitExceeded
-        }
+        RedisProviderError::LimitExceeded
+        | RedisProviderError::WireTooLarge
+        | RedisProviderError::PayloadTooLarge => DecodeFailure::LimitExceeded,
         _ => DecodeFailure::Poison(PoisonReason::InvalidJson),
     })?;
     let (message_topic, event_id, timestamp, headers, ordering_key, payload) =

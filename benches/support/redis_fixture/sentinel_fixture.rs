@@ -48,7 +48,9 @@ impl SentinelFixture {
                 .arg("CKQUORUM")
                 .arg("benchmaster")
                 .query::<String>(&mut sentinel);
-            if info.contains("master_link_status:up") && quorum.is_ok_and(|reply| reply.starts_with("OK")) {
+            if info.contains("master_link_status:up")
+                && quorum.is_ok_and(|reply| reply.starts_with("OK"))
+            {
                 return Ok(fixture);
             }
             thread::sleep(Duration::from_millis(100));
@@ -118,7 +120,9 @@ impl SentinelFixture {
                         let remaining = deadline.saturating_duration_since(Instant::now());
                         *replica = Client::open(self.replica.url())?
                             .get_connection_with_timeout(remaining.min(Duration::from_secs(2)))?;
-                        println!("fixture_observer_reconnect,observer=replica,after_sentinel_votes={votes}");
+                        println!(
+                            "fixture_observer_reconnect,observer=replica,after_sentinel_votes={votes}"
+                        );
                         cmd("INFO").arg("replication").query(replica)?
                     }
                     Err(error) => return Err(error.into()),

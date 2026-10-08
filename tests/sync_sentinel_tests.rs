@@ -70,9 +70,21 @@ fn test_sync_sentinel_reconnects_after_master_failover() -> Result<(), Box<dyn E
     };
     assert_eq!(received.id().as_str(), "pending-before-failover");
     let stream = stream_key("sentinel-sync", "events");
-    let group = group_name("sentinel-sync", "events", "worker-one", Some("sentinel-group"));
-    let (pending_id, old_owner) = sentinel.pending_identity(original_master_port, &stream, &group)?;
-    sentinel.wait_for_pending(sentinel.replica_port(), &stream, &group, &pending_id, &old_owner)?;
+    let group = group_name(
+        "sentinel-sync",
+        "events",
+        "worker-one",
+        Some("sentinel-group"),
+    );
+    let (pending_id, old_owner) =
+        sentinel.pending_identity(original_master_port, &stream, &group)?;
+    sentinel.wait_for_pending(
+        sentinel.replica_port(),
+        &stream,
+        &group,
+        &pending_id,
+        &old_owner,
+    )?;
     first.close()?;
     sentinel.stop_original_master()?;
     let promoted_port = sentinel.master_port()?;
@@ -83,15 +95,25 @@ fn test_sync_sentinel_reconnects_after_master_failover() -> Result<(), Box<dyn E
     let stream_length: usize = cmd("XLEN")
         .arg(stream_key("sentinel-sync", "events"))
         .query(&mut promoted_connection)?;
-    assert_eq!(stream_length, 2, "promoted master must contain both stream records");
-    let mut second = bus.subscribe(subscription_request_at(1002, "worker-two", StartPosition::New)?)?;
+    assert_eq!(
+        stream_length, 2,
+        "promoted master must contain both stream records"
+    );
+    let mut second = bus.subscribe(subscription_request_at(
+        1002,
+        "worker-two",
+        StartPosition::New,
+    )?)?;
     let ReceiveOutcome::Message(mut pending) = second.receive(Duration::from_secs(10))? else {
         return Err("new consumer did not claim the pre-failover pending record".into());
     };
     assert_eq!(pending.id().as_str(), "pending-before-failover");
     let (claimed_id, new_owner) = sentinel.pending_identity(promoted_port, &stream, &group)?;
     assert_eq!(claimed_id, pending_id, "claim must preserve the stream ID");
-    assert_ne!(new_owner, old_owner, "claim must transfer the pending owner");
+    assert_ne!(
+        new_owner, old_owner,
+        "claim must transfer the pending owner"
+    );
     let token = pending
         .take_settlement()
         .ok_or("pending record has no settlement token")?;
@@ -105,7 +127,9 @@ fn test_sync_sentinel_reconnects_after_master_failover() -> Result<(), Box<dyn E
     run_sync(
         || {
             RedisEventBusProvider
-                .create_configured(&EventBusConfig::default().with_provider_options(conformance_options.clone()))
+                .create_configured(
+                    &EventBusConfig::default().with_provider_options(conformance_options.clone()),
+                )
                 .expect("Sentinel provider settings remain valid after promotion")
         },
         &ConformanceHooks::default(),
@@ -116,7 +140,10 @@ fn test_sync_sentinel_reconnects_after_master_failover() -> Result<(), Box<dyn E
 
 /// Builds a durable fixed-group request with `id` and `subscriber`; returns
 /// metadata validation errors without I/O.
-fn subscription_request(id: u64, subscriber: &str) -> Result<SpiSubscriptionRequest, Box<dyn Error>> {
+fn subscription_request(
+    id: u64,
+    subscriber: &str,
+) -> Result<SpiSubscriptionRequest, Box<dyn Error>> {
     subscription_request_at(id, subscriber, StartPosition::Earliest)
 }
 

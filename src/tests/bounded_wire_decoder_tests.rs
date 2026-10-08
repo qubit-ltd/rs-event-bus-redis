@@ -18,14 +18,25 @@ fn skipping_future_layout_keeps_json_recursion_guard() {
         payload: 1,
         headers: 1,
     };
-    let shallow = format!("{{\"version\":2,\"future\":{}0{}}}", "[".repeat(16), "]".repeat(16));
+    let shallow = format!(
+        "{{\"version\":2,\"future\":{}0{}}}",
+        "[".repeat(16),
+        "]".repeat(16)
+    );
     assert!(matches!(
         decode(shallow.as_bytes(), limits),
         Err(RedisProviderError::UnsupportedWireVersion)
     ));
-    let deep = format!("{{\"version\":2,\"future\":{}0{}}}", "[".repeat(129), "]".repeat(129));
+    let deep = format!(
+        "{{\"version\":2,\"future\":{}0{}}}",
+        "[".repeat(129),
+        "]".repeat(129)
+    );
     assert!(
-        matches!(decode(deep.as_bytes(), limits), Err(RedisProviderError::Operation(_))),
+        matches!(
+            decode(deep.as_bytes(), limits),
+            Err(RedisProviderError::Operation(_))
+        ),
         "skipping nested values must not bypass serde_json's depth protection"
     );
 }
@@ -77,7 +88,10 @@ fn bounded_decoder_preserves_exact_lengths_and_rejects_each_limit_plus_one() {
             headers: 1,
         },
     ] {
-        assert!(matches!(decode(wire, limits), Err(RedisProviderError::LimitExceeded)));
+        assert!(matches!(
+            decode(wire, limits),
+            Err(RedisProviderError::LimitExceeded)
+        ));
     }
 }
 
@@ -93,7 +107,10 @@ fn duplicate_version_and_invalid_bytes_are_malformed() {
         Err(RedisProviderError::Operation(_))
     ));
     let invalid = br#"{"version":1,"event_id":"event","timestamp_ms":0,"headers_json":"{}","content_type":"text/plain","payload":[256]}"#;
-    assert!(matches!(decode(invalid, limits), Err(RedisProviderError::Operation(_))));
+    assert!(matches!(
+        decode(invalid, limits),
+        Err(RedisProviderError::Operation(_))
+    ));
 }
 
 #[test]

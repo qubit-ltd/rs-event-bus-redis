@@ -65,7 +65,9 @@ pub(crate) fn ensure_existing_group_start(
     request: &SpiSubscriptionRequest,
     policy: ExistingGroupStartPolicy,
 ) -> Result<(), SpiError> {
-    if matches!(request.start_position(), StartPosition::New) || policy == ExistingGroupStartPolicy::Resume {
+    if matches!(request.start_position(), StartPosition::New)
+        || policy == ExistingGroupStartPolicy::Resume
+    {
         return Ok(());
     }
     Err(SpiError::Operation {
@@ -126,8 +128,10 @@ mod tests {
             ("resume", ExistingGroupStartPolicy::Resume),
         ] {
             let value: &str = value;
-            let options: ProviderOptions =
-                ProviderOptions::from([("redis.existing_group_start".to_owned(), value.to_owned())]);
+            let options: ProviderOptions = ProviderOptions::from([(
+                "redis.existing_group_start".to_owned(),
+                value.to_owned(),
+            )]);
             let request = request(StartPosition::New, options);
             assert_eq!(
                 parse_existing_group_policy(&request).expect("supported policy is valid"),
@@ -167,11 +171,13 @@ mod tests {
 
     #[test]
     fn test_existing_group_start_resumes_explicit_position_when_requested() {
-        let options = ProviderOptions::from([("redis.existing_group_start".into(), "resume".into())]);
+        let options =
+            ProviderOptions::from([("redis.existing_group_start".into(), "resume".into())]);
         for position in [StartPosition::Earliest, StartPosition::At("42-0".into())] {
             let request = request(position, options.clone());
             let policy = parse_existing_group_policy(&request).expect("resume option is valid");
-            ensure_existing_group_start(&request, policy).expect("explicit resume retains the existing cursor");
+            ensure_existing_group_start(&request, policy)
+                .expect("explicit resume retains the existing cursor");
         }
     }
 }

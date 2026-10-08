@@ -17,7 +17,8 @@ use support::fixture_consumer::run as run_fixture_consumer;
 use support::redis_server::RedisServer;
 
 #[test]
-fn test_task_notifications_preserve_monotonic_projection_and_business_state() -> Result<(), Box<dyn Error>> {
+fn test_task_notifications_preserve_monotonic_projection_and_business_state()
+-> Result<(), Box<dyn Error>> {
     let redis = RedisServer::start()?;
     run_fixture_consumer("task_notifications", redis.url(), false)
 }

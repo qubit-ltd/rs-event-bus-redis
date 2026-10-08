@@ -111,7 +111,9 @@ impl ScriptedRedis {
             while !shared.stopping.load(Ordering::SeqCst) {
                 match listener.accept() {
                     Ok((stream, _)) => {
-                        if shared.refusing.load(Ordering::SeqCst) || shared.stopping.load(Ordering::SeqCst) {
+                        if shared.refusing.load(Ordering::SeqCst)
+                            || shared.stopping.load(Ordering::SeqCst)
+                        {
                             let _ = stream.shutdown(Shutdown::Both);
                             continue;
                         }
@@ -133,7 +135,11 @@ impl ScriptedRedis {
                         sleep(Duration::from_millis(1));
                     }
                     Err(error) => {
-                        shared.errors.lock().expect("errors lock").push(error.to_string());
+                        shared
+                            .errors
+                            .lock()
+                            .expect("errors lock")
+                            .push(error.to_string());
                         break;
                     }
                 }
@@ -190,7 +196,13 @@ impl Drop for ScriptedRedis {
     /// failure.
     fn drop(&mut self) {
         self.state.stopping.store(true, Ordering::SeqCst);
-        for stream in self.state.connections.lock().expect("connections lock").iter() {
+        for stream in self
+            .state
+            .connections
+            .lock()
+            .expect("connections lock")
+            .iter()
+        {
             let _ = stream.shutdown(Shutdown::Both);
         }
         if let Some(worker) = self.worker.take() {
@@ -212,17 +224,28 @@ fn serve_connection(stream: TcpStream, state: &State) {
             Ok(None) => return,
             Err(error) => {
                 if !state.stopping.load(Ordering::SeqCst) {
-                    state.errors.lock().expect("errors lock").push(error.to_string());
+                    state
+                        .errors
+                        .lock()
+                        .expect("errors lock")
+                        .push(error.to_string());
                 }
                 return;
             }
         };
         let name = command.first().expect("command has a name");
         if name == "CLIENT" {
-            reader.get_mut().write_all(b"+OK\r\n").expect("reply to CLIENT SETINFO");
+            reader
+                .get_mut()
+                .write_all(b"+OK\r\n")
+                .expect("reply to CLIENT SETINFO");
             continue;
         }
-        state.commands.lock().expect("commands lock").push(command.clone());
+        state
+            .commands
+            .lock()
+            .expect("commands lock")
+            .push(command.clone());
         let step = state.steps.lock().expect("steps lock").pop_front();
         let reply = match step {
             Some(step) if step.command == name => step.reply,
@@ -237,7 +260,10 @@ fn serve_connection(stream: TcpStream, state: &State) {
             }
         };
         match reply {
-            Reply::Bytes(bytes) => reader.get_mut().write_all(&bytes).expect("write scripted response"),
+            Reply::Bytes(bytes) => reader
+                .get_mut()
+                .write_all(&bytes)
+                .expect("write scripted response"),
             Reply::Disconnect => {
                 let _ = reader.get_mut().shutdown(Shutdown::Both);
                 return;

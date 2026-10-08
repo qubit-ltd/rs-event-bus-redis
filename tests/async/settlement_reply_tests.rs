@@ -91,7 +91,12 @@ fn assert_ack_applied(server: &RedisServer) -> TestResult {
     let mut observer = Client::open(server.url())?.get_connection()?;
     let pending: Vec<Value> = cmd("XPENDING")
         .arg(stream_key("settlement-tests", "settlement"))
-        .arg(group_name("settlement-tests", "settlement", "worker", Some("group")))
+        .arg(group_name(
+            "settlement-tests",
+            "settlement",
+            "worker",
+            Some("group"),
+        ))
         .arg("-")
         .arg("+")
         .arg(10)
@@ -111,18 +116,32 @@ fn test_nested_wrongtype_reply_retains_unknown_xack_intent() -> TestResult {
     block_on(async {
         let _ = bus.publish(message("nested")?).await?;
         let mut receiver = bus.subscribe(request()?).await?;
-        let ReceiveOutcome::Message(received) = receiver.receive(Duration::from_secs(2)).await? else {
+        let ReceiveOutcome::Message(received) = receiver.receive(Duration::from_secs(2)).await?
+        else {
             return Err("event missing".into());
         };
         let token = received.settlement().ok_or("token missing")?;
         proxy.replace_next_reply("XACK", b"*1\r\n-WRONGTYPE injected\r\n");
-        assert!(receiver.settle(token, DeliveryDisposition::Accept).await.is_err());
+        assert!(
+            receiver
+                .settle(token, DeliveryDisposition::Accept)
+                .await
+                .is_err()
+        );
         assert_ack_applied(&server)?;
         assert!(
-            receiver.settle(token, DeliveryDisposition::Retry).await.is_err(),
+            receiver
+                .settle(token, DeliveryDisposition::Retry)
+                .await
+                .is_err(),
             "nested WRONGTYPE is an invalid reply, not a top-level rejection"
         );
-        assert!(receiver.settle(token, DeliveryDisposition::Reject).await.is_err());
+        assert!(
+            receiver
+                .settle(token, DeliveryDisposition::Reject)
+                .await
+                .is_err()
+        );
         receiver.settle(token, DeliveryDisposition::Accept).await?;
         receiver.close().await?;
         Ok(())

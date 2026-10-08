@@ -96,7 +96,10 @@ pub(crate) fn parse_auto_claim(value: Value) -> Result<(StreamAutoClaimReply, bo
 pub(crate) fn parse_read_group(value: Value) -> Result<Option<StreamReadReply>, RedisError> {
     let pairs = match value {
         Value::Nil => return Ok(None),
-        Value::Array(rows) => rows.into_iter().map(parse_pair).collect::<Result<Vec<_>, _>>()?,
+        Value::Array(rows) => rows
+            .into_iter()
+            .map(parse_pair)
+            .collect::<Result<Vec<_>, _>>()?,
         Value::Map(pairs) => pairs,
         _ => return Err(invalid_reply()),
     };
@@ -134,7 +137,10 @@ pub(crate) fn parse_range(value: Value) -> Result<StreamRangeReply, RedisError> 
         _ => return Err(invalid_reply()),
     };
     Ok(StreamRangeReply {
-        ids: rows.into_iter().map(parse_stream_id).collect::<Result<Vec<_>, _>>()?,
+        ids: rows
+            .into_iter()
+            .map(parse_stream_id)
+            .collect::<Result<Vec<_>, _>>()?,
     })
 }
 
@@ -200,7 +206,9 @@ fn parse_pair(value: Value) -> Result<(Value, Value), RedisError> {
 /// # Errors
 ///
 /// Returns a type error if any row is missing one of those fields.
-pub(crate) fn parse_pending_entries(value: Value) -> Result<Vec<(String, String, u64)>, RedisError> {
+pub(crate) fn parse_pending_entries(
+    value: Value,
+) -> Result<Vec<(String, String, u64)>, RedisError> {
     let Value::Array(rows) = value else {
         return Err(invalid_reply());
     };

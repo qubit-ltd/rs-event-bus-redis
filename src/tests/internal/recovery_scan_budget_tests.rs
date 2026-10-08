@@ -18,7 +18,8 @@ use crate::internal::recovery_scan_budget::MAX_TOMBSTONE_RANGES_PER_ROUND;
 #[test]
 fn test_recovery_scan_budget_caps_commands_per_receive() {
     let started = Instant::now();
-    let mut budget = RecoveryScanBudget::new(Duration::MAX, started, Duration::from_secs(1)).unwrap();
+    let mut budget =
+        RecoveryScanBudget::new(Duration::MAX, started, Duration::from_secs(1)).unwrap();
     for _ in 0..MAX_SCAN_COMMANDS_PER_STAGE {
         assert!(budget.take_recovery_command(RecoveryScanStage::Claim, started));
     }
@@ -32,7 +33,8 @@ fn test_recovery_scan_budget_caps_commands_per_receive() {
 #[test]
 fn test_zero_timeout_allows_one_command_per_recovery_stage() {
     let started = Instant::now();
-    let mut budget = RecoveryScanBudget::new(Duration::ZERO, started, Duration::from_secs(1)).unwrap();
+    let mut budget =
+        RecoveryScanBudget::new(Duration::ZERO, started, Duration::from_secs(1)).unwrap();
     assert!(budget.take_recovery_command(RecoveryScanStage::Claim, started));
     assert!(!budget.take_recovery_command(RecoveryScanStage::Claim, started));
     assert!(budget.take_recovery_command(RecoveryScanStage::Pending, started));
@@ -44,7 +46,9 @@ fn test_zero_timeout_allows_one_command_per_recovery_stage() {
 fn test_finite_deadline_stops_recovery_and_new_reads() {
     let started = Instant::now();
     let deadline = started + Duration::from_millis(10);
-    let mut budget = RecoveryScanBudget::new(Duration::from_millis(10), started, Duration::from_secs(1)).unwrap();
+    let mut budget =
+        RecoveryScanBudget::new(Duration::from_millis(10), started, Duration::from_secs(1))
+            .unwrap();
     assert!(budget.take_recovery_command(RecoveryScanStage::Claim, started));
     assert!(!budget.take_recovery_command(RecoveryScanStage::Pending, deadline));
     assert!(!budget.can_read_new(deadline));
@@ -62,7 +66,8 @@ fn test_max_timeout_uses_bounded_blocking_intervals_without_deadline() {
 #[test]
 fn test_recovery_budget_resets_per_interval_and_rejects_overflow() {
     let started = Instant::now();
-    let mut budget = RecoveryScanBudget::new(Duration::MAX, started, Duration::from_millis(50)).unwrap();
+    let mut budget =
+        RecoveryScanBudget::new(Duration::MAX, started, Duration::from_millis(50)).unwrap();
     for _ in 0..MAX_SCAN_COMMANDS_PER_STAGE {
         assert!(budget.take_recovery_command(RecoveryScanStage::Claim, started));
     }
@@ -72,13 +77,21 @@ fn test_recovery_budget_resets_per_interval_and_rejects_overflow() {
     budget.start_recovery_round(later);
     assert!(budget.take_recovery_command(RecoveryScanStage::Claim, later));
 
-    assert!(RecoveryScanBudget::new(Duration::from_secs(u64::MAX), started, Duration::from_secs(1)).is_err());
+    assert!(
+        RecoveryScanBudget::new(
+            Duration::from_secs(u64::MAX),
+            started,
+            Duration::from_secs(1)
+        )
+        .is_err()
+    );
 }
 
 #[test]
 fn test_tombstone_maintenance_is_bounded_per_round() {
     let started = Instant::now();
-    let mut budget = RecoveryScanBudget::new(Duration::MAX, started, Duration::from_secs(1)).unwrap();
+    let mut budget =
+        RecoveryScanBudget::new(Duration::MAX, started, Duration::from_secs(1)).unwrap();
     assert!(budget.take_tombstone_probe(started));
     assert!(!budget.take_tombstone_probe(started));
     for _ in 0..MAX_TOMBSTONE_RANGES_PER_ROUND {
@@ -99,7 +112,8 @@ fn test_tombstone_maintenance_is_bounded_per_round() {
 #[test]
 fn test_zero_timeout_skips_tombstone_scans_and_allows_one_quarantine() {
     let started = Instant::now();
-    let mut budget = RecoveryScanBudget::new(Duration::ZERO, started, Duration::from_secs(1)).unwrap();
+    let mut budget =
+        RecoveryScanBudget::new(Duration::ZERO, started, Duration::from_secs(1)).unwrap();
     assert!(!budget.take_tombstone_probe(started));
     assert!(!budget.take_tombstone_range(started));
     assert!(budget.take_maintenance_evaluation(started));

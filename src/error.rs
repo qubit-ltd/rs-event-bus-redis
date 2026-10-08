@@ -52,10 +52,13 @@ pub(crate) fn to_spi_error(
             },
             Some(false),
         ),
-        RedisProviderError::Transport { kind, retryable, .. } => (*kind, *retryable),
-        RedisProviderError::OutcomeUnknown { operation } => {
-            ("outcome_unknown", Some(matches!(*operation, "settle" | "receive")))
-        }
+        RedisProviderError::Transport {
+            kind, retryable, ..
+        } => (*kind, *retryable),
+        RedisProviderError::OutcomeUnknown { operation } => (
+            "outcome_unknown",
+            Some(matches!(*operation, "settle" | "receive")),
+        ),
         RedisProviderError::ResourceLimit { .. } => ("resource_limit", Some(true)),
         RedisProviderError::PayloadTooLarge => ("payload_too_large", Some(false)),
         RedisProviderError::WireTooLarge => ("wire_too_large", Some(false)),
@@ -83,7 +86,11 @@ pub(crate) fn to_spi_error(
 ///
 /// A stable SPI publish error without raw client diagnostics.
 #[cfg(any(feature = "sync", feature = "async"))]
-pub(crate) fn to_publish_error(topic: &TopicAddress, source: RedisProviderError, effect: PublishEffect) -> SpiError {
+pub(crate) fn to_publish_error(
+    topic: &TopicAddress,
+    source: RedisProviderError,
+    effect: PublishEffect,
+) -> SpiError {
     let error = to_spi_error("publish", Some(topic), source);
     let SpiError::Operation {
         provider_id,
@@ -134,7 +141,9 @@ pub(crate) fn query_publish_error(topic: &TopicAddress, error: &RedisError) -> S
             retryable: Some(false),
         }
     } else if error.code().is_none() {
-        RedisProviderError::OutcomeUnknown { operation: "publish" }
+        RedisProviderError::OutcomeUnknown {
+            operation: "publish",
+        }
     } else {
         classify_redis_error("publish", error)
     };
@@ -155,7 +164,9 @@ pub(crate) fn query_publish_error(topic: &TopicAddress, error: &RedisError) -> S
 pub(crate) fn invalid_publish_reply(topic: &TopicAddress) -> SpiError {
     to_publish_error(
         topic,
-        RedisProviderError::OutcomeUnknown { operation: "publish" },
+        RedisProviderError::OutcomeUnknown {
+            operation: "publish",
+        },
         PublishEffect::MayHaveBeenAccepted,
     )
 }
@@ -174,6 +185,10 @@ pub(crate) fn invalid_publish_reply(topic: &TopicAddress) -> SpiError {
 ///
 /// A sanitized SPI failure carrying the known category and retryability hint.
 #[cfg(any(feature = "sync", feature = "async"))]
-pub(crate) fn from_redis_error(operation: &'static str, topic: Option<&TopicAddress>, source: &RedisError) -> SpiError {
+pub(crate) fn from_redis_error(
+    operation: &'static str,
+    topic: Option<&TopicAddress>,
+    source: &RedisError,
+) -> SpiError {
     to_spi_error(operation, topic, classify_redis_error(operation, source))
 }

@@ -53,7 +53,9 @@ pub(crate) fn message() -> OutboundMessage {
 /// Asserts stable sanitized SPI kind and retry semantics.
 pub(crate) fn assert_error(error: SpiError, expected_kind: &str, expected_retryable: bool) {
     match error {
-        SpiError::Operation { kind, retryable, .. } => {
+        SpiError::Operation {
+            kind, retryable, ..
+        } => {
             assert_eq!(kind, expected_kind);
             assert_eq!(retryable, Some(expected_retryable));
         }

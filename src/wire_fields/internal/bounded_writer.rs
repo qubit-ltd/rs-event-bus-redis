@@ -64,7 +64,10 @@ impl BoundedWriter {
     ///
     /// Returns `WireTooLarge` for a rejected write and a stable operation error
     /// for another serializer failure. The partial output is discarded.
-    pub(super) fn serialize<T: Serialize + ?Sized>(mut self, value: &T) -> Result<String, RedisProviderError> {
+    pub(super) fn serialize<T: Serialize + ?Sized>(
+        mut self,
+        value: &T,
+    ) -> Result<String, RedisProviderError> {
         if to_writer(&mut self, value).is_err() {
             return Err(if self.exceeded {
                 RedisProviderError::WireTooLarge

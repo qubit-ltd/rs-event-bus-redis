@@ -100,7 +100,11 @@ fn test_redis_6_2_supports_pending_entry_recovery() -> Result<(), Box<dyn Error>
         .arg(">")
         .query(&mut connection)?;
     assert_eq!(
-        read.map(|reply| reply.keys.into_iter().map(|stream| stream.ids.len()).sum::<usize>()),
+        read.map(|reply| reply
+            .keys
+            .into_iter()
+            .map(|stream| stream.ids.len())
+            .sum::<usize>()),
         Some(1)
     );
     let claimed: StreamAutoClaimReply = cmd("XAUTOCLAIM")

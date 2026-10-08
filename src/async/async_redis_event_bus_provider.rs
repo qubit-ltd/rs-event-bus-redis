@@ -92,10 +92,12 @@ impl AsyncServiceProvider<EventBusSpec> for AsyncRedisEventBusProvider {
     fn create_configured<'a>(
         &'a self,
         config: &'a EventBusConfig,
-    ) -> ProviderFuture<'a, Result<Arc<dyn AsyncEventBusSpi>, ProviderFailure<EventBusProviderError>>> {
+    ) -> ProviderFuture<'a, Result<Arc<dyn AsyncEventBusSpi>, ProviderFailure<EventBusProviderError>>>
+    {
         Box::pin(async move {
-            let settings = RedisEventBusConfig::from_event_bus_config(config)
-                .map_err(|error| ProviderFailure::invalid_configuration(EventBusProviderError::provider(error)))?;
+            let settings = RedisEventBusConfig::from_event_bus_config(config).map_err(|error| {
+                ProviderFailure::invalid_configuration(EventBusProviderError::provider(error))
+            })?;
             let mut client = Client::new(&settings).map_err(|_| {
                 ProviderFailure::invalid_configuration(EventBusProviderError::provider(
                     RedisProviderError::Configuration("invalid Redis connection configuration"),
@@ -103,7 +105,9 @@ impl AsyncServiceProvider<EventBusSpec> for AsyncRedisEventBusProvider {
             })?;
             client
                 .attach_diagnostics(RedisProviderMode::Async, settings.namespace())
-                .map_err(|error| ProviderFailure::invalid_configuration(EventBusProviderError::provider(error)))?;
+                .map_err(|error| {
+                    ProviderFailure::invalid_configuration(EventBusProviderError::provider(error))
+                })?;
             Ok(Arc::new(AsyncRedisEventBus {
                 client: Arc::new(client),
                 settings,
@@ -128,6 +132,10 @@ impl AsyncServiceProvider<EventBusSpec> for AsyncRedisEventBusProvider {
 ///
 /// An SPI error that omits the raw Redis client diagnostic.
 #[inline]
-pub(super) fn spi_error(operation: &'static str, topic: Option<&TopicAddress>, source: RedisProviderError) -> SpiError {
+pub(super) fn spi_error(
+    operation: &'static str,
+    topic: Option<&TopicAddress>,
+    source: RedisProviderError,
+) -> SpiError {
     crate::error::to_spi_error(operation, topic, source)
 }

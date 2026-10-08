@@ -60,8 +60,8 @@ fn test_async_sentinel_reconnects_after_master_failover() -> Result<(), Box<dyn 
     #[cfg(feature = "conformance")]
     let conformance_options = options.clone();
     let config = EventBusConfig::default().with_provider_options(options);
-    let bus =
-        block_on(AsyncRedisEventBusProvider.create_configured(&config)).map_err(|failure| failure.into_error())?;
+    let bus = block_on(AsyncRedisEventBusProvider.create_configured(&config))
+        .map_err(|failure| failure.into_error())?;
     sentinel.stop_original_master()?;
     block_on(async {
         let _ = bus
@@ -81,7 +81,8 @@ fn test_async_sentinel_reconnects_after_master_failover() -> Result<(), Box<dyn 
             .subscribe(request)
             .await
             .map_err(|error| IoError::other(format!("subscribe before promotion: {error}")))?;
-        let ReceiveOutcome::Message(received) = receiver.receive(Duration::from_secs(10)).await? else {
+        let ReceiveOutcome::Message(received) = receiver.receive(Duration::from_secs(10)).await?
+        else {
             return Err("post-promotion event was not received".into());
         };
         assert_eq!(received.id().as_str(), "after-failover-async");
@@ -97,7 +98,8 @@ fn test_async_sentinel_reconnects_after_master_failover() -> Result<(), Box<dyn 
     {
         let report = block_on(run_async(
             || {
-                let config = EventBusConfig::default().with_provider_options(conformance_options.clone());
+                let config =
+                    EventBusConfig::default().with_provider_options(conformance_options.clone());
                 async move {
                     AsyncRedisEventBusProvider
                         .create_configured(&config)
@@ -123,8 +125,8 @@ fn test_async_sentinel_claims_unsettled_record_after_promotion() -> Result<(), B
     ]
     .into();
     let config = EventBusConfig::default().with_provider_options(options);
-    let bus =
-        block_on(AsyncRedisEventBusProvider.create_configured(&config)).map_err(|failure| failure.into_error())?;
+    let bus = block_on(AsyncRedisEventBusProvider.create_configured(&config))
+        .map_err(|failure| failure.into_error())?;
     let original_port = sentinel.master_port()?;
     let pending_message = message("events", "pending-before-async-promotion", b"pending")?;
     let _ = block_on(async { bus.publish(pending_message).await })?;
@@ -143,7 +145,8 @@ fn test_async_sentinel_claims_unsettled_record_after_promotion() -> Result<(), B
             .subscribe(request)
             .await
             .map_err(|error| IoError::other(format!("subscribe after promotion: {error}")))?;
-        let ReceiveOutcome::Message(received) = receiver.receive(Duration::from_secs(2)).await? else {
+        let ReceiveOutcome::Message(received) = receiver.receive(Duration::from_secs(2)).await?
+        else {
             return Err("initial consumer did not receive the pending record".into());
         };
         assert_eq!(received.id().as_str(), "pending-before-async-promotion");
@@ -157,7 +160,13 @@ fn test_async_sentinel_claims_unsettled_record_after_promotion() -> Result<(), B
         Some("sentinel-workers"),
     );
     let (pending_id, old_owner) = sentinel.pending_identity(original_port, &stream, &group)?;
-    sentinel.wait_for_pending(sentinel.replica_port(), &stream, &group, &pending_id, &old_owner)?;
+    sentinel.wait_for_pending(
+        sentinel.replica_port(),
+        &stream,
+        &group,
+        &pending_id,
+        &old_owner,
+    )?;
     block_on(first.close())?;
     sentinel.stop_original_master()?;
     let promoted_port = sentinel.master_port()?;
@@ -174,13 +183,17 @@ fn test_async_sentinel_claims_unsettled_record_after_promotion() -> Result<(), B
             TypeId::of::<Vec<u8>>(),
         );
         let mut receiver = bus.subscribe(request).await?;
-        let ReceiveOutcome::Message(pending) = receiver.receive(Duration::from_secs(10)).await? else {
+        let ReceiveOutcome::Message(pending) = receiver.receive(Duration::from_secs(10)).await?
+        else {
             return Err("new consumer did not claim the pending record".into());
         };
         assert_eq!(pending.id().as_str(), "pending-before-async-promotion");
         let (claimed_id, new_owner) = sentinel.pending_identity(promoted_port, &stream, &group)?;
         assert_eq!(claimed_id, pending_id, "claim must preserve the stream ID");
-        assert_ne!(new_owner, old_owner, "claim must transfer the pending owner");
+        assert_ne!(
+            new_owner, old_owner,
+            "claim must transfer the pending owner"
+        );
         receiver
             .settle(
                 pending.settlement().ok_or("missing settlement token")?,

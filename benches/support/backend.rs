@@ -44,7 +44,9 @@ impl Backend {
     pub fn new(mode: &str, options: ProviderOptions) -> Result<Self, Box<dyn Error>> {
         let config = EventBusConfig::default().with_provider_options(options);
         if mode == "sync" {
-            Ok(Self::Sync(RedisEventBusProvider.create_configured(&config)?))
+            Ok(Self::Sync(
+                RedisEventBusProvider.create_configured(&config)?,
+            ))
         } else {
             Ok(Self::Async(block_on(
                 AsyncRedisEventBusProvider.create_configured(&config),

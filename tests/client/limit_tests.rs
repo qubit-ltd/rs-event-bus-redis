@@ -96,7 +96,8 @@ fn test_async_command_cap_fails_before_second_xadd_and_cancel_releases() {
     settings.insert("redis.command_timeout_ms".into(), "2000".into());
     let previous_id = latest_instance_id();
     let bus = block_on(
-        AsyncRedisEventBusProvider.create_configured(&EventBusConfig::default().with_provider_options(settings)),
+        AsyncRedisEventBusProvider
+            .create_configured(&EventBusConfig::default().with_provider_options(settings)),
     )
     .expect("provider");
     let instance_id = new_instance_id(previous_id, namespace);
@@ -115,12 +116,18 @@ fn test_async_command_cap_fails_before_second_xadd_and_cancel_releases() {
         let (sender, receiver) = channel();
         let concurrent = Arc::clone(&bus);
         spawn(move || {
-            sender.send(block_on(concurrent.publish(message()))).expect("watchdog");
+            sender
+                .send(block_on(concurrent.publish(message())))
+                .expect("watchdog");
         });
         let result = receiver
             .recv_timeout(Duration::from_millis(250))
             .expect("cap must fail fast");
-        assert_error(result.expect_err("second command rejected"), "resource_limit", true);
+        assert_error(
+            result.expect_err("second command rejected"),
+            "resource_limit",
+            true,
+        );
         assert_eq!(server.commands(), 1);
         assert_eq!(snapshot(instance_id).command_rejections(), 1);
         assert_eq!(snapshot(instance_id).general_in_flight(), 1);
@@ -184,7 +191,9 @@ fn test_sync_pool_hit_does_not_count_another_connection_attempt() {
     let _ = bus.publish(message()).expect("first publish opens socket");
     assert_eq!(snapshot(instance_id).connection_attempts(), 1);
     assert_eq!(snapshot(instance_id).connection_failures(), 0);
-    let _ = bus.publish(message()).expect("second publish reuses idle socket");
+    let _ = bus
+        .publish(message())
+        .expect("second publish reuses idle socket");
     assert_eq!(snapshot(instance_id).connection_attempts(), 1);
     assert_eq!(snapshot(instance_id).general_in_flight(), 0);
 }
@@ -198,7 +207,8 @@ fn test_async_cache_hit_does_not_count_another_connection_attempt() {
     settings.insert("redis.namespace".into(), namespace.into());
     let previous_id = latest_instance_id();
     let bus = block_on(
-        AsyncRedisEventBusProvider.create_configured(&EventBusConfig::default().with_provider_options(settings)),
+        AsyncRedisEventBusProvider
+            .create_configured(&EventBusConfig::default().with_provider_options(settings)),
     )
     .expect("provider");
     let instance_id = new_instance_id(previous_id, namespace);
@@ -225,7 +235,11 @@ fn test_sync_setup_timeout_counts_one_failed_connection_attempt() {
         .expect("provider");
     let instance_id = new_instance_id(previous_id, namespace);
 
-    assert_error(bus.publish(message()).expect_err("setup times out"), "transport", true);
+    assert_error(
+        bus.publish(message()).expect_err("setup times out"),
+        "transport",
+        true,
+    );
     assert_eq!(snapshot(instance_id).connection_attempts(), 1);
     assert_eq!(snapshot(instance_id).connection_failures(), 1);
     assert_eq!(snapshot(instance_id).general_in_flight(), 0);
@@ -240,7 +254,8 @@ fn test_async_setup_timeout_counts_one_failed_connection_attempt() {
     settings.insert("redis.namespace".into(), namespace.into());
     let previous_id = latest_instance_id();
     let bus = block_on(
-        AsyncRedisEventBusProvider.create_configured(&EventBusConfig::default().with_provider_options(settings)),
+        AsyncRedisEventBusProvider
+            .create_configured(&EventBusConfig::default().with_provider_options(settings)),
     )
     .expect("provider");
     let instance_id = new_instance_id(previous_id, namespace);
@@ -257,7 +272,11 @@ fn test_async_setup_timeout_counts_one_failed_connection_attempt() {
 
 /// Configures two independent Sentinel nodes whose discovery replies are
 /// withheld.
-fn two_sentinel_nodes(first: &BlackholeRedis, second: &BlackholeRedis, namespace: &str) -> ProviderOptions {
+fn two_sentinel_nodes(
+    first: &BlackholeRedis,
+    second: &BlackholeRedis,
+    namespace: &str,
+) -> ProviderOptions {
     let mut settings = options("redis://127.0.0.1:1/", 2);
     settings.insert("redis.namespace".into(), namespace.into());
     let endpoint = |server: &BlackholeRedis| {
@@ -285,7 +304,8 @@ fn test_sync_sentinel_multiple_probes_count_one_provider_open() {
     let previous_id = latest_instance_id();
     let bus = RedisEventBusProvider
         .create_configured(
-            &EventBusConfig::default().with_provider_options(two_sentinel_nodes(&first, &second, namespace)),
+            &EventBusConfig::default()
+                .with_provider_options(two_sentinel_nodes(&first, &second, namespace)),
         )
         .expect("provider");
     let instance_id = new_instance_id(previous_id, namespace);
@@ -308,9 +328,12 @@ fn test_async_sentinel_multiple_probes_count_one_provider_open() {
     let second = BlackholeRedis::start(true, None);
     let namespace = "diagnostics-async-sentinel-probes";
     let previous_id = latest_instance_id();
-    let bus = block_on(AsyncRedisEventBusProvider.create_configured(
-        &EventBusConfig::default().with_provider_options(two_sentinel_nodes(&first, &second, namespace)),
-    ))
+    let bus = block_on(
+        AsyncRedisEventBusProvider.create_configured(
+            &EventBusConfig::default()
+                .with_provider_options(two_sentinel_nodes(&first, &second, namespace)),
+        ),
+    )
     .expect("provider");
     let instance_id = new_instance_id(previous_id, namespace);
 

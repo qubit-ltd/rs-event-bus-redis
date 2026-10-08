@@ -68,7 +68,9 @@ impl SentinelResolver {
         let mut endpoints = Vec::new();
         let (username, password) = config.sentinel_credentials();
         for node in config.sentinel_nodes().unwrap_or_default() {
-            let mut info = Client::open(format!("redis://{node}/"))?.get_connection_info().clone();
+            let mut info = Client::open(format!("redis://{node}/"))?
+                .get_connection_info()
+                .clone();
             info.redis.username.clone_from(username);
             info.redis.password.clone_from(password);
             endpoints.push(Client::open(info)?);
@@ -109,7 +111,11 @@ impl SentinelResolver {
             let index = (start + offset) % self.endpoints.len();
             let attempt = (|| {
                 let mut sentinel = open_sync(&self.endpoints[index], self.policy)?;
-                let raw = sentinel.req_command(cmd("SENTINEL").arg("get-master-addr-by-name").arg(&self.service))?;
+                let raw = sentinel.req_command(
+                    cmd("SENTINEL")
+                        .arg("get-master-addr-by-name")
+                        .arg(&self.service),
+                )?;
                 let target = self.target(raw)?;
                 let mut connection = open_sync(&target, self.policy)?;
                 let role = connection.req_command(&cmd("ROLE"))?;
@@ -153,7 +159,11 @@ impl SentinelResolver {
             let attempt = async {
                 let mut sentinel = open_async(&self.endpoints[index], self.policy).await?;
                 let raw = sentinel
-                    .send_packed_command(cmd("SENTINEL").arg("get-master-addr-by-name").arg(&self.service))
+                    .send_packed_command(
+                        cmd("SENTINEL")
+                            .arg("get-master-addr-by-name")
+                            .arg(&self.service),
+                    )
                     .await?;
                 let target = self.target(raw)?;
                 let mut connection = open_async(&target, self.policy).await?;
@@ -262,7 +272,10 @@ fn discovery_error() -> RedisError {
 ///
 /// Returns Redis connection/setup, timeout, or socket-option failures.
 #[cfg(feature = "sync")]
-pub(crate) fn open_sync(client: &Client, policy: TransportPolicy) -> Result<Connection, RedisError> {
+pub(crate) fn open_sync(
+    client: &Client,
+    policy: TransportPolicy,
+) -> Result<Connection, RedisError> {
     let connection = client.get_connection_with_timeout(policy.connect_timeout)?;
     configure_sync(&connection, policy.command_timeout)?;
     Ok(connection)
@@ -306,11 +319,16 @@ pub(crate) fn configure_sync(connection: &Connection, timeout: Duration) -> Resu
 /// Returns Redis connection/setup or timeout failures. Cancellation can abandon
 /// setup.
 #[cfg(feature = "async")]
-pub(crate) async fn open_async(client: &Client, policy: TransportPolicy) -> Result<MultiplexedConnection, RedisError> {
+pub(crate) async fn open_async(
+    client: &Client,
+    policy: TransportPolicy,
+) -> Result<MultiplexedConnection, RedisError> {
     let config = AsyncConnectionConfig::new()
         .set_connection_timeout(policy.connect_timeout)
         .set_response_timeout(policy.command_timeout);
-    client.get_multiplexed_async_connection_with_config(&config).await
+    client
+        .get_multiplexed_async_connection_with_config(&config)
+        .await
 }
 
 #[cfg(all(test, feature = "sync"))]
@@ -325,8 +343,11 @@ mod tests {
 
     #[test]
     fn test_invalid_utf8_discovered_host_is_rejected_before_target_connection() {
-        let server = ScriptedRedis::start(vec![Step::reply("SENTINEL", b"*2\r\n$1\r\n\xff\r\n$4\r\n6379\r\n")])
-            .expect("scripted Sentinel");
+        let server = ScriptedRedis::start(vec![Step::reply(
+            "SENTINEL",
+            b"*2\r\n$1\r\n\xff\r\n$4\r\n6379\r\n",
+        )])
+        .expect("scripted Sentinel");
         let node = server
             .url()
             .strip_prefix("redis://")
@@ -347,7 +368,11 @@ mod tests {
             Ok(_) => panic!("invalid host cannot become a target"),
         };
         assert_eq!(error.kind(), ErrorKind::MasterDown);
-        assert!(error.to_string().contains("Sentinel master discovery failed"));
+        assert!(
+            error
+                .to_string()
+                .contains("Sentinel master discovery failed")
+        );
         assert!(
             !error.to_string().contains(node),
             "endpoint data stays out of diagnostics"

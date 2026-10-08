@@ -57,7 +57,10 @@ fn test_borrowed_wire_fields_reuses_every_caller_owned_buffer() {
         fields.ordering_key.expect("key").as_ptr(),
         outbound.ordering_key().expect("key").as_str().as_ptr()
     );
-    assert_eq!(fields.content_type.as_ptr(), payload.content_type().as_str().as_ptr());
+    assert_eq!(
+        fields.content_type.as_ptr(),
+        payload.content_type().as_str().as_ptr()
+    );
     assert_eq!(
         fields.schema_id.expect("schema").as_ptr(),
         payload.schema_id().expect("schema").as_str().as_ptr()

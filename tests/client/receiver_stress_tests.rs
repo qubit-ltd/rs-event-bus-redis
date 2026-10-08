@@ -74,11 +74,20 @@ fn test_one_hundred_sync_receivers_poll_without_general_command_admission() {
         Vec::new()
     };
     gate.release();
-    assert!(reached, "publish reply must be paused after Redis accepted XADD");
-    let _ = publishing.join().expect("publish worker").expect("publish reply");
+    assert!(
+        reached,
+        "publish reply must be paused after Redis accepted XADD"
+    );
+    let _ = publishing
+        .join()
+        .expect("publish worker")
+        .expect("publish reply");
     for (index, observation) in observations.into_iter().enumerate() {
         assert!(
-            matches!(observation, Ok(ReceiveOutcome::Message(_) | ReceiveOutcome::TimedOut)),
+            matches!(
+                observation,
+                Ok(ReceiveOutcome::Message(_) | ReceiveOutcome::TimedOut)
+            ),
             "receiver {index} must poll without a command resource limit"
         );
     }
