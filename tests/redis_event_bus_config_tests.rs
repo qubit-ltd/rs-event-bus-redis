@@ -53,14 +53,7 @@ fn test_transport_limits_bounds_and_relationships() {
                 "{key}={value}"
             );
         }
-        for value in [
-            if key == "redis.max_concurrent_commands" {
-                2
-            } else {
-                1
-            },
-            maximum,
-        ] {
+        for value in [if key == "redis.max_concurrent_commands" { 2 } else { 1 }, maximum] {
             let options: ProviderOptions = [
                 (key.into(), value.to_string()),
                 ("redis.max_idle_connections".into(), "1".into()),
@@ -115,8 +108,7 @@ fn test_reserved_settlement_limits_reject_invalid_relationships() {
         ("redis.max_idle_connections".into(), "1".into()),
     ]
     .into();
-    let config =
-        RedisEventBusConfig::from_provider_options(&options).expect("valid short-command lanes");
+    let config = RedisEventBusConfig::from_provider_options(&options).expect("valid short-command lanes");
     assert_eq!(config.reserved_settlement_commands(), 1);
 }
 
@@ -147,8 +139,7 @@ fn test_transport_limits_sentinel_valid_boundary() {
             ("redis.sentinel.service_name".into(), "master".into()),
         ]
         .into();
-        let config = RedisEventBusConfig::from_provider_options(&options)
-            .expect("valid bounded Sentinel endpoints");
+        let config = RedisEventBusConfig::from_provider_options(&options).expect("valid bounded Sentinel endpoints");
         assert!(config.sentinel_nodes().expect("Sentinel endpoints").len() <= 16);
     }
 }
@@ -184,10 +175,135 @@ fn test_new_rejects_invalid_url_credentials_and_namespace() {
 }
 
 #[test]
+fn test_tls_config_accepts_rediss_and_keeps_sentinel_tls_independent() {
+    let options: ProviderOptions = [
+        ("redis.url".into(), "rediss://localhost:6379/".into()),
+        ("redis.tls_ca_cert_path".into(), "/private/main-ca.pem".into()),
+        ("redis.tls_client_cert_path".into(), "/private/main-client.pem".into()),
+        ("redis.tls_client_key_path".into(), "/private/main-key.pem".into()),
+        ("redis.sentinel.nodes".into(), "localhost:26379".into()),
+        ("redis.sentinel.service_name".into(), "master".into()),
+        ("redis.sentinel.tls".into(), "true".into()),
+        (
+            "redis.sentinel.tls_ca_cert_path".into(),
+            "/private/sentinel-ca.pem".into(),
+        ),
+        (
+            "redis.sentinel.tls_client_cert_path".into(),
+            "/private/sentinel-client.pem".into(),
+        ),
+        (
+            "redis.sentinel.tls_client_key_path".into(),
+            "/private/sentinel-key.pem".into(),
+        ),
+    ]
+    .into();
+    let config = RedisEventBusConfig::from_provider_options(&options).expect("valid TLS config");
+    assert_eq!(config.connection_url(), "rediss://localhost:6379/");
+    assert!(format!("{config:?}").contains("sentinel_tls_enabled: true"));
+}
+
+#[test]
+fn test_tls_config_rejects_insecure_urls_and_mismatched_options() {
+    for options in [
+        [("redis.url".into(), "rediss://localhost:6379/#insecure".into())].into(),
+        [("redis.url".into(), "rediss://localhost:6379/?insecure".into())].into(),
+        [("redis.tls_ca_cert_path".into(), "/private/ca.pem".into())].into(),
+        [
+            ("redis.url".into(), "rediss://localhost/".into()),
+            ("redis.tls_client_cert_path".into(), "/private/client.pem".into()),
+        ]
+        .into(),
+        [
+            ("redis.url".into(), "rediss://localhost/".into()),
+            ("redis.tls_client_key_path".into(), "/private/key.pem".into()),
+        ]
+        .into(),
+        [("redis.sentinel.tls".into(), "true".into())].into(),
+        [
+            ("redis.sentinel.tls_ca_cert_path".into(), "/private/ca.pem".into()),
+            ("redis.sentinel.nodes".into(), "localhost:26379".into()),
+            ("redis.sentinel.service_name".into(), "master".into()),
+        ]
+        .into(),
+        [
+            ("redis.sentinel.tls".into(), "true".into()),
+            ("redis.sentinel.nodes".into(), "localhost:26379".into()),
+            ("redis.sentinel.service_name".into(), "master".into()),
+            (
+                "redis.sentinel.tls_client_cert_path".into(),
+                "/private/client.pem".into(),
+            ),
+        ]
+        .into(),
+        [
+            ("redis.sentinel.tls".into(), "true".into()),
+            ("redis.sentinel.nodes".into(), "localhost:26379".into()),
+            ("redis.sentinel.service_name".into(), "master".into()),
+            ("redis.sentinel.tls_client_key_path".into(), "/private/key.pem".into()),
+        ]
+        .into(),
+        [("redis.sentinel.tls".into(), "yes".into())].into(),
+        [("redis.tls_unknown".into(), "secret".into())].into(),
+    ] {
+        assert!(
+            matches!(
+                RedisEventBusConfig::from_provider_options(&options),
+                Err(RedisProviderError::Configuration(_))
+            ),
+            "options unexpectedly accepted: {options:?}"
+        );
+    }
+}
+
+#[test]
+fn test_tls_config_debug_redacts_certificate_paths_and_credentials() {
+    let options: ProviderOptions = [
+        ("redis.url".into(), "rediss://localhost/".into()),
+        ("redis.username_env".into(), "PATH".into()),
+        ("redis.password_env".into(), "HOME".into()),
+        ("redis.tls_ca_cert_path".into(), "/secret/main-ca.pem".into()),
+        ("redis.tls_client_cert_path".into(), "/secret/main-client.pem".into()),
+        ("redis.tls_client_key_path".into(), "/secret/main-key.pem".into()),
+        ("redis.sentinel.nodes".into(), "localhost:26379".into()),
+        ("redis.sentinel.service_name".into(), "master".into()),
+        ("redis.sentinel.tls".into(), "true".into()),
+        (
+            "redis.sentinel.tls_ca_cert_path".into(),
+            "/secret/sentinel-ca.pem".into(),
+        ),
+        (
+            "redis.sentinel.tls_client_cert_path".into(),
+            "/secret/sentinel-client.pem".into(),
+        ),
+        (
+            "redis.sentinel.tls_client_key_path".into(),
+            "/secret/sentinel-key.pem".into(),
+        ),
+    ]
+    .into();
+    let config = RedisEventBusConfig::from_provider_options(&options).expect("valid TLS config");
+    let debug = format!("{config:?}");
+    let path = std::env::var("PATH").expect("PATH exists");
+    let home = std::env::var("HOME").expect("HOME exists");
+    for secret in [
+        "/secret/main-ca.pem",
+        "/secret/main-client.pem",
+        "/secret/main-key.pem",
+        "/secret/sentinel-ca.pem",
+        "/secret/sentinel-client.pem",
+        "/secret/sentinel-key.pem",
+        path.as_str(),
+        home.as_str(),
+    ] {
+        assert!(!debug.contains(secret), "debug output exposed {secret}");
+    }
+}
+
+#[test]
 fn test_provider_options_accept_recovery_interval_boundaries_and_limits() {
     for interval in [50, 60_000] {
-        let options: ProviderOptions =
-            [("redis.recovery_interval_ms".into(), interval.to_string())].into();
+        let options: ProviderOptions = [("redis.recovery_interval_ms".into(), interval.to_string())].into();
         assert_eq!(
             RedisEventBusConfig::from_provider_options(&options)
                 .unwrap()
@@ -196,8 +312,7 @@ fn test_provider_options_accept_recovery_interval_boundaries_and_limits() {
         );
     }
     for interval in ["49", "60001", "0", "overflow"] {
-        let options: ProviderOptions =
-            [("redis.recovery_interval_ms".into(), interval.into())].into();
+        let options: ProviderOptions = [("redis.recovery_interval_ms".into(), interval.into())].into();
         assert!(RedisEventBusConfig::from_provider_options(&options).is_err());
     }
 }
@@ -223,10 +338,8 @@ fn test_provider_options_reject_inline_credentials_invalid_namespaces_and_partia
     ] {
         assert!(RedisEventBusConfig::from_provider_options(&options).is_err());
     }
-    let error = RedisEventBusConfig::from_provider_options(
-        &[("redis.url".into(), "not a redis url".into())].into(),
-    )
-    .unwrap_err();
+    let error = RedisEventBusConfig::from_provider_options(&[("redis.url".into(), "not a redis url".into())].into())
+        .unwrap_err();
     assert!(!error.to_string().contains("secret"));
 }
 
@@ -262,10 +375,7 @@ fn test_sentinel_endpoint_rejects_uri_delimiters() {
             result => accepted.push((endpoint, format!("{result:?}"))),
         }
     }
-    assert!(
-        accepted.is_empty(),
-        "invalid endpoints not rejected: {accepted:?}"
-    );
+    assert!(accepted.is_empty(), "invalid endpoints not rejected: {accepted:?}");
 }
 
 #[test]
@@ -293,8 +403,7 @@ fn test_sentinel_endpoint_preserves_valid_hosts_and_ports() {
 
 #[test]
 fn test_config_debug_redacts_password_in_url() {
-    let error =
-        RedisEventBusConfig::new("redis://user:test-secret@127.0.0.1/", "test").unwrap_err();
+    let error = RedisEventBusConfig::new("redis://user:test-secret@127.0.0.1/", "test").unwrap_err();
     assert!(!error.to_string().contains("test-secret"));
 }
 
@@ -305,11 +414,7 @@ fn test_provider_options_validate_boundaries_and_sentinel_pairing() {
         [("redis.namespace".into(), "".into())].into(),
         [("redis.namespace".into(), "bad\nnamespace".into())].into(),
         [("redis.max_unsettled_per_subscription".into(), "0".into())].into(),
-        [(
-            "redis.max_unsettled_per_subscription".into(),
-            "10001".into(),
-        )]
-        .into(),
+        [("redis.max_unsettled_per_subscription".into(), "10001".into())].into(),
         [("redis.max_unsettled_per_subscription".into(), "NaN".into())].into(),
         [("redis.max_idle_connections".into(), "0".into())].into(),
         [("redis.max_idle_connections".into(), "65".into())].into(),
@@ -336,23 +441,14 @@ fn test_provider_options_defaults_and_sentinel_credentials_are_redacted() {
     assert_eq!(defaults.recovery_interval_ms(), 1_000);
     assert_eq!(defaults.stream_maxlen_approx(), None);
     let options: ProviderOptions = [
-        (
-            "redis.sentinel.nodes".into(),
-            "127.0.0.1:26379, 127.0.0.1:26380".into(),
-        ),
+        ("redis.sentinel.nodes".into(), "127.0.0.1:26379, 127.0.0.1:26380".into()),
         ("redis.sentinel.service_name".into(), "primary".into()),
-        (
-            "redis.username_env".into(),
-            "REDIS_TEST_MISSING_USER".into(),
-        ),
+        ("redis.username_env".into(), "REDIS_TEST_MISSING_USER".into()),
     ]
     .into();
     assert!(RedisEventBusConfig::from_provider_options(&options).is_err());
     let options: ProviderOptions = [
-        (
-            "redis.sentinel.nodes".into(),
-            "127.0.0.1:26379, 127.0.0.1:26380".into(),
-        ),
+        ("redis.sentinel.nodes".into(), "127.0.0.1:26379, 127.0.0.1:26380".into()),
         ("redis.sentinel.service_name".into(), "primary".into()),
     ]
     .into();
@@ -369,10 +465,7 @@ fn test_stream_maxlen_approx_is_an_optional_positive_limit() {
     ]
     .into();
     let config = RedisEventBusConfig::from_provider_options(&options).unwrap();
-    assert_eq!(
-        config.stream_maxlen_approx().map(|value| value.get()),
-        Some(4096)
-    );
+    assert_eq!(config.stream_maxlen_approx().map(|value| value.get()), Some(4096));
 }
 
 #[test]

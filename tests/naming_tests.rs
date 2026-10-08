@@ -29,10 +29,7 @@ fn test_length_prefixed_components_are_injective_for_unicode_and_delimiters() {
             assert_eq!(stream, stream_key(namespace, topic));
             for identity in components {
                 let group = group_name(namespace, topic, identity, None);
-                assert_eq!(
-                    group,
-                    group_name(namespace, topic, "unused", Some(identity))
-                );
+                assert_eq!(group, group_name(namespace, topic, "unused", Some(identity)));
                 assert!(
                     groups.insert(group),
                     "colliding group for {namespace:?}/{topic:?}/{identity:?}"

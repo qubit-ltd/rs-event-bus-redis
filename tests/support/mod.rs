@@ -20,3 +20,7 @@ pub mod sentinel;
 #[cfg(any(feature = "sync", feature = "async"))]
 #[allow(dead_code)]
 pub mod settlement_fault;
+#[allow(dead_code)]
+pub mod tls_redis_server;
+#[allow(dead_code)]
+pub mod tls_sentinel;

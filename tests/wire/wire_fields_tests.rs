@@ -34,9 +34,8 @@ fn test_binary_payload_json_round_trip_preserves_every_byte() {
         let fields = WireFields::from_outbound(&message(&bytes, Headers::new())).unwrap();
         let encoded = to_vec(&fields).unwrap();
         let decoded: WireFields = from_slice(&encoded).unwrap();
-        let (_, _, _, _, _, TransportPayload::Encoded(payload)) = decoded
-            .into_parts(TopicAddress::new("events").unwrap())
-            .unwrap()
+        let (_, _, _, _, _, TransportPayload::Encoded(payload)) =
+            decoded.into_parts(TopicAddress::new("events").unwrap()).unwrap()
         else {
             panic!("encoded payload must stay encoded");
         };
@@ -50,9 +49,7 @@ fn test_invalid_event_identifiers_are_never_accepted_from_wire() {
         let mut fields = WireFields::from_outbound(&message(&[], Headers::new())).unwrap();
         fields.event_id = id.into();
         assert!(
-            fields
-                .into_parts(TopicAddress::new("events").unwrap())
-                .is_err(),
+            fields.into_parts(TopicAddress::new("events").unwrap()).is_err(),
             "invalid ID {id:?}"
         );
     }
@@ -75,9 +72,7 @@ fn test_encoded_payload_round_trips_binary_bytes() -> Result<(), Box<dyn Error>>
         )),
     );
     let fields = WireFields::from_outbound(&message)?;
-    let (_, _, _, _, _, TransportPayload::Encoded(payload)) =
-        fields.into_parts(TopicAddress::new("events")?)?
-    else {
+    let (_, _, _, _, _, TransportPayload::Encoded(payload)) = fields.into_parts(TopicAddress::new("events")?)? else {
         panic!("wire decoder must preserve encoded payloads");
     };
     assert_eq!(payload.bytes(), original);
@@ -117,10 +112,7 @@ fn test_wire_fields_preserve_optional_metadata_and_timestamp() -> Result<(), Box
         ordering_key.map(|key| key.as_str().to_owned()).as_deref(),
         Some("partition-1")
     );
-    assert_eq!(
-        payload.schema_id().map(|schema| schema.as_str()),
-        Some("schema-v1")
-    );
+    assert_eq!(payload.schema_id().map(|schema| schema.as_str()), Some("schema-v1"));
     Ok(())
 }
 

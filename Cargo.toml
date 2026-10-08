@@ -18,7 +18,7 @@ resolver = "3"
 [features]
 default = ["sync", "async", "discovery"]
 sync = ["redis/streams"]
-async = ["dep:async-lock", "redis/smol-comp", "redis/streams"]
+async = ["dep:async-lock", "redis/smol-rustls-comp", "redis/streams"]
 discovery = ["qubit-event-bus/discovery", "qubit-spi/inventory"]
 conformance = ["qubit-event-bus/conformance"]
 
@@ -27,16 +27,18 @@ qubit-event-bus = { version = "0.20", path = "../rs-event-bus" }
 qubit-spi = "0.13"
 qubit-id = { version = "0.7", default-features = false, features = ["uuid"] }
 async-lock = { version = "^3", optional = true }
-redis = { version = "^0.32.7", default-features = false, features = ["streams", "sentinel"] }
+redis = { version = "^0.32.7", default-features = false, features = ["streams", "sentinel", "tls-rustls-webpki-roots"] }
 serde = { version = "^1.0", features = ["derive"] }
 serde_json = "^1.0"
 thiserror = "^2.0"
+rustls = { version = "^0.23", default-features = false, features = ["ring", "std", "tls12"] }
 
 [dev-dependencies]
 qubit-retry = "0.26"
+qubit-retry-025 = { package = "qubit-retry", version = "0.25" }
 futures-lite = "^2"
 futures-channel = "^0.3"
-redis = { version = "0.32.7", default-features = false, features = ["tokio-comp", "streams", "sentinel"] }
+redis = { version = "0.32.7", default-features = false, features = ["tokio-rustls-comp", "streams", "sentinel", "tls-rustls-webpki-roots"] }
 tempfile = "^3.27"
 tokio = { version = "^1.53", features = ["rt", "macros"] }
 

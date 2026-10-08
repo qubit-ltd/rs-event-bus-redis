@@ -153,16 +153,24 @@ async fn create_task_service(
 /// the facade, or codec/configuration/discovery/provider errors. Construction
 /// performs no Redis IO; intentionally omitting the codec exercises publication
 /// failure.
-fn create_bus(url: &str, namespace: &str, codec: bool) -> Result<EventBus, Box<dyn Error>> {
+fn create_bus(
+    url: &str,
+    namespace: &str,
+    codec: bool,
+    tls_ca_path: Option<&str>,
+) -> Result<EventBus, Box<dyn Error>> {
     let mut codecs = CodecRegistry::new();
     if codec {
         codecs.register::<TaskEvent>(Arc::new(TaskEventJsonCodec(ContentType::new("application/json")?)))?;
     }
-    let options: ProviderOptions = [
+    let mut options: ProviderOptions = [
         ("redis.url".into(), url.into()),
         ("redis.namespace".into(), namespace.into()),
     ]
     .into();
+    if let Some(tls_ca_path) = tls_ca_path {
+        options.insert("redis.tls_ca_cert_path".into(), tls_ca_path.into());
+    }
     let config = EventBusConfig::default()
         .with_selection(ProviderSelection::named("redis-streams")?)
         .with_provider_options(options)
@@ -170,13 +178,20 @@ fn create_bus(url: &str, namespace: &str, codec: bool) -> Result<EventBus, Box<d
     Ok(EventBusRegistry::discover()?.create(&config)?)
 }
 
-async fn create_async_bus(url: &str, namespace: &str) -> Result<AsyncEventBus, Box<dyn Error>> {
+async fn create_async_bus(
+    url: &str,
+    namespace: &str,
+    tls_ca_path: Option<&str>,
+) -> Result<AsyncEventBus, Box<dyn Error>> {
     let mut codecs = CodecRegistry::new();
     codecs.register::<TaskEvent>(Arc::new(TaskEventJsonCodec(ContentType::new("application/json")?)))?;
-    let options: ProviderOptions = [
+    let mut options: ProviderOptions = [
         ("redis.url".into(), url.into()),
         ("redis.namespace".into(), namespace.into()),
     ].into();
+    if let Some(tls_ca_path) = tls_ca_path {
+        options.insert("redis.tls_ca_cert_path".into(), tls_ca_path.into());
+    }
     let config = EventBusConfig::default()
         .with_selection(ProviderSelection::named("redis-streams")?)
         .with_provider_options(options)
@@ -193,11 +208,20 @@ async fn create_async_bus(url: &str, namespace: &str) -> Result<AsyncEventBus, B
 /// violations.
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let url = args().nth(1).ok_or("expected Redis URL")?;
+    let mut arguments = args().skip(1);
+    let url = arguments.next().ok_or("expected Redis URL")?;
+    let tls_ca_path = arguments.next();
     let database_dir = tempfile::tempdir()?;
     let store = Arc::new(SqliteTaskStore::open_next(database_dir.path().join("tasks.sqlite"))?);
-    let bus = create_bus(&url, "task-notification-fixture", true)?;
-    let async_bus = Arc::new(create_async_bus(&url, "task-notification-fixture").await?);
+    let bus = create_bus(
+        &url,
+        "task-notification-fixture",
+        true,
+        tls_ca_path.as_deref(),
+    )?;
+    let async_bus = Arc::new(
+        create_async_bus(&url, "task-notification-fixture", tls_ca_path.as_deref()).await?,
+    );
     let topic = Topic::<TaskEvent>::new("task.lifecycle")?;
     let projection = Arc::new(Mutex::new(None::<TaskEvent>));
     let consumer_projection = projection.clone();

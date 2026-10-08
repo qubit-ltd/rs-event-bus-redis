@@ -20,6 +20,7 @@ mod resource_budget;
 pub(super) mod sentinel_resolver;
 #[cfg(feature = "sync")]
 mod sync_connection_pool;
+pub(super) mod tls;
 
 #[cfg(feature = "async")]
 pub(crate) use async_command_connection::AsyncCommandConnection;
@@ -35,3 +36,5 @@ pub(crate) use resource_budget::ResourceBudget;
 pub(crate) use sentinel_resolver::SentinelResolver;
 #[cfg(feature = "sync")]
 pub(crate) use sync_connection_pool::SyncConnectionPool;
+pub(super) use tls::build_client;
+pub(super) use tls::load_certificates;

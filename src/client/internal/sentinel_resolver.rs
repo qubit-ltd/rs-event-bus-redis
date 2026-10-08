@@ -24,11 +24,14 @@ use redis::ConnectionLike;
 use redis::ErrorKind;
 use redis::RedisConnectionInfo;
 use redis::RedisError;
+use redis::TlsCertificates;
 use redis::Value;
 #[cfg(feature = "async")]
 use redis::aio::MultiplexedConnection;
 use redis::cmd;
 
+use super::tls::build_client;
+use super::tls::load_certificates;
 use crate::config::RedisEventBusConfig;
 use crate::internal::TransportPolicy;
 
@@ -40,6 +43,10 @@ pub(crate) struct SentinelResolver {
     service: String,
     /// Master ACL and database settings preserved for discovered addresses.
     master_info: RedisConnectionInfo,
+    /// Whether the discovered master address must use verified TLS.
+    master_tls_enabled: bool,
+    /// Master-specific CA and mTLS identity, independent from Sentinel TLS.
+    master_certificates: Option<TlsCertificates>,
     /// Index of the last successful endpoint; relaxed ordering only affects
     /// probe preference.
     preferred: AtomicUsize,
@@ -67,25 +74,49 @@ impl SentinelResolver {
     pub(crate) fn new(config: &RedisEventBusConfig) -> Result<Self, RedisError> {
         let mut endpoints = Vec::new();
         let (username, password) = config.sentinel_credentials();
+        let sentinel_certificates = if config.sentinel_tls_enabled() {
+            load_certificates(
+                config.sentinel_tls_ca_cert_path(),
+                config.sentinel_tls_client_cert_path(),
+                config.sentinel_tls_client_key_path(),
+            )?
+        } else {
+            None
+        };
         for node in config.sentinel_nodes().unwrap_or_default() {
-            let mut info = Client::open(format!("redis://{node}/"))?
+            let scheme = if config.sentinel_tls_enabled() {
+                "rediss"
+            } else {
+                "redis"
+            };
+            let mut info = Client::open(format!("{scheme}://{node}/"))?
                 .get_connection_info()
                 .clone();
             info.redis.username.clone_from(username);
             info.redis.password.clone_from(password);
-            endpoints.push(Client::open(info)?);
+            endpoints.push(build_client(info, sentinel_certificates.as_ref())?);
         }
-        let mut master_info = Client::open(config.connection_url())?
-            .get_connection_info()
-            .redis
-            .clone();
+        let master_connection_info = Client::open(config.connection_url())?.get_connection_info().clone();
+        let master_tls_enabled = matches!(&master_connection_info.addr, ConnectionAddr::TcpTls { .. });
+        let mut master_connection_info = master_connection_info;
         let (username, password) = config.credentials();
-        master_info.username.clone_from(username);
-        master_info.password.clone_from(password);
+        master_connection_info.redis.username.clone_from(username);
+        master_connection_info.redis.password.clone_from(password);
+        let master_info = master_connection_info.redis.clone();
+        let master_certificates = load_certificates(
+            config.tls_ca_cert_path(),
+            config.tls_client_cert_path(),
+            config.tls_client_key_path(),
+        )?;
+        if let Some(certificates) = &master_certificates {
+            build_client(master_connection_info, Some(certificates))?;
+        }
         Ok(Self {
             endpoints,
             service: config.sentinel_service().unwrap_or_default().into(),
             master_info,
+            master_tls_enabled,
+            master_certificates,
             preferred: AtomicUsize::new(0),
             policy: TransportPolicy::from_config(config),
         })
@@ -111,11 +142,7 @@ impl SentinelResolver {
             let index = (start + offset) % self.endpoints.len();
             let attempt = (|| {
                 let mut sentinel = open_sync(&self.endpoints[index], self.policy)?;
-                let raw = sentinel.req_command(
-                    cmd("SENTINEL")
-                        .arg("get-master-addr-by-name")
-                        .arg(&self.service),
-                )?;
+                let raw = sentinel.req_command(cmd("SENTINEL").arg("get-master-addr-by-name").arg(&self.service))?;
                 let target = self.target(raw)?;
                 let mut connection = open_sync(&target, self.policy)?;
                 let role = connection.req_command(&cmd("ROLE"))?;
@@ -159,11 +186,7 @@ impl SentinelResolver {
             let attempt = async {
                 let mut sentinel = open_async(&self.endpoints[index], self.policy).await?;
                 let raw = sentinel
-                    .send_packed_command(
-                        cmd("SENTINEL")
-                            .arg("get-master-addr-by-name")
-                            .arg(&self.service),
-                    )
+                    .send_packed_command(cmd("SENTINEL").arg("get-master-addr-by-name").arg(&self.service))
                     .await?;
                 let target = self.target(raw)?;
                 let mut connection = open_async(&target, self.policy).await?;
@@ -226,10 +249,23 @@ impl SentinelResolver {
         {
             return Err(discovery_error());
         }
-        Client::open(ConnectionInfo {
-            addr: ConnectionAddr::Tcp(host.into(), port),
-            redis: self.master_info.clone(),
-        })
+        let addr = if self.master_tls_enabled {
+            ConnectionAddr::TcpTls {
+                host: host.into(),
+                port,
+                insecure: false,
+                tls_params: None,
+            }
+        } else {
+            ConnectionAddr::Tcp(host.into(), port)
+        };
+        build_client(
+            ConnectionInfo {
+                addr,
+                redis: self.master_info.clone(),
+            },
+            self.master_certificates.as_ref(),
+        )
     }
 }
 /// Checks the top-level ROLE master tag without allocation or I/O.
@@ -272,10 +308,7 @@ fn discovery_error() -> RedisError {
 ///
 /// Returns Redis connection/setup, timeout, or socket-option failures.
 #[cfg(feature = "sync")]
-pub(crate) fn open_sync(
-    client: &Client,
-    policy: TransportPolicy,
-) -> Result<Connection, RedisError> {
+pub(crate) fn open_sync(client: &Client, policy: TransportPolicy) -> Result<Connection, RedisError> {
     let connection = client.get_connection_with_timeout(policy.connect_timeout)?;
     configure_sync(&connection, policy.command_timeout)?;
     Ok(connection)
@@ -319,16 +352,11 @@ pub(crate) fn configure_sync(connection: &Connection, timeout: Duration) -> Resu
 /// Returns Redis connection/setup or timeout failures. Cancellation can abandon
 /// setup.
 #[cfg(feature = "async")]
-pub(crate) async fn open_async(
-    client: &Client,
-    policy: TransportPolicy,
-) -> Result<MultiplexedConnection, RedisError> {
+pub(crate) async fn open_async(client: &Client, policy: TransportPolicy) -> Result<MultiplexedConnection, RedisError> {
     let config = AsyncConnectionConfig::new()
         .set_connection_timeout(policy.connect_timeout)
         .set_response_timeout(policy.command_timeout);
-    client
-        .get_multiplexed_async_connection_with_config(&config)
-        .await
+    client.get_multiplexed_async_connection_with_config(&config).await
 }
 
 #[cfg(all(test, feature = "sync"))]
@@ -343,11 +371,8 @@ mod tests {
 
     #[test]
     fn test_invalid_utf8_discovered_host_is_rejected_before_target_connection() {
-        let server = ScriptedRedis::start(vec![Step::reply(
-            "SENTINEL",
-            b"*2\r\n$1\r\n\xff\r\n$4\r\n6379\r\n",
-        )])
-        .expect("scripted Sentinel");
+        let server = ScriptedRedis::start(vec![Step::reply("SENTINEL", b"*2\r\n$1\r\n\xff\r\n$4\r\n6379\r\n")])
+            .expect("scripted Sentinel");
         let node = server
             .url()
             .strip_prefix("redis://")
@@ -368,11 +393,7 @@ mod tests {
             Ok(_) => panic!("invalid host cannot become a target"),
         };
         assert_eq!(error.kind(), ErrorKind::MasterDown);
-        assert!(
-            error
-                .to_string()
-                .contains("Sentinel master discovery failed")
-        );
+        assert!(error.to_string().contains("Sentinel master discovery failed"));
         assert!(
             !error.to_string().contains(node),
             "endpoint data stays out of diagnostics"

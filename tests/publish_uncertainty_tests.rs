@@ -36,7 +36,7 @@ use qubit_event_bus_redis::sync::RedisEventBusProvider;
 use qubit_event_bus_redis::wire::WireFields;
 use qubit_id::Id;
 #[cfg(feature = "async")]
-use qubit_retry::RetryPolicy;
+use qubit_retry_025::RetryPolicy;
 use qubit_spi::ServiceProvider;
 use support::scripted_redis::ScriptedRedis;
 use support::scripted_redis::Step;
@@ -77,10 +77,7 @@ fn test_sync_publish_counters_follow_returned_outcome() {
 
     let lost = ScriptedRedis::start(vec![Step::disconnect("XADD", false)]).unwrap();
     let bus = bus_in_namespace(lost.url(), "metric-publish-sync-lost");
-    assert_eq!(
-        bus.publish(message()).unwrap_err().kind(),
-        "outcome_unknown"
-    );
+    assert_eq!(bus.publish(message()).unwrap_err().kind(), "outcome_unknown");
     let counters = snapshot("metric-publish-sync-lost");
     assert_eq!(counters.publish_accepted(), 0);
     assert_eq!(counters.publish_unknown(), 1);
@@ -94,12 +91,7 @@ fn test_async_publish_counters_follow_returned_outcome() {
     use qubit_spi::AsyncServiceProvider;
     futures_lite::future::block_on(async {
         for (namespace, reply, accepted_count, unknown_count) in [
-            (
-                "metric-publish-async-accepted",
-                Some(b"$3\r\n1-0\r\n".as_slice()),
-                1,
-                0,
-            ),
+            ("metric-publish-async-accepted", Some(b"$3\r\n1-0\r\n".as_slice()), 1, 0),
             ("metric-publish-async-lost", None, 0, 1),
         ] {
             let step = match reply {
@@ -132,8 +124,7 @@ fn test_async_publish_counters_follow_returned_outcome() {
 
 #[cfg(feature = "async")]
 #[test]
-fn test_async_cancelled_publish_has_no_returned_outcome_count()
--> Result<(), Box<dyn std::error::Error>> {
+fn test_async_cancelled_publish_has_no_returned_outcome_count() -> Result<(), Box<dyn std::error::Error>> {
     use futures_lite::future::block_on;
     use futures_lite::future::race;
     use qubit_event_bus_redis::r#async::AsyncRedisEventBusProvider;
@@ -160,10 +151,7 @@ fn test_async_cancelled_publish_has_no_returned_outcome_count()
             None
         })
         .await;
-        assert!(
-            result.is_none(),
-            "XADD future was cancelled before its reply"
-        );
+        assert!(result.is_none(), "XADD future was cancelled before its reply");
         let mut observer = redis::Client::open(server.url())?.get_connection()?;
         let stream = qubit_event_bus_redis::naming::stream_key(namespace, "events");
         let applied: usize = redis::cmd("XLEN").arg(&stream).query(&mut observer)?;
@@ -185,10 +173,7 @@ fn test_async_cancelled_publish_has_no_returned_outcome_count()
             "cancelled XADD has no returned unknown result"
         );
         let restored: usize = redis::cmd("XLEN").arg(&stream).query(&mut observer)?;
-        assert_eq!(
-            restored, 2,
-            "both applied XADDs remain visible after recovery"
-        );
+        assert_eq!(restored, 2, "both applied XADDs remain visible after recovery");
         Ok::<(), Box<dyn std::error::Error>>(())
     })
 }
@@ -218,8 +203,7 @@ fn opening_connection_failure_has_no_admission() {
 
 #[test]
 fn explicit_redis_rejection_has_no_admission() {
-    let server =
-        ScriptedRedis::start(vec![Step::reply("XADD", b"-WRONGTYPE wrong kind\r\n")]).unwrap();
+    let server = ScriptedRedis::start(vec![Step::reply("XADD", b"-WRONGTYPE wrong kind\r\n")]).unwrap();
     let error = bus(server.url()).publish(message()).unwrap_err();
     assert_eq!(error.publish_effect(), PublishEffect::NotAccepted);
     assert_eq!(error.kind(), "wrong_type");
@@ -265,8 +249,7 @@ impl EventCodec<Vec<u8>> for BytesCodec {
 }
 
 #[test]
-fn test_sync_checked_publish_opaque_preflight_writes_nothing()
--> Result<(), Box<dyn std::error::Error>> {
+fn test_sync_checked_publish_opaque_preflight_writes_nothing() -> Result<(), Box<dyn std::error::Error>> {
     use qubit_event_bus::CheckedPublishError;
     use qubit_event_bus::EventBus;
     use qubit_event_bus::codec::CodecRegistry;
@@ -320,10 +303,7 @@ fn test_sync_checked_publish_opaque_preflight_writes_nothing()
         PublishRequest::new(topic, b"accepted".to_vec())?,
         AdmissionRequirement::ProviderOrDestinationAccepted,
     )?;
-    assert_eq!(
-        receipt.admission_outcome(),
-        AdmissionOutcome::OpaqueAccepted
-    );
+    assert_eq!(receipt.admission_outcome(), AdmissionOutcome::OpaqueAccepted);
     assert_eq!(
         stream_len(&mut observer)?,
         1,
@@ -334,8 +314,7 @@ fn test_sync_checked_publish_opaque_preflight_writes_nothing()
 
 #[cfg(feature = "async")]
 #[test]
-fn test_async_checked_publish_opaque_preflight_writes_nothing()
--> Result<(), Box<dyn std::error::Error>> {
+fn test_async_checked_publish_opaque_preflight_writes_nothing() -> Result<(), Box<dyn std::error::Error>> {
     use qubit_event_bus::AsyncEventBus;
     use qubit_event_bus::CheckedPublishError;
     use qubit_event_bus::codec::CodecRegistry;
@@ -357,8 +336,7 @@ fn test_async_checked_publish_opaque_preflight_writes_nothing()
     ]
     .into();
     let spi = futures_lite::future::block_on(
-        AsyncRedisEventBusProvider
-            .create_configured(&EventBusConfig::default().with_provider_options(options)),
+        AsyncRedisEventBusProvider.create_configured(&EventBusConfig::default().with_provider_options(options)),
     )?;
     let mut codecs = CodecRegistry::new();
     codecs.register::<Vec<u8>>(Arc::new(BytesCodec(ContentType::new("text/plain")?)))?;
@@ -399,10 +377,7 @@ fn test_async_checked_publish_opaque_preflight_writes_nothing()
         PublishRequest::new(topic, b"accepted".to_vec())?,
         AdmissionRequirement::ProviderOrDestinationAccepted,
     ))?;
-    assert_eq!(
-        receipt.admission_outcome(),
-        AdmissionOutcome::OpaqueAccepted
-    );
+    assert_eq!(receipt.admission_outcome(), AdmissionOutcome::OpaqueAccepted);
     assert_eq!(
         stream_len(&mut observer)?,
         1,
@@ -421,7 +396,7 @@ fn applied_xadd_reply_loss(policy: DuplicateRiskPolicy) -> Result<(), Box<dyn st
     use qubit_event_bus::model::PublishRequest;
     use qubit_event_bus::model::Topic;
     use qubit_event_bus_redis::naming::stream_key;
-    use qubit_retry::RetryPolicy;
+    use qubit_retry_025::RetryPolicy;
     use support::controlled_redis::proxy::ControlledRedis;
     use support::redis_server::RedisServer;
     let server = RedisServer::start()?;
@@ -453,10 +428,7 @@ fn applied_xadd_reply_loss(policy: DuplicateRiskPolicy) -> Result<(), Box<dyn st
     assert_eq!(applied, 1, "first XADD actually executed before reply loss");
     gate.release_without_reply();
     let (event_id, result) = worker.join().expect("publish worker completes");
-    assert_eq!(
-        result.unwrap_err().effect(),
-        PublishEffect::MayHaveBeenAccepted
-    );
+    assert_eq!(result.unwrap_err().effect(), PublishEffect::MayHaveBeenAccepted);
     let records: redis::streams::StreamRangeReply = redis::cmd("XRANGE")
         .arg(&stream)
         .arg("-")
@@ -485,8 +457,7 @@ fn applied_xadd_lost_reply_forbid_has_one_record() -> Result<(), Box<dyn std::er
 }
 
 #[test]
-fn applied_xadd_lost_reply_allow_duplicates_does_not_blindly_retry()
--> Result<(), Box<dyn std::error::Error>> {
+fn applied_xadd_lost_reply_allow_duplicates_does_not_blindly_retry() -> Result<(), Box<dyn std::error::Error>> {
     applied_xadd_reply_loss(DuplicateRiskPolicy::AllowDuplicates)
 }
 
@@ -497,14 +468,8 @@ fn async_query_stages_preserve_admission_evidence() -> Result<(), Box<dyn std::e
     use qubit_spi::AsyncServiceProvider;
     futures_lite::future::block_on(async {
         for (response, expected) in [
-            (
-                b"-WRONGTYPE wrong kind\r\n".as_slice(),
-                PublishEffect::NotAccepted,
-            ),
-            (
-                b"*1\r\n:42\r\n".as_slice(),
-                PublishEffect::MayHaveBeenAccepted,
-            ),
+            (b"-WRONGTYPE wrong kind\r\n".as_slice(), PublishEffect::NotAccepted),
+            (b"*1\r\n:42\r\n".as_slice(), PublishEffect::MayHaveBeenAccepted),
         ] {
             let server = ScriptedRedis::start(vec![Step::reply("XADD", response)])?;
             let options: ProviderOptions = [("redis.url".into(), server.url().into())].into();
@@ -522,8 +487,7 @@ fn async_query_stages_preserve_admission_evidence() -> Result<(), Box<dyn std::e
 
 #[cfg(feature = "async")]
 #[test]
-fn async_applied_xadd_reply_loss_covers_both_duplicate_policies()
--> Result<(), Box<dyn std::error::Error>> {
+fn async_applied_xadd_reply_loss_covers_both_duplicate_policies() -> Result<(), Box<dyn std::error::Error>> {
     use qubit_event_bus::AsyncEventBus;
     use qubit_event_bus::codec::CodecRegistry;
     use qubit_event_bus::facade::EventBusFacadeConfig;
@@ -533,17 +497,14 @@ fn async_applied_xadd_reply_loss_covers_both_duplicate_policies()
     use qubit_event_bus::model::Topic;
     use qubit_event_bus_redis::r#async::AsyncRedisEventBusProvider;
     use qubit_event_bus_redis::naming::stream_key;
-    use qubit_retry::RetryPolicy;
+    use qubit_retry_025::RetryPolicy;
     use qubit_spi::AsyncServiceProvider;
     use support::controlled_redis::proxy::ControlledRedis;
     use support::redis_server::RedisServer;
     let server = RedisServer::start()?;
-    for (index, policy) in [
-        DuplicateRiskPolicy::Forbid,
-        DuplicateRiskPolicy::AllowDuplicates,
-    ]
-    .into_iter()
-    .enumerate()
+    for (index, policy) in [DuplicateRiskPolicy::Forbid, DuplicateRiskPolicy::AllowDuplicates]
+        .into_iter()
+        .enumerate()
     {
         let proxy = ControlledRedis::start(server.url())?;
         let namespace = format!("async-uncertainty-{index}");
@@ -553,8 +514,7 @@ fn async_applied_xadd_reply_loss_covers_both_duplicate_policies()
         ]
         .into();
         let spi = futures_lite::future::block_on(
-            AsyncRedisEventBusProvider
-                .create_configured(&EventBusConfig::default().with_provider_options(options)),
+            AsyncRedisEventBusProvider.create_configured(&EventBusConfig::default().with_provider_options(options)),
         )
         .unwrap();
         let mut codecs = CodecRegistry::new();
@@ -585,10 +545,7 @@ fn async_applied_xadd_reply_loss_covers_both_duplicate_policies()
         assert_eq!(applied, 1);
         gate.release_without_reply();
         let (event_id, result) = worker.join().expect("async publish completes");
-        assert_eq!(
-            result.unwrap_err().effect(),
-            PublishEffect::MayHaveBeenAccepted
-        );
+        assert_eq!(result.unwrap_err().effect(), PublishEffect::MayHaveBeenAccepted);
         let records: redis::streams::StreamRangeReply = redis::cmd("XRANGE")
             .arg(&stream)
             .arg("-")
@@ -635,8 +592,7 @@ impl EventCodec<DeadLetterEvent<Vec<u8>>> for DeadBytesCodec {
 }
 
 #[test]
-fn applied_dlq_xadd_lost_reply_stops_and_preserves_durable_source()
--> Result<(), Box<dyn std::error::Error>> {
+fn applied_dlq_xadd_lost_reply_stops_and_preserves_durable_source() -> Result<(), Box<dyn std::error::Error>> {
     use qubit_event_bus::EventBus;
     use qubit_event_bus::codec::CodecRegistry;
     use qubit_event_bus::facade::EventBusFacadeConfig;
@@ -657,7 +613,7 @@ fn applied_dlq_xadd_lost_reply_stops_and_preserves_durable_source()
     use qubit_event_bus::spi::SpiSubscriptionRequest;
     use qubit_event_bus_redis::naming::group_name;
     use qubit_event_bus_redis::naming::stream_key;
-    use qubit_retry::RetryPolicy;
+    use qubit_retry_025::RetryPolicy;
     use support::controlled_redis::proxy::ControlledRedis;
     use support::redis_server::RedisServer;
     let server = RedisServer::start()?;
@@ -666,9 +622,7 @@ fn applied_dlq_xadd_lost_reply_stops_and_preserves_durable_source()
     let _ = spi.publish(message())?;
     let mut codecs = CodecRegistry::new();
     codecs.register::<Vec<u8>>(Arc::new(BytesCodec(ContentType::new("text/plain")?)))?;
-    codecs.register::<DeadLetterEvent<Vec<u8>>>(Arc::new(DeadBytesCodec(ContentType::new(
-        "text/plain",
-    )?)))?;
+    codecs.register::<DeadLetterEvent<Vec<u8>>>(Arc::new(DeadBytesCodec(ContentType::new("text/plain")?)))?;
     let facade = EventBus::with_config(
         ProviderId::new("redis-streams")?,
         Arc::clone(&spi),
@@ -702,10 +656,7 @@ fn applied_dlq_xadd_lost_reply_stops_and_preserves_durable_source()
     let mut observer = redis::Client::open(server.url())?.get_connection()?;
     let dead = stream_key("uncertainty", "dead");
     let applied: usize = redis::cmd("XLEN").arg(&dead).query(&mut observer)?;
-    assert_eq!(
-        applied, 1,
-        "DLQ XADD has really executed before its reply is lost"
-    );
+    assert_eq!(applied, 1, "DLQ XADD has really executed before its reply is lost");
     gate.release_without_reply();
     rx.recv_timeout(std::time::Duration::from_secs(3))?;
     assert!(
@@ -738,10 +689,7 @@ fn applied_dlq_xadd_lost_reply_stops_and_preserves_durable_source()
         ProviderOptions::new(),
         std::any::TypeId::of::<Vec<u8>>(),
     );
-    let ReceiveOutcome::Message(recovered) = spi
-        .subscribe(request)?
-        .receive(std::time::Duration::from_secs(2))?
-    else {
+    let ReceiveOutcome::Message(recovered) = spi.subscribe(request)?.receive(std::time::Duration::from_secs(2))? else {
         panic!("unsettled source recovers")
     };
     assert_eq!(recovered.id().as_str(), "stable-id");
@@ -761,8 +709,7 @@ fn invalid_xadd_id_reply_does_not_claim_acceptance() {
 
 #[cfg(feature = "async")]
 #[test]
-fn async_applied_dlq_reply_loss_preserves_durable_source() -> Result<(), Box<dyn std::error::Error>>
-{
+fn async_applied_dlq_reply_loss_preserves_durable_source() -> Result<(), Box<dyn std::error::Error>> {
     use qubit_event_bus::AsyncEventBus;
     use qubit_event_bus::codec::CodecRegistry;
     use qubit_event_bus::facade::EventBusFacadeConfig;
@@ -795,16 +742,13 @@ fn async_applied_dlq_reply_loss_preserves_durable_source() -> Result<(), Box<dyn
     ]
     .into();
     let spi = futures_lite::future::block_on(
-        AsyncRedisEventBusProvider
-            .create_configured(&EventBusConfig::default().with_provider_options(options)),
+        AsyncRedisEventBusProvider.create_configured(&EventBusConfig::default().with_provider_options(options)),
     )
     .unwrap();
     let _ = futures_lite::future::block_on(spi.publish(message()))?;
     let mut codecs = CodecRegistry::new();
     codecs.register::<Vec<u8>>(Arc::new(BytesCodec(ContentType::new("text/plain")?)))?;
-    codecs.register::<DeadLetterEvent<Vec<u8>>>(Arc::new(DeadBytesCodec(ContentType::new(
-        "text/plain",
-    )?)))?;
+    codecs.register::<DeadLetterEvent<Vec<u8>>>(Arc::new(DeadBytesCodec(ContentType::new("text/plain")?)))?;
     let facade = AsyncEventBus::with_config(
         ProviderId::new("redis-streams")?,
         Arc::clone(&spi),
@@ -837,10 +781,7 @@ fn async_applied_dlq_reply_loss_preserves_durable_source() -> Result<(), Box<dyn
                 })
                 .await
                 .unwrap_err();
-            assert!(matches!(
-                failure,
-                ReceiveError::DeadLetterForwardFailed { .. }
-            ));
+            assert!(matches!(failure, ReceiveError::DeadLetterForwardFailed { .. }));
             subscription.close().await.unwrap();
             let _ = facade
                 .shutdown(ShutdownMode::Graceful {
@@ -856,9 +797,7 @@ fn async_applied_dlq_reply_loss_preserves_durable_source() -> Result<(), Box<dyn
     let count: usize = redis::cmd("XLEN").arg(&dead).query(&mut observer)?;
     assert_eq!(count, 1);
     gate.release_without_reply();
-    worker
-        .join()
-        .expect("async DLQ run terminates after uncertainty");
+    worker.join().expect("async DLQ run terminates after uncertainty");
     let count: usize = redis::cmd("XLEN").arg(&dead).query(&mut observer)?;
     assert_eq!(count, 1, "async DLQ is not blindly resent");
     let source = stream_key(namespace, "events");
@@ -883,9 +822,7 @@ fn async_applied_dlq_reply_loss_preserves_durable_source() -> Result<(), Box<dyn
             std::any::TypeId::of::<Vec<u8>>(),
         );
         let mut receiver = spi.subscribe(request).await?;
-        let ReceiveOutcome::Message(recovered) =
-            receiver.receive(std::time::Duration::from_secs(2)).await?
-        else {
+        let ReceiveOutcome::Message(recovered) = receiver.receive(std::time::Duration::from_secs(2)).await? else {
             panic!("async durable source recovers")
         };
         assert_eq!(recovered.id().as_str(), "stable-id");

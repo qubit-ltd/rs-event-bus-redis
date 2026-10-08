@@ -60,10 +60,7 @@ impl AsyncConnectionCache {
     ///
     /// Returns the initializer failure without publication, or generation
     /// overflow before I/O.
-    pub(crate) async fn get_or_connect<F>(
-        &self,
-        connect: F,
-    ) -> Result<(u64, MultiplexedConnection), RedisProviderError>
+    pub(crate) async fn get_or_connect<F>(&self, connect: F) -> Result<(u64, MultiplexedConnection), RedisProviderError>
     where
         F: Future<Output = Result<MultiplexedConnection, RedisProviderError>>,
     {
@@ -74,9 +71,7 @@ impl AsyncConnectionCache {
         let generation = state
             .generation
             .checked_add(1)
-            .ok_or(RedisProviderError::Operation(
-                "connection generation overflow",
-            ))?;
+            .ok_or(RedisProviderError::Operation("connection generation overflow"))?;
         let connection = connect.await?;
         state.connection = Some(connection.clone());
         state.generation = generation;
@@ -122,16 +117,12 @@ mod tests {
         };
         block_on(async {
             let mut initialize =
-                Box::pin(cache.get_or_connect(pending::<
-                    Result<MultiplexedConnection, RedisProviderError>,
-                >()));
+                Box::pin(cache.get_or_connect(pending::<Result<MultiplexedConnection, RedisProviderError>>()));
             let ready = poll_once(&mut initialize).await;
             assert!(
                 matches!(
                     ready,
-                    Some(Err(RedisProviderError::Operation(
-                        "connection generation overflow"
-                    )))
+                    Some(Err(RedisProviderError::Operation("connection generation overflow")))
                 ),
                 "overflow must reject before polling the pending initializer"
             );

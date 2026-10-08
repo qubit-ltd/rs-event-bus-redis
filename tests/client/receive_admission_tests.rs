@@ -81,20 +81,14 @@ fn request() -> SpiSubscriptionRequest {
 fn wait_for_blocked_reader(connection: &mut Connection) {
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
-        let clients: String = cmd("CLIENT")
-            .arg("LIST")
-            .query(connection)
-            .expect("client list");
+        let clients: String = cmd("CLIENT").arg("LIST").query(connection).expect("client list");
         if clients
             .lines()
             .any(|line| line.contains("flags=b") && line.contains("cmd=xreadgroup"))
         {
             return;
         }
-        assert!(
-            Instant::now() < deadline,
-            "receiver must reach BLOCK before injection"
-        );
+        assert!(Instant::now() < deadline, "receiver must reach BLOCK before injection");
         sleep(Duration::from_millis(1));
     }
 }
@@ -180,10 +174,7 @@ fn test_sync_malformed_block_read_quarantines_while_general_slot_is_held() {
         .expect("inspection client")
         .get_connection()
         .expect("inspection connection");
-    let keys: Vec<String> = cmd("KEYS")
-        .arg("*")
-        .query(&mut inspection)
-        .expect("stream key");
+    let keys: Vec<String> = cmd("KEYS").arg("*").query(&mut inspection).expect("stream key");
     assert_eq!(keys.len(), 1);
     let key = &keys[0];
     let before = eval_calls(&mut inspection);
@@ -213,10 +204,7 @@ fn test_sync_malformed_block_read_quarantines_while_general_slot_is_held() {
         read_gate.release();
         publish_gate.release();
     }
-    assert!(
-        publish_reached,
-        "public publish must hold the general command slot"
-    );
+    assert!(publish_reached, "public publish must hold the general command slot");
     read_gate.release();
     let (mut receiver, result) = receiving.join().expect("receive worker");
     let observed_eval = eval_calls(&mut inspection);
@@ -226,18 +214,12 @@ fn test_sync_malformed_block_read_quarantines_while_general_slot_is_held() {
         .join()
         .expect("publish worker")
         .expect("held publish completes");
-    assert!(matches!(
-        result.expect("receiver quarantine"),
-        ReceiveOutcome::Gap(_)
-    ));
+    assert!(matches!(result.expect("receiver quarantine"), ReceiveOutcome::Gap(_)));
     assert!(
         observed_eval > before,
         "receiver executes quarantine while general slot is held"
     );
-    assert_eq!(
-        observed_pending, 0,
-        "quarantined entry leaves the pending list"
-    );
+    assert_eq!(observed_pending, 0, "quarantined entry leaves the pending list");
     assert!(matches!(
         receiver
             .receive(Duration::from_secs(1))
@@ -265,8 +247,7 @@ fn test_async_malformed_block_read_quarantines_while_general_slot_is_held() {
     settings.insert("redis.command_timeout_ms".into(), "3000".into());
     settings.insert("redis.claim_min_idle_ms".into(), "0".into());
     let bus = block_on(
-        AsyncRedisEventBusProvider
-            .create_configured(&EventBusConfig::default().with_provider_options(settings)),
+        AsyncRedisEventBusProvider.create_configured(&EventBusConfig::default().with_provider_options(settings)),
     )
     .expect("provider");
     let mut receiver = block_on(bus.subscribe(request())).expect("receiver");
@@ -274,10 +255,7 @@ fn test_async_malformed_block_read_quarantines_while_general_slot_is_held() {
         .expect("inspection client")
         .get_connection()
         .expect("inspection connection");
-    let keys: Vec<String> = cmd("KEYS")
-        .arg("*")
-        .query(&mut inspection)
-        .expect("stream key");
+    let keys: Vec<String> = cmd("KEYS").arg("*").query(&mut inspection).expect("stream key");
     assert_eq!(keys.len(), 1);
     let key = &keys[0];
     let before = eval_calls(&mut inspection);
@@ -307,10 +285,7 @@ fn test_async_malformed_block_read_quarantines_while_general_slot_is_held() {
         read_gate.release();
         publish_gate.release();
     }
-    assert!(
-        publish_reached,
-        "public publish must hold the general command slot"
-    );
+    assert!(publish_reached, "public publish must hold the general command slot");
     read_gate.release();
     let (mut receiver, result) = receiving.join().expect("receive worker");
     let observed_eval = eval_calls(&mut inspection);
@@ -320,21 +295,14 @@ fn test_async_malformed_block_read_quarantines_while_general_slot_is_held() {
         .join()
         .expect("publish worker")
         .expect("held publish completes");
-    assert!(matches!(
-        result.expect("receiver quarantine"),
-        ReceiveOutcome::Gap(_)
-    ));
+    assert!(matches!(result.expect("receiver quarantine"), ReceiveOutcome::Gap(_)));
     assert!(
         observed_eval > before,
         "receiver executes quarantine while general slot is held"
     );
-    assert_eq!(
-        observed_pending, 0,
-        "quarantined entry leaves the pending list"
-    );
+    assert_eq!(observed_pending, 0, "quarantined entry leaves the pending list");
     assert!(matches!(
-        block_on(receiver.receive(Duration::from_secs(1)))
-            .expect("healthy receive after permit release"),
+        block_on(receiver.receive(Duration::from_secs(1))).expect("healthy receive after permit release"),
         ReceiveOutcome::Message(_)
     ));
     assert!(

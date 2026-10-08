@@ -54,6 +54,24 @@ pub struct RedisEventBusConfig {
     credentials: RedisCredentials,
     /// Sentinel ACL credentials resolved from configured environment variables.
     sentinel_credentials: RedisCredentials,
+    /// Optional CA certificate path for TLS connections to the primary Redis.
+    tls_ca_cert_path: Option<String>,
+    /// Optional client certificate path for TLS connections to the primary
+    /// Redis.
+    tls_client_cert_path: Option<String>,
+    /// Optional client private key path for TLS connections to the primary
+    /// Redis.
+    tls_client_key_path: Option<String>,
+    /// Whether connections to Sentinel endpoints use TLS.
+    sentinel_tls_enabled: bool,
+    /// Optional CA certificate path for TLS connections to Sentinel endpoints.
+    sentinel_tls_ca_cert_path: Option<String>,
+    /// Optional client certificate path for TLS connections to Sentinel
+    /// endpoints.
+    sentinel_tls_client_cert_path: Option<String>,
+    /// Optional client private key path for TLS connections to Sentinel
+    /// endpoints.
+    sentinel_tls_client_key_path: Option<String>,
     /// Minimum pending idle time, in milliseconds, before another consumer may
     /// claim a delivery with `XAUTOCLAIM`.
     claim_min_idle_ms: usize,
@@ -106,20 +124,39 @@ impl Debug for RedisEventBusConfig {
             .field("sentinel_service", &self.sentinel_service)
             .field("credentials", &self.credentials)
             .field("sentinel_credentials", &self.sentinel_credentials)
+            .field(
+                "tls_ca_cert_path",
+                &self.tls_ca_cert_path.as_ref().map(|_| "<redacted>"),
+            )
+            .field(
+                "tls_client_cert_path",
+                &self.tls_client_cert_path.as_ref().map(|_| "<redacted>"),
+            )
+            .field(
+                "tls_client_key_path",
+                &self.tls_client_key_path.as_ref().map(|_| "<redacted>"),
+            )
+            .field("sentinel_tls_enabled", &self.sentinel_tls_enabled)
+            .field(
+                "sentinel_tls_ca_cert_path",
+                &self.sentinel_tls_ca_cert_path.as_ref().map(|_| "<redacted>"),
+            )
+            .field(
+                "sentinel_tls_client_cert_path",
+                &self.sentinel_tls_client_cert_path.as_ref().map(|_| "<redacted>"),
+            )
+            .field(
+                "sentinel_tls_client_key_path",
+                &self.sentinel_tls_client_key_path.as_ref().map(|_| "<redacted>"),
+            )
             .field("claim_min_idle_ms", &self.claim_min_idle_ms)
             .field("recovery_interval_ms", &self.recovery_interval_ms)
-            .field(
-                "max_unsettled_per_subscription",
-                &self.max_unsettled_per_subscription,
-            )
+            .field("max_unsettled_per_subscription", &self.max_unsettled_per_subscription)
             .field("max_idle_connections", &self.max_idle_connections)
             .field("connect_timeout", &self.connect_timeout)
             .field("command_timeout", &self.command_timeout)
             .field("max_concurrent_commands", &self.max_concurrent_commands)
-            .field(
-                "reserved_settlement_commands",
-                &self.reserved_settlement_commands,
-            )
+            .field("reserved_settlement_commands", &self.reserved_settlement_commands)
             .field("max_active_receivers", &self.max_active_receivers)
             .field("max_payload_bytes", &self.max_payload_bytes)
             .field("max_wire_bytes", &self.max_wire_bytes)
@@ -144,6 +181,13 @@ impl Default for RedisEventBusConfig {
             sentinel_service: None,
             credentials: RedisCredentials::default(),
             sentinel_credentials: RedisCredentials::default(),
+            tls_ca_cert_path: None,
+            tls_client_cert_path: None,
+            tls_client_key_path: None,
+            sentinel_tls_enabled: false,
+            sentinel_tls_ca_cert_path: None,
+            sentinel_tls_client_cert_path: None,
+            sentinel_tls_client_key_path: None,
             claim_min_idle_ms: 30_000,
             recovery_interval_ms: 1_000,
             max_unsettled_per_subscription: 100,
@@ -219,6 +263,13 @@ impl RedisEventBusConfig {
             "redis.sentinel.password_env",
             "redis.sentinel.nodes",
             "redis.sentinel.service_name",
+            "redis.tls_ca_cert_path",
+            "redis.tls_client_cert_path",
+            "redis.tls_client_key_path",
+            "redis.sentinel.tls",
+            "redis.sentinel.tls_ca_cert_path",
+            "redis.sentinel.tls_client_cert_path",
+            "redis.sentinel.tls_client_key_path",
             "redis.claim_min_idle_ms",
             "redis.recovery_interval_ms",
             "redis.max_unsettled_per_subscription",
@@ -238,34 +289,61 @@ impl RedisEventBusConfig {
             .keys()
             .any(|key| key.starts_with("redis.") && !KNOWN_OPTIONS.contains(&key.as_str()))
         {
-            return Err(RedisProviderError::Configuration(
-                "unknown Redis provider option",
-            ));
+            return Err(RedisProviderError::Configuration("unknown Redis provider option"));
         }
         let connection_url = options
             .get("redis.url")
             .map(String::as_str)
             .unwrap_or("redis://127.0.0.1/");
-        let namespace = options
-            .get("redis.namespace")
-            .map(String::as_str)
-            .unwrap_or("qubit");
-        validate_url(connection_url)?;
+        let namespace = options.get("redis.namespace").map(String::as_str).unwrap_or("qubit");
+        let primary_tls_enabled = validate_url(connection_url)?;
         validate_namespace(namespace)?;
         let sentinel_nodes = options
             .get("redis.sentinel.nodes")
             .map(|nodes| parse_sentinel_nodes(nodes))
             .transpose()?;
         let sentinel_service = options.get("redis.sentinel.service_name").cloned();
+        let tls_ca_cert_path = options.get("redis.tls_ca_cert_path").cloned();
+        let tls_client_cert_path = options.get("redis.tls_client_cert_path").cloned();
+        let tls_client_key_path = options.get("redis.tls_client_key_path").cloned();
+        let sentinel_tls_enabled = parse_bool_option(options, "redis.sentinel.tls")?;
+        let sentinel_tls_ca_cert_path = options.get("redis.sentinel.tls_ca_cert_path").cloned();
+        let sentinel_tls_client_cert_path = options.get("redis.sentinel.tls_client_cert_path").cloned();
+        let sentinel_tls_client_key_path = options.get("redis.sentinel.tls_client_key_path").cloned();
+        if (tls_ca_cert_path.is_some() || tls_client_cert_path.is_some() || tls_client_key_path.is_some())
+            && !primary_tls_enabled
+        {
+            return Err(RedisProviderError::Configuration(
+                "Redis TLS certificate paths require a rediss:// URL",
+            ));
+        }
+        if tls_client_cert_path.is_some() != tls_client_key_path.is_some() {
+            return Err(RedisProviderError::Configuration(
+                "redis.tls_client_cert_path and redis.tls_client_key_path must be configured together",
+            ));
+        }
+        if (sentinel_tls_ca_cert_path.is_some()
+            || sentinel_tls_client_cert_path.is_some()
+            || sentinel_tls_client_key_path.is_some())
+            && !sentinel_tls_enabled
+        {
+            return Err(RedisProviderError::Configuration(
+                "Sentinel TLS certificate paths require redis.sentinel.tls=true",
+            ));
+        }
+        if sentinel_tls_client_cert_path.is_some() != sentinel_tls_client_key_path.is_some() {
+            return Err(RedisProviderError::Configuration(
+                "redis.sentinel.tls_client_cert_path and redis.sentinel.tls_client_key_path must be configured together",
+            ));
+        }
         let credentials = RedisCredentials::from_env_references(options, "redis")?;
-        let sentinel_credentials =
-            RedisCredentials::from_env_references(options, "redis.sentinel")?;
+        let sentinel_credentials = RedisCredentials::from_env_references(options, "redis.sentinel")?;
         let claim_min_idle_ms = options
             .get("redis.claim_min_idle_ms")
             .map(|value| {
-                value.parse::<usize>().map_err(|_| {
-                    RedisProviderError::Configuration("invalid redis.claim_min_idle_ms")
-                })
+                value
+                    .parse::<usize>()
+                    .map_err(|_| RedisProviderError::Configuration("invalid redis.claim_min_idle_ms"))
             })
             .transpose()?
             .unwrap_or(30_000);
@@ -276,9 +354,7 @@ impl RedisEventBusConfig {
                     .parse::<usize>()
                     .ok()
                     .filter(|value| (50..=60_000).contains(value))
-                    .ok_or(RedisProviderError::Configuration(
-                        "invalid redis.recovery_interval_ms",
-                    ))
+                    .ok_or(RedisProviderError::Configuration("invalid redis.recovery_interval_ms"))
             })
             .transpose()?
             .unwrap_or(1_000);
@@ -302,24 +378,21 @@ impl RedisEventBusConfig {
                     .parse::<usize>()
                     .ok()
                     .filter(|value| (1..=64).contains(value))
-                    .ok_or(RedisProviderError::Configuration(
-                        "invalid redis.max_idle_connections",
-                    ))
+                    .ok_or(RedisProviderError::Configuration("invalid redis.max_idle_connections"))
             })
             .transpose()?
             .unwrap_or(8);
         let connect_timeout = parse_limit(options, "redis.connect_timeout_ms", 2000, 60000)?;
-        let connect_timeout =
-            Duration::from_millis(u64::try_from(connect_timeout).map_err(|_| {
-                RedisProviderError::Configuration("invalid redis.connect_timeout_ms")
-            })?);
+        let connect_timeout = Duration::from_millis(
+            u64::try_from(connect_timeout)
+                .map_err(|_| RedisProviderError::Configuration("invalid redis.connect_timeout_ms"))?,
+        );
         let command_timeout = parse_limit(options, "redis.command_timeout_ms", 2000, 60000)?;
-        let command_timeout =
-            Duration::from_millis(u64::try_from(command_timeout).map_err(|_| {
-                RedisProviderError::Configuration("invalid redis.command_timeout_ms")
-            })?);
-        let max_concurrent_commands =
-            parse_limit(options, "redis.max_concurrent_commands", 64, 4096)?;
+        let command_timeout = Duration::from_millis(
+            u64::try_from(command_timeout)
+                .map_err(|_| RedisProviderError::Configuration("invalid redis.command_timeout_ms"))?,
+        );
+        let max_concurrent_commands = parse_limit(options, "redis.max_concurrent_commands", 64, 4096)?;
         if max_concurrent_commands < 2 {
             return Err(RedisProviderError::Configuration(
                 "invalid redis.max_concurrent_commands",
@@ -357,21 +430,14 @@ impl RedisEventBusConfig {
                     .parse::<usize>()
                     .ok()
                     .and_then(NonZeroUsize::new)
-                    .ok_or(RedisProviderError::Configuration(
-                        "invalid redis.stream_maxlen_approx",
-                    ))
+                    .ok_or(RedisProviderError::Configuration("invalid redis.stream_maxlen_approx"))
             })
             .transpose()?;
-        let allow_lossy_retention = match options
-            .get("redis.allow_lossy_retention")
-            .map(String::as_str)
-        {
+        let allow_lossy_retention = match options.get("redis.allow_lossy_retention").map(String::as_str) {
             None | Some("false") => false,
             Some("true") => true,
             Some(_) => {
-                return Err(RedisProviderError::Configuration(
-                    "invalid redis.allow_lossy_retention",
-                ));
+                return Err(RedisProviderError::Configuration("invalid redis.allow_lossy_retention"));
             }
         };
         if stream_maxlen_approx.is_some() != allow_lossy_retention {
@@ -389,6 +455,11 @@ impl RedisEventBusConfig {
                 "Sentinel nodes and service name must be configured together",
             ));
         }
+        if sentinel_tls_enabled && sentinel_nodes.is_none() {
+            return Err(RedisProviderError::Configuration(
+                "redis.sentinel.tls requires redis.sentinel.nodes",
+            ));
+        }
         Ok(Self {
             connection_url: connection_url.into(),
             namespace: namespace.into(),
@@ -396,6 +467,13 @@ impl RedisEventBusConfig {
             sentinel_service,
             credentials,
             sentinel_credentials,
+            tls_ca_cert_path,
+            tls_client_cert_path,
+            tls_client_key_path,
+            sentinel_tls_enabled,
+            sentinel_tls_ca_cert_path,
+            sentinel_tls_client_cert_path,
+            sentinel_tls_client_key_path,
             claim_min_idle_ms,
             recovery_interval_ms,
             max_unsettled_per_subscription,
@@ -480,6 +558,62 @@ impl RedisEventBusConfig {
     #[inline]
     pub fn sentinel_service(&self) -> Option<&str> {
         self.sentinel_service.as_deref()
+    }
+
+    /// Returns the optional CA path for primary Redis TLS.
+    #[cfg(any(feature = "sync", feature = "async"))]
+    #[must_use]
+    #[inline]
+    pub(crate) fn tls_ca_cert_path(&self) -> Option<&str> {
+        self.tls_ca_cert_path.as_deref()
+    }
+
+    /// Returns the optional client certificate path for primary Redis TLS.
+    #[cfg(any(feature = "sync", feature = "async"))]
+    #[must_use]
+    #[inline]
+    pub(crate) fn tls_client_cert_path(&self) -> Option<&str> {
+        self.tls_client_cert_path.as_deref()
+    }
+
+    /// Returns the optional client private key path for primary Redis TLS.
+    #[cfg(any(feature = "sync", feature = "async"))]
+    #[must_use]
+    #[inline]
+    pub(crate) fn tls_client_key_path(&self) -> Option<&str> {
+        self.tls_client_key_path.as_deref()
+    }
+
+    /// Returns whether Sentinel connections use TLS.
+    #[cfg(any(feature = "sync", feature = "async"))]
+    #[must_use]
+    #[inline]
+    pub(crate) const fn sentinel_tls_enabled(&self) -> bool {
+        self.sentinel_tls_enabled
+    }
+
+    /// Returns the optional CA path for Sentinel TLS.
+    #[cfg(any(feature = "sync", feature = "async"))]
+    #[must_use]
+    #[inline]
+    pub(crate) fn sentinel_tls_ca_cert_path(&self) -> Option<&str> {
+        self.sentinel_tls_ca_cert_path.as_deref()
+    }
+
+    /// Returns the optional client certificate path for Sentinel TLS.
+    #[cfg(any(feature = "sync", feature = "async"))]
+    #[must_use]
+    #[inline]
+    pub(crate) fn sentinel_tls_client_cert_path(&self) -> Option<&str> {
+        self.sentinel_tls_client_cert_path.as_deref()
+    }
+
+    /// Returns the optional client private key path for Sentinel TLS.
+    #[cfg(any(feature = "sync", feature = "async"))]
+    #[must_use]
+    #[inline]
+    pub(crate) fn sentinel_tls_client_key_path(&self) -> Option<&str> {
+        self.sentinel_tls_client_key_path.as_deref()
     }
 
     /// Returns the interval between recovery scans during a receive call.
@@ -640,10 +774,7 @@ impl RedisEventBusConfig {
     #[must_use]
     #[inline]
     pub(crate) fn sentinel_credentials(&self) -> (&Option<String>, &Option<String>) {
-        (
-            &self.sentinel_credentials.username,
-            &self.sentinel_credentials.password,
-        )
+        (&self.sentinel_credentials.username, &self.sentinel_credentials.password)
     }
 
     /// Returns the per-subscription bound for delivered, unsettled records.
@@ -714,15 +845,11 @@ fn parse_limit(
 fn parse_sentinel_nodes(nodes: &str) -> Result<Vec<String>, RedisProviderError> {
     let endpoints: Vec<_> = nodes.split(',').map(str::trim).collect();
     if endpoints.len() > 16 {
-        return Err(RedisProviderError::Configuration(
-            "invalid redis.sentinel.nodes",
-        ));
+        return Err(RedisProviderError::Configuration("invalid redis.sentinel.nodes"));
     }
     for endpoint in &endpoints {
         let Some((host, port)) = endpoint.rsplit_once(':') else {
-            return Err(RedisProviderError::Configuration(
-                "invalid redis.sentinel.nodes",
-            ));
+            return Err(RedisProviderError::Configuration("invalid redis.sentinel.nodes"));
         };
         let valid_host = !host.is_empty()
             && !host
@@ -738,9 +865,7 @@ fn parse_sentinel_nodes(nodes: &str) -> Result<Vec<String>, RedisProviderError> 
             || !port.bytes().all(|byte| byte.is_ascii_digit())
             || port.parse::<u16>().ok().is_none_or(|port| port == 0)
         {
-            return Err(RedisProviderError::Configuration(
-                "invalid redis.sentinel.nodes",
-            ));
+            return Err(RedisProviderError::Configuration("invalid redis.sentinel.nodes"));
         }
     }
     Ok(endpoints.into_iter().map(str::to_owned).collect())
@@ -763,16 +888,57 @@ fn parse_sentinel_nodes(nodes: &str) -> Result<Vec<String>, RedisProviderError> 
 ///
 /// Returns a generic configuration error for malformed URLs or embedded
 /// credentials, without preserving the parser diagnostic.
-fn validate_url(connection_url: &str) -> Result<(), RedisProviderError> {
-    let client = RedisClient::open(connection_url)
-        .map_err(|_| RedisProviderError::Configuration("invalid redis.url"))?;
+fn validate_url(connection_url: &str) -> Result<bool, RedisProviderError> {
+    let client =
+        RedisClient::open(connection_url).map_err(|_| RedisProviderError::Configuration("invalid redis.url"))?;
     let parsed = client.get_connection_info();
+    let tls_enabled = match &parsed.addr {
+        redis::ConnectionAddr::Tcp(_, _) => false,
+        redis::ConnectionAddr::TcpTls { insecure, .. } if !insecure => true,
+        redis::ConnectionAddr::TcpTls { .. } => {
+            return Err(RedisProviderError::Configuration(
+                "insecure Redis TLS URLs are not supported",
+            ));
+        }
+        redis::ConnectionAddr::Unix(_) => {
+            return Err(RedisProviderError::Configuration(
+                "redis.url must use redis:// or rediss://",
+            ));
+        }
+    };
+    let has_insecure_query_option = connection_url
+        .split_once('?')
+        .and_then(|(_, query)| query.split('#').next())
+        .is_some_and(|query| {
+            query
+                .split('&')
+                .any(|parameter| parameter.split('=').next() == Some("insecure"))
+        });
+    if tls_enabled && has_insecure_query_option {
+        return Err(RedisProviderError::Configuration(
+            "insecure Redis TLS URLs are not supported",
+        ));
+    }
+    if !connection_url.starts_with("redis://") && !connection_url.starts_with("rediss://") {
+        return Err(RedisProviderError::Configuration(
+            "redis.url must use redis:// or rediss://",
+        ));
+    }
     if parsed.redis.password.is_some() || parsed.redis.username.is_some() {
         return Err(RedisProviderError::Configuration(
             "credentials must be supplied using environment variables",
         ));
     }
-    Ok(())
+    Ok(tls_enabled)
+}
+
+/// Parses a strict lowercase boolean provider option.
+fn parse_bool_option(options: &ProviderOptions, key: &str) -> Result<bool, RedisProviderError> {
+    match options.get(key).map(String::as_str) {
+        None | Some("false") => Ok(false),
+        Some("true") => Ok(true),
+        Some(_) => Err(RedisProviderError::Configuration("invalid redis.sentinel.tls")),
+    }
 }
 
 /// Ensures a namespace is non-empty, bounded, and free from control characters.

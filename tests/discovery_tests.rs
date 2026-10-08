@@ -82,12 +82,7 @@ fn test_sync_registry_discovers_and_creates_redis_provider() -> Result<(), Box<d
     let _ = type_name::<RedisEventBusProvider>();
     let server = RedisServer::start()?;
     let registry = EventBusRegistry::discover()?;
-    assert!(
-        registry
-            .provider_ids()
-            .iter()
-            .any(|id| id.as_str() == "redis-streams")
-    );
+    assert!(registry.provider_ids().iter().any(|id| id.as_str() == "redis-streams"));
     let mut codecs = CodecRegistry::new();
     codecs.register::<String>(Arc::new(Utf8Codec(ContentType::new("text/plain")?)))?;
     let facade = EventBusFacadeConfig::new().with_codec_registry(Arc::new(codecs));
@@ -108,10 +103,7 @@ fn test_sync_registry_discovers_and_creates_redis_provider() -> Result<(), Box<d
             let _ = sender.send(delivery.payload().clone());
         },
     )?;
-    let _ = bus.publish(PublishRequest::new(
-        topic,
-        "automatically discovered".to_owned(),
-    )?)?;
+    let _ = bus.publish(PublishRequest::new(topic, "automatically discovered".to_owned())?)?;
     assert_eq!(
         receiver.recv_timeout(Duration::from_secs(3))?,
         "automatically discovered"
@@ -161,14 +153,8 @@ fn test_async_registry_discovers_and_creates_redis_provider() -> Result<(), Box<
     let _ = type_name::<AsyncRedisEventBusProvider>();
     let server = RedisServer::start()?;
     let registry = AsyncEventBusRegistry::discover()?;
-    assert!(
-        registry
-            .provider_ids()
-            .iter()
-            .any(|id| id.as_str() == "redis-streams")
-    );
-    let config =
-        redis_config(server.url()).with_selection(ProviderSelection::named("redis-streams")?);
+    assert!(registry.provider_ids().iter().any(|id| id.as_str() == "redis-streams"));
+    let config = redis_config(server.url()).with_selection(ProviderSelection::named("redis-streams")?);
     let _bus = block_on(registry.create(&config))?;
     #[cfg(feature = "conformance")]
     {
@@ -192,8 +178,7 @@ fn test_async_registry_discovers_and_creates_redis_provider() -> Result<(), Box<
 
 #[test]
 #[cfg(feature = "sync")]
-fn test_business_consumer_binary_links_provider_without_provider_type_imports()
--> Result<(), Box<dyn Error>> {
+fn test_business_consumer_binary_links_provider_without_provider_type_imports() -> Result<(), Box<dyn Error>> {
     let server = RedisServer::start()?;
     let mut command = Command::new("cargo");
     command
@@ -201,19 +186,13 @@ fn test_business_consumer_binary_links_provider_without_provider_type_imports()
         .arg("--locked")
         .arg("--quiet")
         .arg("--manifest-path")
-        .arg(
-            Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("tests/fixtures/business_consumer/Cargo.toml"),
-        )
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/business_consumer/Cargo.toml"))
         .arg("--")
         .arg(server.url());
     #[cfg(coverage)]
     command.env(
         "CARGO_TARGET_DIR",
-        concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/target/coverage-business-consumer"
-        ),
+        concat!(env!("CARGO_MANIFEST_DIR"), "/target/coverage-business-consumer"),
     );
     let output = command.output()?;
     assert!(
