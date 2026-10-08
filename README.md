@@ -58,7 +58,7 @@ the next receive to recover. Admission is per provider instance, not global to
 Redis or the process; monitor command rejections, `XPENDING`, stream `XLEN`, and
 quarantine growth.
 
-Redis delivery is at least once. Handlers should tolerate duplicates. A successful `XADD` means Redis accepted the command; it does not prove the record was fsynced or processed. By default streams are not trimmed. Set both `redis.stream_maxlen_approx` and `redis.allow_lossy_retention=true` to opt into Redis `XADD MAXLEN ~ N`; this approximate retention can remove unread or pending history and cause gaps, so use it only after a manual loss review. The provider does not implement Cluster, native/delayed delivery, TLS configuration, or a dead-letter policy. Stream and group cleanup is an operator task.
+Redis delivery is at least once. Handlers should tolerate duplicates. A successful `XADD` means Redis accepted the command; it does not prove the record was fsynced or processed. By default streams are not trimmed. Set both `redis.stream_maxlen_approx` and `redis.allow_lossy_retention=true` to opt into Redis `XADD MAXLEN ~ N`; this approximate retention can remove unread or pending history and cause gaps, so use it only after a manual loss review. TLS is opt-in for standalone and Sentinel connections, with certificate and hostname verification. The provider does not implement Cluster, native/delayed delivery, or a dead-letter policy. Stream and group cleanup is an operator task.
 
 Each wire record, payload, and decoded headers string has a finite provider limit (8 MiB, 1 MiB, and 64 KiB by default), in addition to the facade's 1 MiB encoded publish/receive limits. Receive overflow stops the subscription and retains the pending entry without acknowledgement or quarantine. Public publication errors report `PublishFailure.effect()`; lost `XADD` replies are uncertain and default retry policy forbids blind resubmission. Version 1 wire data remains supported. See the [migration guide](doc/migration.md).
 
@@ -67,6 +67,8 @@ Redis consumer-group startup is explicit when a group already exists: `StartPosi
 Core 0.20 bounds running handlers, owned deliveries, per-subscription ownership, and registered subscriptions separately. `RedisSubscriptionProfile` requires an explicit start position and builds durable options; new stream entries report provider attempt `Some(1)`, while pending and claimed entries remain unknown. Settlement retries are finite and require explicitly retryable errors; unknown retryability stops the subscription. The [user guide](doc/user_guide.md) covers first-cause diagnostics, delivery metrics, durable recovery, provider snapshot sampling, and bounded shutdown waits that do not guarantee forced process exit.
 
 ## Learn More
+
+TLS uses `rediss://` for Redis itself. Sentinel TLS has a separate `redis.sentinel.tls` switch and separate CA/client identity options. Custom PEM files are limited to 1 MiB each; see the [TLS configuration guide](doc/user_guide.md#tls-connections) for examples and rotation behavior.
 
 - [User guide](doc/user_guide.md) ([简体中文](doc/user_guide.zh_CN.md))
 - [Design and migration boundaries](doc/design.md) ([简体中文](doc/design.zh_CN.md))

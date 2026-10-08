@@ -291,7 +291,7 @@ REDIS_SENTINEL_SERVICE_NAME=qeventbus \
 
 | 配置项 | 默认值 | 说明 |
 | --- | --- | --- |
-| `redis.url` | `redis://127.0.0.1/` | 单实例 Redis URL；不允许在 URL 中直接写 username/password。 |
+| `redis.url` | `redis://127.0.0.1/` | Redis 连接 URL；`redis://` 使用明文，`rediss://` 要求经过验证的 TLS。URL 中不能直接写 username/password。Sentinel 模式下，scheme 决定发现出的主节点连接方式。 |
 | `redis.namespace` | `qubit` | 用于生成 stream 和消费组 key 的命名空间。 |
 | `redis.claim_min_idle_ms` | `30000` | 其他 consumer 可以认领 pending entry 前所需的空闲毫秒数。 |
 | `redis.recovery_interval_ms` | `1000` | 恢复扫描间隔，也适用于连续 receive 调用；范围为 50 至 60,000 毫秒。第一次 receive 会立即扫描。 |
@@ -312,9 +312,43 @@ REDIS_SENTINEL_SERVICE_NAME=qeventbus \
 | `redis.sentinel.username_env` | 未设置 | 保存 Sentinel ACL username 的环境变量名称。 |
 | `redis.sentinel.password_env` | 未设置 | 保存 Sentinel ACL password 的环境变量名称。 |
 
+### TLS 连接
+
+TLS 默认关闭。保留 `redis.url=redis://...` 时，连接行为与原有明文配置相同；改用 `rediss://...` 后，provider 会对 Redis 单实例或 Sentinel 发现的主节点启用 TLS。连接时会验证证书链和主机名，也会拒绝关闭验证的 URL 参数。握手、证书或主机名校验失败会直接报错，不会改用明文重试。Sentinel 节点由独立的 `redis.sentinel.tls` 控制，因此可以分别选择明文 Sentinel + TLS 主节点，或 TLS Sentinel + TLS 主节点。主节点和 Sentinel 的 CA、客户端身份互不共用。
+
+| 配置项 | 作用 |
+| --- | --- |
+| `redis.tls_ca_cert_path` | Redis 端点的可选 PEM CA 文件；未设置时使用内置 Web PKI 信任根。仅适用于 `rediss://`。 |
+| `redis.tls_client_cert_path` / `redis.tls_client_key_path` | Redis 端点的可选 mTLS 证书和私钥，必须同时设置；仅适用于 `rediss://`。 |
+| `redis.sentinel.tls` | 是否对 Sentinel 节点启用经过验证的 TLS，默认 `false`；必须配置 `redis.sentinel.nodes`。 |
+| `redis.sentinel.tls_ca_cert_path` | Sentinel 节点专用 PEM CA 文件；要求 `redis.sentinel.tls=true`。 |
+| `redis.sentinel.tls_client_cert_path` / `redis.sentinel.tls_client_key_path` | Sentinel 节点专用 mTLS 身份，必须成对设置并启用 Sentinel TLS。 |
+
+单实例使用私有 CA 和 mTLS 时，在现有 provider options 中加入：
+
+```text
+redis.url=rediss://redis.example.net:6379/0
+redis.tls_ca_cert_path=/etc/redis/ca.pem
+redis.tls_client_cert_path=/etc/redis/client.pem
+redis.tls_client_key_path=/etc/redis/client-key.pem
+```
+
+如果 Sentinel 与发现出的主节点都使用 TLS，除了上面的主节点配置，再加入：
+
+```text
+redis.sentinel.nodes=sentinel-a.example.net:26379,sentinel-b.example.net:26379
+redis.sentinel.service_name=primary
+redis.sentinel.tls=true
+redis.sentinel.tls_ca_cert_path=/etc/redis/sentinel-ca.pem
+redis.sentinel.tls_client_cert_path=/etc/redis/sentinel-client.pem
+redis.sentinel.tls_client_key_path=/etc/redis/sentinel-client-key.pem
+```
+
+若 Sentinel 使用明文、只有主节点使用 TLS，则不设置 `redis.sentinel.tls`（或设为 `false`），并让 `redis.url` 使用 `rediss://...`。除非 Sentinel 服务明确配置为信任该身份，否则不要把主节点证书复用为 Sentinel 证书。每个 PEM 文件都必须非空且不超过 1 MiB。provider 创建实例时读取并解析证书；读取或格式错误只返回通用 TLS 配置错误，不暴露路径、证书内容或底层库详情。替换证书后需重建 provider 实例，既有实例不会自动重载。TLS 故障不会改变 `XADD` 结果未知时的处理规则，也不会自动重放命令。
+
 启用 Sentinel 时，`redis.sentinel.nodes` 和 `redis.sentinel.service_name` 必须同时设置。此时 Redis URL 仍须是合法 URL，但不会用于查找 master。Sentinel 连接不进入 standalone 空闲池；解析通过有等待预算的 `SENTINEL get-master-addr-by-name` 和候选节点 `ROLE` 探测完成。每次解析对最多 16 个节点各尝试一次，优先使用上次成功的节点。同步 standalone 短命令最多复用 `redis.max_idle_connections` 条空闲连接；异步 standalone 发布与结算共享 multiplexed 命令连接。并发冷启动共用一次初始化；代际检查防止旧连接的失败清除新连接。Sentinel 路径不缓存 master socket；ROLE 验证后仍可能发生切换并拒绝命令，provider 不会透明重放 XADD。接收器使用独立连接，阻塞读取不会占用短命令通道。
 
-凭据应放在服务运行环境中。provider options 保存环境变量名称；`RedisEventBusConfig` 的 `Debug` 会隐藏 URL 和凭据。不要把明文密钥放入 provider options、URL、命令行参数或日志。此版本没有启用 `redis-rs` 的 TLS 参数；增加 TLS 支持前，应将 Redis 流量限制在可信网络内。
+凭据应放在服务运行环境中。provider options 保存环境变量名称；`RedisEventBusConfig` 的 `Debug` 会隐藏 URL、凭据和 TLS 文件路径。不要把明文密钥放入 provider options、URL、命令行参数或日志。TLS 保护传输并验证服务端身份，但不会改变 Redis 的持久化、复制、投递或业务幂等语义。
 
 ## 6. 理解投递、重试和清理
 
@@ -349,20 +383,6 @@ let options = SubscribeOptions::<String>::builder()
 默认策略为 `reject`，唯一合法值是 `reject` 和 `resume`。`resume` 接受 Redis 中已有游标，绝不会执行 `XGROUP SETID`，因此不会修改或回退该游标。未知的 `redis.*` 订阅选项或非法值会在 Redis 网络 I/O 前失败。
 
 未设置 `redis.stream_maxlen_approx` 时，provider 不会裁剪 stream，也不会自动删除 group。应监控 Redis 内存和 stream 增长。删除 stream 或 group 前，先停止 consumer 并决定如何处理 pending 消息；删除 pending record 可能导致 `ReceiveOutcome::Gap`。Redis persistence 和 replication 配置需符合业务恢复目标：`Accepted` 不代表已 fsync，Sentinel 切换也可能丢失尚未复制的写入。
-
-### 限制 facade 工作量并收敛结算失败
-
-同步与异步总线都通过 `EventBusFacadeConfig::with_delivery_scheduling` 配置 `DeliverySchedulingConfig`。四个正数限额默认依次为：**同时运行 4 个 handler、全局持有 256 条投递、每订阅持有 32 条投递、注册 256 个订阅**。持有量包括接收预留、已收待执行、运行中和结算中的投递。`max_running_handlers`、`max_owned_per_subscription` 均不能超过 `max_owned_deliveries`。provider 自身默认 100 条未结算记录的限额仍然生效；这些限制约束数量，不代表进程总内存预算。暂停的异步 session 仍占用订阅名额，直到关闭或终止清理完成。
-
-等待中的热点键和结算退避不会占用 handler 执行名额。A 与 B 之间的公平调度要求 B 有可预留的持有额度，或者已被接收且可执行；不能据此保证穿透任意长度、尚未读取的 A 积压。Redis 声明不支持按键顺序，新调度器也不会赋予 Redis 该保证。
-
-结算策略使用 `EventBusFacadeConfig::with_settlement_retry(SettlementRetryConfig::new(...)?);`，完整参数见[迁移示例](migration.zh_CN.md)。默认**总共尝试 5 次（含首次），从首次 SPI 尝试前开始计时最多 5 秒，首次退避 10 ms，最大退避 1 秒**。只有 `SpiError::retryable() == Some(true)` 允许重试；`Some(false)` 立即停止，`None` 以 `RetryabilityUnknown` 停止。panic、无效 token、时钟或 timer 失败也会终止。预算在尝试之间检查，不能取消已阻塞的 Redis 命令；超过截止点返回成功仍按成功处理。异步暂停取消了在途 settle 时，已经开始的 attempt 仍计入预算，恢复后继续使用原有有限预算。
-
-结算终止时，facade 先记录首个原因，再清理并停止新的接收和 handler 启动。已启动的工作可继续完成，关闭失败不会覆盖原始原因。通过 `subscription.terminal_failure()` 获取 `SubscriptionStopReason::Settlement`，其中包含事件 ID、disposition、attempts、termination 和结构化 `Arc<SpiError>`。每次失败产生 `SettlementFailed`，首次终止产生一次 `SettlementStopped`；应把这些上下文保存到 telemetry。
-
-使用 `bus.delivery_metrics()` 和 `subscription.delivery_metrics().metrics` 查看 `reserved_receives`、`queued`、`running_handlers`、`settling`、`lane_waiting`、`settlement_attempts`、`settlement_retries`、`settlement_terminal_failures`、`completed`、handler/settlement 耗时样本数、总量、最大值及 `oldest_owned_age`。`lane_waiting` 是 `queued` 的子集，重试计数只累计首次之后真正进入 SPI 的调用。并发变化期间的快照不保证事务一致性。关闭后的订阅句柄保留计数，总线累计值也不会随订阅移除而消失。这些 facade 快照不表示 Redis PEL 或重连状态，还需检查 `XPENDING` 和 `XINFO GROUPS`。
-
-恢复时先保存首个原因和快照，按错误修复连接、codec、限额或策略，完成失败订阅的关闭，然后使用**相同 namespace、topic 和 group** 创建新的 `Durable` 订阅。新的 consumer 达到 `redis.claim_min_idle_ms` 条件后可认领保留的 pending 消息；`StartPosition` 不会重置已有 group。能否恢复取决于记录保留情况和 claim 策略：裁剪或删除可能破坏 pending 历史，已执行 `XACK` 但回复丢失时也没有可认领的消息。同一 token、同一 disposition 的重复结算是幂等的，但业务处理仍不保证恰好一次。
 
 ### 限制 facade 工作量并收敛结算失败
 
@@ -521,7 +541,7 @@ provider 0.7 最初迁移时与 core 0.19 配套；当前 provider 0.7 manifest 
 
 ## 支持范围
 
-支持 Redis 单实例和 Sentinel、Redis 6.2+、编码 payload、消费组、accept/retry/reject 结算，以及从 Redis stream position 重放。暂不支持 Cluster、native payload、顺序保证、延迟投递、自动生命周期清理、死信路由和 TLS 配置。provider 不承诺恰好一次处理。
+支持 Redis 单实例和 Sentinel、Redis 6.2+、单实例及 Sentinel 的证书校验 TLS、编码 payload、消费组、accept/retry/reject 结算，以及从 Redis stream position 重放。暂不支持 Cluster、native payload、顺序保证、延迟投递、自动生命周期清理和死信路由。provider 不承诺恰好一次处理。
 
 
 ## 有损 Stream 保留策略

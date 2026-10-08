@@ -23,6 +23,24 @@ and claimed entries remain unknown (`None`). Existing wire v1 records, streams,
 groups, and pending entries need no format migration. Retention settings can
 still remove unread or pending history and cause gaps.
 
+## TLS is opt-in
+
+TLS support adds configuration but does not change existing deployments: a
+`redis://` URL continues to use plaintext, and the default
+`redis.sentinel.tls=false` keeps Sentinel connections plaintext. To enable TLS
+for standalone Redis or a Sentinel-discovered master, change `redis.url` to
+`rediss://`. Sentinel TLS is independent and is enabled with
+`redis.sentinel.tls=true`. Optional private CA and mTLS files use
+`redis.tls_ca_cert_path`, `redis.tls_client_cert_path`, and
+`redis.tls_client_key_path` for the primary endpoint, and
+`redis.sentinel.tls_ca_cert_path`, `redis.sentinel.tls_client_cert_path`, and
+`redis.sentinel.tls_client_key_path` for Sentinel. See the [user guide](user_guide.md#tls-connections)
+for examples. No wire, stream, consumer-group, or SPI
+migration is required. TLS verifies the certificate chain and hostname, never
+downgrades to plaintext, and does not change delivery or uncertain `XADD`
+semantics. PEM files are limited to 1 MiB each; replacing them requires
+reconstructing the provider instance to rotate its identity.
+
 ## Upgrade from provider 0.6 to 0.7
 
 The original provider 0.7 migration paired `qubit-event-bus-redis` 0.7 with

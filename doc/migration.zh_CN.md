@@ -19,6 +19,20 @@ Redis 不提供逐目标接纳信息。调用 `publish_checked` 时应使用
 pending 和 claim 恢复消息的次数未知（`None`）。现有 wire v1 记录、stream、消费组和
 pending entry 无需格式迁移。保留策略仍可能删除未读取或 pending 历史并造成缺口。
 
+## TLS 为可选配置
+
+启用 TLS 不会改变现有部署：`redis://` 仍走明文，默认
+`redis.sentinel.tls=false` 也会让 Sentinel 连接保持明文。要对单实例 Redis
+或 Sentinel 发现出的主节点启用 TLS，将 `redis.url` 改为 `rediss://`；Sentinel
+自身是否启用 TLS 则单独设置 `redis.sentinel.tls=true`。主节点私有 CA 和 mTLS
+使用 `redis.tls_ca_cert_path`、`redis.tls_client_cert_path`、
+`redis.tls_client_key_path`；Sentinel 使用 `redis.sentinel.tls_ca_cert_path`、
+`redis.sentinel.tls_client_cert_path`、`redis.sentinel.tls_client_key_path`。示例见
+[用户指南的 TLS 章节](user_guide.zh_CN.md#tls-连接)。无需迁移 wire、stream、
+消费组或 SPI。TLS 会验证证书链及主机名，失败时不会降级明文，也不改变投递和
+`XADD` 结果未知时的语义。每个 PEM 文件最多 1 MiB；替换证书后须重建 provider
+实例才能轮换身份。
+
 ## 从 provider 0.6 升级到 0.7
 
 provider 0.7 最初迁移时与 `qubit-event-bus` 0.19 配套。当前 provider 0.7

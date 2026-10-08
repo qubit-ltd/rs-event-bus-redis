@@ -8,7 +8,13 @@
 
 provider 实现同步和运行时中立的异步 event-bus SPI。facade 负责类型化 codec、handler 执行和应用策略；Redis Streams 负责保留记录、消费组游标和待处理条目。业务幂等、可靠通知事务、Redis 持久化/复制及保留策略由应用或部署负责。
 
-同步、异步实现共用纯命令构造、协议归一、接收调度、wire 解码及结算决策，I/O、超时和取消仍由各自 adapter 处理。同步 API 不通过隐藏 executor 运行。支持 Redis 6.2+ standalone/Sentinel 与编码 payload；不提供 Cluster、TLS 配置、延迟投递、native payload、业务死信路由或恰好一次处理。
+同步、异步实现共用纯命令构造、协议归一、接收调度、wire 解码及结算决策，I/O、超时和取消仍由各自 adapter 处理。同步 API 不通过隐藏 executor 运行。支持 Redis 6.2+ standalone/Sentinel 与编码 payload；单实例和 Sentinel 连接可按需启用并校验证书的 TLS。不提供 Cluster、延迟投递、native payload、业务死信路由或恰好一次处理。
+
+### TLS 传输
+
+`redis.url` 决定主节点连接方式：`redis://` 保持明文，`rediss://` 要求 TLS。redis-rs rustls 会验证证书链和主机名，禁用验证的 TLS URL 会被拒绝。TLS 配置、证书、主机名或握手失败后不会降级为明文，也不会明文重试。Sentinel 模式下 URL 的 host 不用于发现主节点，但 scheme 决定发现出的主节点是否使用 TLS；Sentinel 节点则由独立的 `redis.sentinel.tls` 控制。
+
+主节点与 Sentinel 的 CA、mTLS 身份分别配置：主节点使用 `redis.tls_ca_cert_path`、`redis.tls_client_cert_path`、`redis.tls_client_key_path`；Sentinel 使用 `redis.sentinel.tls_ca_cert_path`、`redis.sentinel.tls_client_cert_path`、`redis.sentinel.tls_client_key_path`。客户端证书与私钥必须成对设置。指定 CA 后，该端点使用自定义根；否则使用 rustls Web PKI 根。每个 PEM 文件须非空且最多 1 MiB。provider 构造时读取并解析文件；公开 TLS 配置错误不含路径、PEM 或依赖库诊断。已创建实例不会重载证书，轮换时需构造新的 provider 实例。TLS 只影响传输加密和对端身份，不改变持久化、复制、至少一次投递或 `XADD` 结果未知时的语义。不支持 Cluster TLS、证书热加载或关闭证书验证。
 
 | 实现位置 | 职责 |
 | --- | --- |

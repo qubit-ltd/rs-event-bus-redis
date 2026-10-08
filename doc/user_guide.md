@@ -293,7 +293,7 @@ The async example runs until it consumes the event, then waits for Enter before 
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `redis.url` | `redis://127.0.0.1/` | Standalone Redis connection URL; inline username and password are rejected. |
+| `redis.url` | `redis://127.0.0.1/` | Redis connection URL; `redis://` is plaintext and `rediss://` requires verified TLS. Inline username and password are rejected. In Sentinel mode, the scheme selects the discovered master's transport. |
 | `redis.namespace` | `qubit` | Prefix scope used to derive stream and group keys. |
 | `redis.claim_min_idle_ms` | `30000` | Minimum pending idle time before another consumer can claim an entry. |
 | `redis.recovery_interval_ms` | `1000` | Interval for recovery scans, including across repeated receive calls; accepts 50 through 60,000 ms. First receive scans immediately. |
@@ -314,9 +314,43 @@ The async example runs until it consumes the event, then waits for Enter before 
 | `redis.sentinel.username_env` | unset | Environment variable name containing the Sentinel ACL username. |
 | `redis.sentinel.password_env` | unset | Environment variable name containing the Sentinel ACL password. |
 
+### TLS connections
+
+TLS is opt-in. Keep `redis.url=redis://...` for the existing plaintext behavior, or use `rediss://...` to require verified TLS for the standalone Redis endpoint. The provider validates the certificate chain and hostname and rejects URL options that disable verification. A TLS handshake, certificate, or hostname failure is an error and never causes a plaintext retry. Sentinel discovery uses a separate TLS switch: the URL scheme selects TLS for the discovered master, while `redis.sentinel.tls` selects TLS for Sentinel nodes. The Sentinel and master CA roots and client identities are independent.
+
+| Option | Meaning |
+| --- | --- |
+| `redis.tls_ca_cert_path` | Optional PEM CA bundle for the Redis endpoint; otherwise built-in Web PKI roots are used. Requires `rediss://`. |
+| `redis.tls_client_cert_path` / `redis.tls_client_key_path` | Optional mTLS certificate and private key for Redis. Configure both together; requires `rediss://`. |
+| `redis.sentinel.tls` | Enable verified TLS for Sentinel nodes; defaults to `false`. Requires `redis.sentinel.nodes`. |
+| `redis.sentinel.tls_ca_cert_path` | Optional PEM CA bundle for Sentinel nodes. Requires `redis.sentinel.tls=true`. |
+| `redis.sentinel.tls_client_cert_path` / `redis.sentinel.tls_client_key_path` | Optional mTLS identity for Sentinel nodes. Configure both together and enable Sentinel TLS. |
+
+For a standalone deployment with a private CA and mTLS, add these provider options to the existing configuration:
+
+```text
+redis.url=rediss://redis.example.net:6379/0
+redis.tls_ca_cert_path=/etc/redis/ca.pem
+redis.tls_client_cert_path=/etc/redis/client.pem
+redis.tls_client_key_path=/etc/redis/client-key.pem
+```
+
+To use TLS for both Sentinel and its discovered master, configure the master options above and add:
+
+```text
+redis.sentinel.nodes=sentinel-a.example.net:26379,sentinel-b.example.net:26379
+redis.sentinel.service_name=primary
+redis.sentinel.tls=true
+redis.sentinel.tls_ca_cert_path=/etc/redis/sentinel-ca.pem
+redis.sentinel.tls_client_cert_path=/etc/redis/sentinel-client.pem
+redis.sentinel.tls_client_key_path=/etc/redis/sentinel-client-key.pem
+```
+
+For plaintext Sentinel with a TLS master, leave `redis.sentinel.tls` unset (or `false`) and keep `redis.url` as `rediss://...`. Do not reuse master certificates for Sentinel unless that service is configured to trust the same identity. Each configured PEM file must be nonempty and no larger than 1 MiB. The provider reads and parses these files when the provider instance is constructed; failures return a generic TLS configuration error without paths, certificate data, or library details. Rebuild the provider instance after replacing files to rotate certificates; existing instances do not reload them. A failed `XADD` retains the existing unknown-effect semantics and is not transparently replayed because of a TLS failure.
+
 When Sentinel is configured, both `redis.sentinel.nodes` and `redis.sentinel.service_name` are required. The URL remains syntactically valid but is not used to locate the master. Sentinel connections use bounded `SENTINEL get-master-addr-by-name` and candidate `ROLE` probes instead of entering the standalone idle pool, so commands after failover can resolve the promoted master. Standalone synchronous short commands reuse up to `redis.max_idle_connections` idle connections; async standalone publish and settlement share a multiplexed command connection. Concurrent cold initialization is single-flight; generation checks prevent an old failed lease from invalidating its replacement. Sentinel paths do not cache those master sockets, try each of at most sixteen nodes once per resolution, and prefer the last successful node. A failover after ROLE can still reject a command; XADD is never transparently replayed. Receiver reads use their own connection so blocking reads do not occupy the short-command path.
 
-Credentials belong in the service environment. Provider options contain environment variable names, and `RedisEventBusConfig` redacts its URL and credentials from `Debug`. Do not put raw secrets in provider options, URLs, command-line arguments, or logs. This release does not enable TLS options in `redis-rs`; keep Redis traffic on a trusted network until TLS support is added.
+Credentials belong in the service environment. Provider options contain environment variable names, and `RedisEventBusConfig` redacts its URL, credentials, and TLS file paths from `Debug`. Do not put raw secrets in provider options, URLs, command-line arguments, or logs. TLS encrypts the connection and authenticates the endpoint; it does not change Redis persistence, replication, delivery, or idempotency guarantees.
 
 ## 6. Understand delivery, retry, and cleanup
 
@@ -349,20 +383,6 @@ let options = SubscribeOptions::<String>::builder()
 The default policy is `reject`; the only accepted values are `reject` and `resume`. `resume` accepts the existing Redis cursor and never issues `XGROUP SETID`, so it does not change or rewind that cursor. An unknown `redis.*` subscription option or an invalid value fails before Redis network I/O.
 
 Without `redis.stream_maxlen_approx`, the provider does not trim streams; it never deletes groups automatically. Monitor Redis memory and stream growth. Before deleting a stream or group, stop consumers and decide how to handle every pending event; deleting pending records can produce `ReceiveOutcome::Gap`. Configure Redis persistence and replication to match the application's recovery objectives: `Accepted` does not mean fsynced, and Sentinel replication can lose writes that were not replicated before promotion.
-
-### Bound facade work and stop settlement failures
-
-`EventBusFacadeConfig::with_delivery_scheduling` sets `DeliverySchedulingConfig` for both sync and async buses. Its four positive limits default to **4 running handlers, 256 owned deliveries, 32 owned per subscription, and 256 registered subscriptions**. Ownership includes receive reservations, queued messages, running handlers, and settlement. `max_running_handlers` and `max_owned_per_subscription` must not exceed `max_owned_deliveries`. The provider's separate 100-unsettled limit remains in effect; these are count limits, not a total memory budget. A paused async session still occupies a subscription slot until close or terminal cleanup.
-
-A queued hot key and settlement backoff do not consume a running-handler slot. Fairness for an eligible B alongside A applies when B can reserve owned capacity or has already been received; it does not discover B behind an arbitrary unread A backlog. Redis declares no per-key ordering, so this scheduler does not add that unsupported guarantee.
-
-Configure settlement with `EventBusFacadeConfig::with_settlement_retry(SettlementRetryConfig::new(...)?);` see the [migration example](migration.md). Defaults are **5 total attempts including the first, 5 seconds from just before the first SPI attempt, 10 ms initial backoff, and 1 second maximum backoff**. Only `SpiError::retryable() == Some(true)` allows retry. `Some(false)` stops immediately; `None` stops as `RetryabilityUnknown`. Panic, invalid token, clock, or timer failures also terminate. The budget is checked between attempts; it cannot cancel a blocked in-flight Redis command, and late success remains success. An async settle cancelled by pausing still consumes its started attempt; resuming continues the same finite budget.
-
-When settlement terminates, the facade records the first cause before cleanup and stops new receives and handler starts. Already started work can finish; close failures do not overwrite the original cause. Inspect `subscription.terminal_failure()` for `SubscriptionStopReason::Settlement` with event ID, disposition, attempts, termination, and structured `Arc<SpiError>`. Diagnostics emit `SettlementFailed` per failed attempt and one `SettlementStopped` for terminal settlement. Preserve this context in telemetry.
-
-Read `bus.delivery_metrics()` and `subscription.delivery_metrics().metrics` for `reserved_receives`, `queued`, `running_handlers`, `settling`, `lane_waiting`, `settlement_attempts`, `settlement_retries`, `settlement_terminal_failures`, `completed`, handler/settlement duration count, total and maximum, and `oldest_owned_age`. `lane_waiting` is part of `queued`; retries count actual SPI calls after the first. Snapshots are not transactional across concurrent changes. Closed subscription handles retain counters, and bus counters survive subscription removal. These facade snapshots do not measure Redis PEL or reconnect state: also inspect `XPENDING` and `XINFO GROUPS`.
-
-To recover, record the first cause and snapshots, correct connectivity, codec, limits, or policy as appropriate, finish closing the failed subscription, and create a new `Durable` subscription with the **same namespace, topic, and group**. Its new consumer can claim retained pending work after `redis.claim_min_idle_ms`; `StartPosition` does not reset the existing group. Recovery depends on record retention and claim policy: trimming or deletion can destroy pending history, and an already applied `XACK` whose reply was lost leaves nothing to claim. Repeated settlement of the same token and disposition is idempotent; that does not make business handling exactly once.
 
 ### Bound facade work and stop settlement failures
 
@@ -521,7 +541,7 @@ See [design](design.md), [coverage evidence](coverage-review.md), and [workload 
 
 ## Support boundary
 
-Supported: Redis standalone and Sentinel, Redis 6.2+, encoded payloads, consumer groups, accepted/retry/reject settlement, and replay from Redis stream positions. Not supported: Cluster, native payloads, ordering guarantees, delayed delivery, automatic lifecycle cleanup, dead-letter routing, and TLS configuration. The provider does not claim exactly-once processing.
+Supported: Redis standalone and Sentinel, Redis 6.2+, verified TLS for standalone and Sentinel connections, encoded payloads, consumer groups, accepted/retry/reject settlement, and replay from Redis stream positions. Not supported: Cluster, native payloads, ordering guarantees, delayed delivery, automatic lifecycle cleanup, and dead-letter routing. The provider does not claim exactly-once processing.
 
 
 ## Lossy stream retention

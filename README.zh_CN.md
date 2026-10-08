@@ -47,7 +47,7 @@ event-bus SPI 允许应用更换传输实现，而不改业务 handler。Redis S
 
 Redis 短命令额度默认是 64，其中 8 个名额专供结算；专用 receiver 连接有独立的 256 个默认上限。这些准入规则属于破坏性变更：`redis.max_concurrent_commands=1` 会被拒绝。降低总额度时，未显式设置的结算保留数会自动调整为 `min(8, 总额 - 1)`；只有需要自定义保留数时才设置 `redis.reserved_settlement_commands`。详见[迁移指南](doc/migration.zh_CN.md)。每个持久订阅第一次 receive 都会检查 pending；之后恢复时钟跨调用保存，并按 `redis.recovery_interval_ms`（默认 1,000 毫秒）重新扫描。Retry、receive 失败或已开始轮询的 future 被取消时，会强制下一次 receive 执行恢复。额度按 provider 实例隔离，不是 Redis 或进程级全局额度；应监控命令拒绝、`XPENDING`、stream `XLEN` 和隔离流增长。
 
-Redis 使用至少一次投递，业务 handler 应能处理重复事件。`XADD` 成功只表示 Redis 接受了命令，不能证明记录已经 fsync 或完成处理。默认不会裁剪 stream。只有同时设置 `redis.stream_maxlen_approx` 和 `redis.allow_lossy_retention=true`，并完成人工损失评估，才启用 Redis `XADD MAXLEN ~ N`；近似保留策略可能删除尚未消费或仍处于 pending 的历史记录并产生缺口。当前不支持 Cluster、native/delayed delivery、TLS 配置或死信策略。stream 和消费组由运维人员负责清理。
+Redis 使用至少一次投递，业务 handler 应能处理重复事件。`XADD` 成功只表示 Redis 接受了命令，不能证明记录已经 fsync 或完成处理。默认不会裁剪 stream。只有同时设置 `redis.stream_maxlen_approx` 和 `redis.allow_lossy_retention=true`，并完成人工损失评估，才启用 Redis `XADD MAXLEN ~ N`；近似保留策略可能删除尚未消费或仍处于 pending 的历史记录并产生缺口。单实例和 Sentinel 连接均可按需启用 TLS，并验证证书及主机名；Sentinel 与主节点的 TLS 设置彼此独立。当前不支持 Cluster、native/delayed delivery 或死信策略。stream 和消费组由运维人员负责清理。
 
 provider 对单条 wire、payload 和解码后的 headers 字符串设置有限容量，默认分别为 8 MiB、1 MiB 和 64 KiB；facade 另有默认各 1 MiB 的编码发布/接收限制。接收超限会停止订阅，保留 pending 记录，不确认也不隔离。公开发布错误可通过 `PublishFailure.effect()` 判断效果；`XADD` 回复丢失属于未知结果，默认禁止盲目重发。仍支持 wire 版本 1。升级步骤见[迁移指南](doc/migration.zh_CN.md)。
 
@@ -56,6 +56,8 @@ provider 对单条 wire、payload 和解码后的 headers 字符串设置有限�
 Core 0.20 分别限制 handler 运行数、全局持有投递数、每订阅持有量和注册订阅数。`RedisSubscriptionProfile` 要求明确指定起始位置，并构造 durable options；Redis 新读取的 stream entry 报告 provider attempt `Some(1)`，pending 和 claim 恢复的历史次数仍未知。结算只对明确可重试的错误执行有限重试，重试性未知时停止订阅。[用户指南](doc/user_guide.zh_CN.md) 说明首个终止原因、投递指标、持久恢复、provider snapshot 采集，以及限制等待时间但不保证强制退出进程的关闭策略。
 
 ## 延伸阅读
+
+Redis 端点通过 `rediss://` 启用 TLS；Sentinel TLS 则由独立的 `redis.sentinel.tls` 控制，并使用各自的 CA 和客户端身份配置。每个自定义 PEM 文件最多 1 MiB。配置示例和证书轮换说明见[用户指南的 TLS 章节](doc/user_guide.zh_CN.md#tls-连接)。
 
 - [用户指南](doc/user_guide.zh_CN.md)（[English](doc/user_guide.md)）
 - [设计与迁移边界](doc/design.zh_CN.md)（[English](doc/design.md)）
