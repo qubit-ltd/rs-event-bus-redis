@@ -7,8 +7,8 @@ publish = false
 [workspace]
 
 [dependencies]
-qubit-event-bus-redis = { version = "0.7.0", path = "../../..", default-features = false, features = ["async"] }
-qubit-event-bus = { version = "0.20.0", path = "../../../../rs-event-bus", default-features = false }
+qubit-event-bus-redis = { version = "0.7", path = "../../..", default-features = false, features = ["async"] }
+qubit-event-bus = { version = "0.20", path = "../../../../rs-event-bus", default-features = false }
 qubit-spi = "0.13"
 qubit-id = { version = "0.7", default-features = false, features = ["uuid"] }
 futures-lite = "2"
