@@ -62,9 +62,13 @@ impl ReceiveCommand for Cmd {
     /// Returns setup errors, classified top-level rejections, or
     /// outcome-unknown after uncertain I/O or nested/protocol failures.
     fn query_receive<T: FromRedisValue>(&self, connection: &mut PooledConnection) -> Result<T, RedisProviderError> {
-        let raw = connection
-            .req_command(self)
-            .map_err(|_| RedisProviderError::OutcomeUnknown { operation: "receive" })?;
+        let raw = connection.req_command(self).map_err(|error| {
+            if error.is_response_too_large() {
+                RedisProviderError::ResponseTooLarge
+            } else {
+                RedisProviderError::OutcomeUnknown { operation: "receive" }
+            }
+        })?;
         if let Value::ServerError(error) = raw {
             let error: RedisError = error.into();
             return Err(from_redis_error("receive", &error));

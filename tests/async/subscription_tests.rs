@@ -14,6 +14,7 @@ use std::time::SystemTime;
 
 use futures_lite::future::block_on;
 use futures_lite::future::race;
+use futures_lite::future::yield_now;
 use qubit_event_bus::EventBusConfig;
 use qubit_event_bus::SpiError;
 use qubit_event_bus::model::ConsumerGroup;
@@ -74,8 +75,8 @@ fn create_bus_with_claim_min_idle(
         .map_err(Into::into)
 }
 
-/// A new stream delivery has one known provider attempt, while recovery paths
-/// retain unknown attempt counts.
+/// A new stream delivery has one known provider attempt; pending and claimed
+/// recovery deliveries report the trusted Redis delivery count.
 #[test]
 fn test_receive_provider_attempt_distinguishes_new_pending_and_claimed() -> TestResult {
     block_on(async {
@@ -96,7 +97,7 @@ fn test_receive_provider_attempt_distinguishes_new_pending_and_claimed() -> Test
         let ReceiveOutcome::Message(pending_message) = pending_receiver.receive(Duration::from_secs(2)).await? else {
             return Err("pending message missing".into());
         };
-        assert_eq!(pending_message.provider_attempt(), None);
+        assert_eq!(pending_message.provider_attempt().map(|attempt| attempt.get()), Some(2));
 
         let claim_server = RedisServer::start()?;
         let claim_bus = create_bus(claim_server.url())?;
@@ -111,7 +112,75 @@ fn test_receive_provider_attempt_distinguishes_new_pending_and_claimed() -> Test
         let ReceiveOutcome::Message(claimed_message) = claiming_receiver.receive(Duration::from_secs(2)).await? else {
             return Err("claimed message missing".into());
         };
-        assert_eq!(claimed_message.provider_attempt(), None);
+        assert_eq!(claimed_message.provider_attempt().map(|attempt| attempt.get()), Some(2));
+        Ok(())
+    })
+}
+
+#[test]
+fn test_cancelled_recovery_attempt_query_uses_fresh_connection_on_retry() -> TestResult {
+    block_on(async {
+        let wire = br#"{"version":1,"event_id":"recovered-event","timestamp_ms":0,"headers_json":"{}","ordering_key":null,"content_type":"application/octet-stream","schema_id":null,"payload":[112,97,121,108,111,97,100]}"#;
+        let entry = format!(
+            "*2\r\n$3\r\n1-0\r\n*2\r\n$4\r\nwire\r\n${}\r\n{}\r\n",
+            wire.len(),
+            std::str::from_utf8(wire)?
+        );
+        let claimed = format!("*2\r\n$3\r\n0-0\r\n*1\r\n{entry}");
+        let server = ScriptedRedis::start(vec![
+            Step::reply("XGROUP", b"+OK\r\n"),
+            Step::reply("XAUTOCLAIM", claimed.as_bytes()),
+            Step::delayed_reply("XPENDING", b"+OK\r\n", Duration::from_secs(2)),
+            Step::reply("XGROUP", b"+OK\r\n"),
+            Step::reply("XAUTOCLAIM", claimed.as_bytes()),
+            Step::pending_entry("1-0", 2),
+        ])?;
+        let bus = create_bus(server.url())?;
+        let mut receiver = bus.subscribe(request_at(StartPosition::New)?).await?;
+        let cancelled = race(
+            async {
+                let _ = receiver.receive(Duration::from_secs(5)).await;
+                false
+            },
+            async {
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                loop {
+                    if server
+                        .finish_allow_remaining()
+                        .iter()
+                        .any(|command| command.first().is_some_and(|name| name == "XPENDING"))
+                    {
+                        break true;
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        break false;
+                    }
+                    yield_now().await;
+                }
+            },
+        )
+        .await;
+        assert!(
+            cancelled,
+            "the first receive must be cancelled during XPENDING; commands: {:?}",
+            server.finish_allow_remaining()
+        );
+        drop(receiver);
+
+        let mut retried = bus.subscribe(request_at(StartPosition::New)?).await?;
+        let ReceiveOutcome::Message(message) = retried.receive(Duration::from_secs(1)).await? else {
+            return Err("recovered message missing after cancelled XPENDING".into());
+        };
+        assert_eq!(message.id().as_str(), "recovered-event");
+        assert_eq!(message.provider_attempt().map(|attempt| attempt.get()), Some(2));
+        assert_eq!(
+            server
+                .finish()
+                .iter()
+                .map(|command| command[0].as_str())
+                .collect::<Vec<_>>(),
+            vec!["XGROUP", "XAUTOCLAIM", "XPENDING", "XGROUP", "XAUTOCLAIM", "XPENDING"]
+        );
         Ok(())
     })
 }

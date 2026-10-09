@@ -78,6 +78,9 @@ pub enum RedisProviderError {
     /// limit.
     #[error("Redis event resource limit exceeded")]
     LimitExceeded,
+    /// A Redis response frame exceeded the configured receiver byte limit.
+    #[error("Redis receive response exceeded the configured byte limit")]
+    ResponseTooLarge,
 }
 
 /// Classifies a Redis error without retaining its diagnostic details.

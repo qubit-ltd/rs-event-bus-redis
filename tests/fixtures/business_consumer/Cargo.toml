@@ -10,3 +10,6 @@ publish = false
 qubit-event-bus = { version = "0.20", path = "../../../../rs-event-bus", default-features = false, features = ["discovery"] }
 qubit-event-bus-redis = { path = "../../..", default-features = false, features = ["sync", "discovery"] }
 qubit-spi = "0.13"
+
+[patch.crates-io]
+redis = { path = "../../../third_party/redis-rs" }

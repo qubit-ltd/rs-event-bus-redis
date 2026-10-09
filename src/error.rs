@@ -52,6 +52,7 @@ pub(crate) fn to_spi_error(
             },
             Some(false),
         ),
+        RedisProviderError::ResponseTooLarge => ("receive_response_too_large", Some(true)),
         RedisProviderError::Transport { kind, retryable, .. } => (*kind, *retryable),
         RedisProviderError::OutcomeUnknown { operation } => {
             ("outcome_unknown", Some(matches!(*operation, "settle" | "receive")))
