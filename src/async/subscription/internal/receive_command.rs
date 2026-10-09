@@ -74,10 +74,13 @@ impl ReceiveCommand for Cmd {
         connection: &'a mut MultiplexedConnection,
     ) -> SpiFuture<'a, Result<T, RedisProviderError>> {
         Box::pin(async move {
-            let raw = connection
-                .send_packed_command(self)
-                .await
-                .map_err(|_| RedisProviderError::OutcomeUnknown { operation: "receive" })?;
+            let raw = connection.send_packed_command(self).await.map_err(|error| {
+                if error.is_response_too_large() {
+                    RedisProviderError::ResponseTooLarge
+                } else {
+                    RedisProviderError::OutcomeUnknown { operation: "receive" }
+                }
+            })?;
             if let Value::ServerError(error) = raw {
                 let error: RedisError = error.into();
                 return Err(from_redis_error("receive", &error));

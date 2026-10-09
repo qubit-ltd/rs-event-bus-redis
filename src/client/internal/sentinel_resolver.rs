@@ -18,6 +18,8 @@ use redis::Client;
 #[cfg(feature = "sync")]
 use redis::Connection;
 use redis::ConnectionAddr;
+#[cfg(feature = "sync")]
+use redis::ConnectionConfig;
 use redis::ConnectionInfo;
 #[cfg(feature = "sync")]
 use redis::ConnectionLike;
@@ -135,16 +137,16 @@ impl SentinelResolver {
     /// discovery fails. Individual I/O waits are bounded; DNS and
     /// multi-address work have no hard wall-clock deadline.
     #[cfg(feature = "sync")]
-    pub(crate) fn connect_sync(&self) -> Result<Connection, RedisError> {
+    pub(crate) fn connect_sync(&self, max_response_bytes: Option<usize>) -> Result<Connection, RedisError> {
         let mut last_error = discovery_error();
         let start = self.preferred.load(Ordering::Relaxed);
         for offset in 0..self.endpoints.len() {
             let index = (start + offset) % self.endpoints.len();
             let attempt = (|| {
-                let mut sentinel = open_sync(&self.endpoints[index], self.policy)?;
+                let mut sentinel = open_sync(&self.endpoints[index], self.policy, None)?;
                 let raw = sentinel.req_command(cmd("SENTINEL").arg("get-master-addr-by-name").arg(&self.service))?;
                 let target = self.target(raw)?;
-                let mut connection = open_sync(&target, self.policy)?;
+                let mut connection = open_sync(&target, self.policy, max_response_bytes)?;
                 let role = connection.req_command(&cmd("ROLE"))?;
                 if let Value::ServerError(error) = role {
                     return Err(error.into());
@@ -178,18 +180,21 @@ impl SentinelResolver {
     /// Cancellation drops the active probe; no hidden election, write
     /// replay, or replacement task is started.
     #[cfg(feature = "async")]
-    pub(crate) async fn connect_async(&self) -> Result<MultiplexedConnection, RedisError> {
+    pub(crate) async fn connect_async(
+        &self,
+        max_response_bytes: Option<usize>,
+    ) -> Result<MultiplexedConnection, RedisError> {
         let mut last_error = discovery_error();
         let start = self.preferred.load(Ordering::Relaxed);
         for offset in 0..self.endpoints.len() {
             let index = (start + offset) % self.endpoints.len();
             let attempt = async {
-                let mut sentinel = open_async(&self.endpoints[index], self.policy).await?;
+                let mut sentinel = open_async(&self.endpoints[index], self.policy, None).await?;
                 let raw = sentinel
                     .send_packed_command(cmd("SENTINEL").arg("get-master-addr-by-name").arg(&self.service))
                     .await?;
                 let target = self.target(raw)?;
-                let mut connection = open_async(&target, self.policy).await?;
+                let mut connection = open_async(&target, self.policy, max_response_bytes).await?;
                 let role = connection.send_packed_command(&cmd("ROLE")).await?;
                 if let Value::ServerError(error) = role {
                     return Err(error.into());
@@ -308,8 +313,13 @@ fn discovery_error() -> RedisError {
 ///
 /// Returns Redis connection/setup, timeout, or socket-option failures.
 #[cfg(feature = "sync")]
-pub(crate) fn open_sync(client: &Client, policy: TransportPolicy) -> Result<Connection, RedisError> {
-    let connection = client.get_connection_with_timeout(policy.connect_timeout)?;
+pub(crate) fn open_sync(
+    client: &Client,
+    policy: TransportPolicy,
+    max_response_bytes: Option<usize>,
+) -> Result<Connection, RedisError> {
+    let config = ConnectionConfig::new().set_max_response_bytes(max_response_bytes);
+    let connection = client.get_connection_with_timeout_and_config(policy.connect_timeout, &config)?;
     configure_sync(&connection, policy.command_timeout)?;
     Ok(connection)
 }
@@ -352,10 +362,15 @@ pub(crate) fn configure_sync(connection: &Connection, timeout: Duration) -> Resu
 /// Returns Redis connection/setup or timeout failures. Cancellation can abandon
 /// setup.
 #[cfg(feature = "async")]
-pub(crate) async fn open_async(client: &Client, policy: TransportPolicy) -> Result<MultiplexedConnection, RedisError> {
+pub(crate) async fn open_async(
+    client: &Client,
+    policy: TransportPolicy,
+    max_response_bytes: Option<usize>,
+) -> Result<MultiplexedConnection, RedisError> {
     let config = AsyncConnectionConfig::new()
         .set_connection_timeout(policy.connect_timeout)
-        .set_response_timeout(policy.command_timeout);
+        .set_response_timeout(policy.command_timeout)
+        .set_max_response_bytes(max_response_bytes);
     client.get_multiplexed_async_connection_with_config(&config).await
 }
 
@@ -388,7 +403,7 @@ mod tests {
         .into();
         let config = RedisEventBusConfig::from_provider_options(&settings).expect("valid settings");
         let resolver = SentinelResolver::new(&config).expect("resolver");
-        let error = match resolver.connect_sync() {
+        let error = match resolver.connect_sync(None) {
             Err(error) => error,
             Ok(_) => panic!("invalid host cannot become a target"),
         };

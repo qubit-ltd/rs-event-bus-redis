@@ -30,6 +30,8 @@ use std::time::Duration;
 /// One command's response, including loss of the connection before a reply.
 pub enum Reply {
     Bytes(Vec<u8>),
+    DelayedBytes(Vec<u8>, Duration),
+    PendingEntry { id: String, deliveries: u64 },
     Disconnect,
     DisconnectAndRefuseConnections,
 }
@@ -47,6 +49,26 @@ impl Step {
         Self {
             command,
             reply: Reply::Bytes(reply.to_vec()),
+        }
+    }
+
+    /// Constructs a step expecting `command` and returning raw RESP `reply`
+    /// after `delay`.
+    pub fn delayed_reply(command: &'static str, reply: &[u8], delay: Duration) -> Self {
+        Self {
+            command,
+            reply: Reply::DelayedBytes(reply.to_vec(), delay),
+        }
+    }
+
+    /// Constructs an XPENDING row owned by the most recent XAUTOCLAIM consumer.
+    pub fn pending_entry(id: &str, deliveries: u64) -> Self {
+        Self {
+            command: "XPENDING",
+            reply: Reply::PendingEntry {
+                id: id.to_owned(),
+                deliveries,
+            },
         }
     }
 
@@ -73,6 +95,7 @@ struct State {
     connections: Mutex<Vec<TcpStream>>,
     stopping: AtomicBool,
     refusing: AtomicBool,
+    consumer: Mutex<Option<String>>,
 }
 
 /// Owns an ephemeral TCP listener and joins all connection workers on drop.
@@ -104,6 +127,7 @@ impl ScriptedRedis {
             connections: Mutex::new(Vec::new()),
             stopping: AtomicBool::new(false),
             refusing: AtomicBool::new(false),
+            consumer: Mutex::new(None),
         });
         let shared = Arc::clone(&state);
         let worker = spawn(move || {
@@ -211,7 +235,9 @@ fn serve_connection(stream: TcpStream, state: &State) {
             Ok(Some(command)) => command,
             Ok(None) => return,
             Err(error) => {
-                if !state.stopping.load(Ordering::SeqCst) {
+                if !state.stopping.load(Ordering::SeqCst)
+                    && !matches!(error.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock)
+                {
                     state.errors.lock().expect("errors lock").push(error.to_string());
                 }
                 return;
@@ -223,6 +249,11 @@ fn serve_connection(stream: TcpStream, state: &State) {
             continue;
         }
         state.commands.lock().expect("commands lock").push(command.clone());
+        if name == "XAUTOCLAIM"
+            && let Some(consumer) = command.get(3)
+        {
+            *state.consumer.lock().expect("consumer lock") = Some(consumer.clone());
+        }
         let step = state.steps.lock().expect("steps lock").pop_front();
         let reply = match step {
             Some(step) if step.command == name => step.reply,
@@ -238,6 +269,27 @@ fn serve_connection(stream: TcpStream, state: &State) {
         };
         match reply {
             Reply::Bytes(bytes) => reader.get_mut().write_all(&bytes).expect("write scripted response"),
+            Reply::DelayedBytes(bytes, delay) => {
+                sleep(delay);
+                let _ = reader.get_mut().write_all(&bytes);
+            }
+            Reply::PendingEntry { id, deliveries } => {
+                let consumer = state
+                    .consumer
+                    .lock()
+                    .expect("consumer lock")
+                    .clone()
+                    .expect("XPENDING follows XAUTOCLAIM");
+                let response = format!(
+                    "*1\r\n*4\r\n${}\r\n{id}\r\n${}\r\n{consumer}\r\n:0\r\n:{deliveries}\r\n",
+                    id.len(),
+                    consumer.len()
+                );
+                reader
+                    .get_mut()
+                    .write_all(response.as_bytes())
+                    .expect("write scripted XPENDING response");
+            }
             Reply::Disconnect => {
                 let _ = reader.get_mut().shutdown(Shutdown::Both);
                 return;

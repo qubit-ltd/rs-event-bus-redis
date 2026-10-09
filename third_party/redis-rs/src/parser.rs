@@ -1,0 +1,1196 @@
+use std::{
+    io::{self, Read},
+    str,
+};
+
+use crate::types::{
+    ErrorKind, PushKind, RedisError, RedisResult, ServerError, ServerErrorKind, Value,
+    VerbatimFormat,
+};
+
+use combine::{
+    any,
+    error::StreamError,
+    opaque,
+    parser::{
+        byte::{crlf, take_until_bytes},
+        combinator::{any_send_sync_partial_state, AnySendSyncPartialState},
+        range::{recognize, take},
+    },
+    stream::{
+        decoder::{self, Decoder},
+        PointerOffset, RangeStream, StreamErrorFor,
+    },
+    unexpected_any, ParseError, Parser as _,
+};
+use num_bigint::BigInt;
+
+const MAX_RECURSE_DEPTH: usize = 100;
+
+fn err_parser(line: &str) -> ServerError {
+    let mut pieces = line.splitn(2, ' ');
+    let kind = match pieces.next().unwrap() {
+        "ERR" => ServerErrorKind::ResponseError,
+        "EXECABORT" => ServerErrorKind::ExecAbortError,
+        "LOADING" => ServerErrorKind::BusyLoadingError,
+        "NOSCRIPT" => ServerErrorKind::NoScriptError,
+        "MOVED" => ServerErrorKind::Moved,
+        "ASK" => ServerErrorKind::Ask,
+        "TRYAGAIN" => ServerErrorKind::TryAgain,
+        "CLUSTERDOWN" => ServerErrorKind::ClusterDown,
+        "CROSSSLOT" => ServerErrorKind::CrossSlot,
+        "MASTERDOWN" => ServerErrorKind::MasterDown,
+        "READONLY" => ServerErrorKind::ReadOnly,
+        "NOTBUSY" => ServerErrorKind::NotBusy,
+        "NOSUB" => ServerErrorKind::NoSub,
+        code => {
+            return ServerError::ExtensionError {
+                code: code.to_string(),
+                detail: pieces.next().map(|str| str.to_string()),
+            }
+        }
+    };
+    let detail = pieces.next().map(|str| str.to_string());
+    ServerError::KnownError { kind, detail }
+}
+
+pub fn get_push_kind(kind: String) -> PushKind {
+    match kind.as_str() {
+        "invalidate" => PushKind::Invalidate,
+        "message" => PushKind::Message,
+        "pmessage" => PushKind::PMessage,
+        "smessage" => PushKind::SMessage,
+        "unsubscribe" => PushKind::Unsubscribe,
+        "punsubscribe" => PushKind::PUnsubscribe,
+        "sunsubscribe" => PushKind::SUnsubscribe,
+        "subscribe" => PushKind::Subscribe,
+        "psubscribe" => PushKind::PSubscribe,
+        "ssubscribe" => PushKind::SSubscribe,
+        _ => PushKind::Other(kind),
+    }
+}
+
+fn value<'a, I>(
+    count: Option<usize>,
+) -> impl combine::Parser<I, Output = Value, PartialState = AnySendSyncPartialState>
+where
+    I: RangeStream<Token = u8, Range = &'a [u8]>,
+    I::Error: combine::ParseError<u8, &'a [u8], I::Position>,
+{
+    let count = count.unwrap_or(1);
+
+    opaque!(any_send_sync_partial_state(
+        any()
+            .then_partial(move |&mut b| {
+                if count > MAX_RECURSE_DEPTH {
+                    combine::unexpected_any("Maximum recursion depth exceeded").left()
+                } else {
+                    combine::value(b).right()
+                }
+            })
+            .then_partial(move |&mut b| {
+                let line = || {
+                    recognize(take_until_bytes(&b"\r\n"[..]).with(take(2).map(|_| ()))).and_then(
+                        |line: &[u8]| {
+                            str::from_utf8(&line[..line.len() - 2])
+                                .map_err(StreamErrorFor::<I>::other)
+                        },
+                    )
+                };
+
+                let simple_string = || {
+                    line().map(|line| {
+                        if line == "OK" {
+                            Value::Okay
+                        } else {
+                            Value::SimpleString(line.into())
+                        }
+                    })
+                };
+
+                let int = || {
+                    line().and_then(|line| {
+                        line.trim().parse::<i64>().map_err(|_| {
+                            StreamErrorFor::<I>::message_static_message(
+                                "Expected integer, got garbage",
+                            )
+                        })
+                    })
+                };
+
+                let bulk_string = || {
+                    int().then_partial(move |size| {
+                        if *size < 0 {
+                            combine::produce(|| Value::Nil).left()
+                        } else {
+                            take(*size as usize)
+                                .map(|bs: &[u8]| Value::BulkString(bs.to_vec()))
+                                .skip(crlf())
+                                .right()
+                        }
+                    })
+                };
+                let blob = || {
+                    int().then_partial(move |size| {
+                        take(*size as usize)
+                            .map(|bs: &[u8]| String::from_utf8_lossy(bs).to_string())
+                            .skip(crlf())
+                    })
+                };
+
+                let array = || {
+                    int().then_partial(move |&mut length| {
+                        if length < 0 {
+                            combine::produce(|| Value::Nil).left()
+                        } else {
+                            let length = length as usize;
+                            combine::count_min_max(length, length, value(Some(count + 1)))
+                                .map(Value::Array)
+                                .right()
+                        }
+                    })
+                };
+
+                let error = || line().map(err_parser);
+                let map = || {
+                    int().then_partial(move |&mut kv_length| {
+                        match (kv_length as usize).checked_mul(2) {
+                            Some(length) => {
+                                combine::count_min_max(length, length, value(Some(count + 1)))
+                                    .map(move |result: Vec<Value>| {
+                                        let mut it = result.into_iter();
+                                        let mut x = vec![];
+                                        for _ in 0..kv_length {
+                                            if let (Some(k), Some(v)) = (it.next(), it.next()) {
+                                                x.push((k, v))
+                                            }
+                                        }
+                                        Value::Map(x)
+                                    })
+                                    .left()
+                            }
+                            None => {
+                                unexpected_any("Attribute key-value length is too large").right()
+                            }
+                        }
+                    })
+                };
+                let attribute = || {
+                    int().then_partial(move |&mut kv_length| {
+                        match (kv_length as usize).checked_mul(2) {
+                            Some(length) => {
+                                // + 1 is for data!
+                                let length = length + 1;
+                                combine::count_min_max(length, length, value(Some(count + 1)))
+                                    .map(move |result: Vec<Value>| {
+                                        let mut it = result.into_iter();
+                                        let mut attributes = vec![];
+                                        for _ in 0..kv_length {
+                                            if let (Some(k), Some(v)) = (it.next(), it.next()) {
+                                                attributes.push((k, v))
+                                            }
+                                        }
+                                        Value::Attribute {
+                                            data: Box::new(it.next().unwrap()),
+                                            attributes,
+                                        }
+                                    })
+                                    .left()
+                            }
+                            None => {
+                                unexpected_any("Attribute key-value length is too large").right()
+                            }
+                        }
+                    })
+                };
+                let set = || {
+                    int().then_partial(move |&mut length| {
+                        if length < 0 {
+                            combine::produce(|| Value::Nil).left()
+                        } else {
+                            let length = length as usize;
+                            combine::count_min_max(length, length, value(Some(count + 1)))
+                                .map(Value::Set)
+                                .right()
+                        }
+                    })
+                };
+                let push = || {
+                    int().then_partial(move |&mut length| {
+                        if length <= 0 {
+                            combine::produce(|| Value::Push {
+                                kind: PushKind::Other("".to_string()),
+                                data: vec![],
+                            })
+                            .left()
+                        } else {
+                            let length = length as usize;
+                            combine::count_min_max(length, length, value(Some(count + 1)))
+                                .and_then(|result: Vec<Value>| {
+                                    let mut it = result.into_iter();
+                                    let first = it.next().unwrap_or(Value::Nil);
+                                    if let Value::BulkString(kind) = first {
+                                        let push_kind = String::from_utf8(kind)
+                                            .map_err(StreamErrorFor::<I>::other)?;
+                                        Ok(Value::Push {
+                                            kind: get_push_kind(push_kind),
+                                            data: it.collect(),
+                                        })
+                                    } else if let Value::SimpleString(kind) = first {
+                                        Ok(Value::Push {
+                                            kind: get_push_kind(kind),
+                                            data: it.collect(),
+                                        })
+                                    } else {
+                                        Err(StreamErrorFor::<I>::message_static_message(
+                                            "parse error when decoding push",
+                                        ))
+                                    }
+                                })
+                                .right()
+                        }
+                    })
+                };
+                let null = || line().map(|_| Value::Nil);
+                let double = || {
+                    line().and_then(|line| {
+                        line.trim()
+                            .parse::<f64>()
+                            .map_err(StreamErrorFor::<I>::other)
+                    })
+                };
+                let boolean = || {
+                    line().and_then(|line: &str| match line {
+                        "t" => Ok(true),
+                        "f" => Ok(false),
+                        _ => Err(StreamErrorFor::<I>::message_static_message(
+                            "Expected boolean, got garbage",
+                        )),
+                    })
+                };
+                let blob_error = || blob().map(|line| err_parser(&line));
+                let verbatim = || {
+                    blob().and_then(|line| {
+                        if let Some((format, text)) = line.split_once(':') {
+                            let format = match format {
+                                "txt" => VerbatimFormat::Text,
+                                "mkd" => VerbatimFormat::Markdown,
+                                x => VerbatimFormat::Unknown(x.to_string()),
+                            };
+                            Ok(Value::VerbatimString {
+                                format,
+                                text: text.to_string(),
+                            })
+                        } else {
+                            Err(StreamErrorFor::<I>::message_static_message(
+                                "parse error when decoding verbatim string",
+                            ))
+                        }
+                    })
+                };
+                let big_number = || {
+                    line().and_then(|line| {
+                        BigInt::parse_bytes(line.as_bytes(), 10).ok_or_else(|| {
+                            StreamErrorFor::<I>::message_static_message(
+                                "Expected bigint, got garbage",
+                            )
+                        })
+                    })
+                };
+                combine::dispatch!(b;
+                    b'+' => simple_string(),
+                    b':' => int().map(Value::Int),
+                    b'$' => bulk_string(),
+                    b'*' => array(),
+                    b'%' => map(),
+                    b'|' => attribute(),
+                    b'~' => set(),
+                    b'-' => error().map(Value::ServerError),
+                    b'_' => null(),
+                    b',' => double().map(Value::Double),
+                    b'#' => boolean().map(Value::Boolean),
+                    b'!' => blob_error().map(Value::ServerError),
+                    b'=' => verbatim(),
+                    b'(' => big_number().map(Value::BigNumber),
+                    b'>' => push(),
+                    b => combine::unexpected_any(combine::error::Token(b))
+                )
+            })
+    ))
+}
+
+// a macro is needed because of lifetime shenanigans with `decoder`.
+macro_rules! to_redis_err {
+    ($err: expr, $decoder: expr) => {
+        match $err {
+            decoder::Error::Io { error, .. } => error.into(),
+            decoder::Error::Parse(err) => {
+                if err.is_unexpected_end_of_input() {
+                    RedisError::from(io::Error::from(io::ErrorKind::UnexpectedEof))
+                } else {
+                    let err = err
+                        .map_range(|range| format!("{range:?}"))
+                        .map_position(|pos| pos.translate_position($decoder.buffer()))
+                        .to_string();
+                    RedisError::from((ErrorKind::ParseError, "parse error", err))
+                }
+            }
+        }
+    };
+}
+
+#[cfg(feature = "aio")]
+mod aio_support {
+    use super::*;
+
+    use bytes::{Buf, BytesMut};
+    use tokio::io::AsyncRead;
+    use tokio_util::codec::{Decoder, Encoder};
+
+    #[derive(Default)]
+    pub struct ValueCodec {
+        state: AnySendSyncPartialState,
+        max_response_bytes: Option<usize>,
+        preflight: FramePreflight,
+        last_seen_len: usize,
+    }
+
+    impl ValueCodec {
+        pub(crate) fn with_max_response_bytes(max_response_bytes: Option<usize>) -> Self {
+            Self {
+                state: AnySendSyncPartialState::default(),
+                max_response_bytes,
+                preflight: FramePreflight::default(),
+                last_seen_len: 0,
+            }
+        }
+
+        #[cfg(test)]
+        pub(super) fn scanned_bytes(&self) -> usize {
+            self.preflight.scanned_bytes
+        }
+
+        fn decode_stream(&mut self, bytes: &mut BytesMut, eof: bool) -> RedisResult<Option<Value>> {
+            let new_start = if self.max_response_bytes.is_some() {
+                self.last_seen_len.min(bytes.len())
+            } else {
+                0
+            };
+            let new_bytes = &bytes[new_start..];
+            let new_bytes_len = new_bytes.len();
+            let (scanned, frame_complete) = if let Some(limit) = self.max_response_bytes {
+                self.preflight.scan(new_bytes, limit).map_err(|()| response_too_large())?
+            } else {
+                (new_bytes.len(), false)
+            };
+            let (opt, removed_len) = {
+                let buffer = &bytes[..];
+                let mut stream =
+                    combine::easy::Stream(combine::stream::MaybePartialStream(buffer, !eof));
+                match combine::stream::decode_tokio(value(None), &mut stream, &mut self.state) {
+                    Ok(x) => x,
+                    Err(err) => {
+                        let err = err
+                            .map_position(|pos| pos.translate_position(buffer))
+                            .map_range(|range| format!("{range:?}"))
+                            .to_string();
+                        return Err(RedisError::from((
+                            ErrorKind::ParseError,
+                            "parse error",
+                            err,
+                        )));
+                    }
+                }
+            };
+
+            bytes.advance(removed_len);
+            match opt {
+                Some(result) => {
+                    self.last_seen_len = 0;
+                    Ok(Some(result))
+                }
+                None => {
+                    if self.max_response_bytes.is_some()
+                        && !frame_complete
+                        && scanned == new_bytes_len
+                    {
+                        self.last_seen_len = bytes.len();
+                    } else {
+                        self.last_seen_len = 0;
+                    }
+                    Ok(None)
+                }
+            }
+        }
+    }
+
+    impl Encoder<Vec<u8>> for ValueCodec {
+        type Error = RedisError;
+        fn encode(&mut self, item: Vec<u8>, dst: &mut BytesMut) -> Result<(), Self::Error> {
+            dst.extend_from_slice(item.as_ref());
+            Ok(())
+        }
+    }
+
+    impl Decoder for ValueCodec {
+        type Item = Value;
+        type Error = RedisError;
+
+        fn decode(&mut self, bytes: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+            self.decode_stream(bytes, false)
+        }
+
+        fn decode_eof(&mut self, bytes: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+            self.decode_stream(bytes, true)
+        }
+    }
+
+    /// Parses a redis value asynchronously.
+    pub async fn parse_redis_value_async<R>(
+        decoder: &mut combine::stream::Decoder<AnySendSyncPartialState, PointerOffset<[u8]>>,
+        read: &mut R,
+    ) -> RedisResult<Value>
+    where
+        R: AsyncRead + std::marker::Unpin,
+    {
+        let result = combine::decode_tokio!(*decoder, *read, value(None), |input, _| {
+            combine::stream::easy::Stream::from(input)
+        });
+        match result {
+            Err(err) => Err(to_redis_err!(err, decoder)),
+            Ok(result) => Ok(result),
+        }
+    }
+}
+
+#[cfg(feature = "aio")]
+#[cfg_attr(docsrs, doc(cfg(feature = "aio")))]
+pub use self::aio_support::*;
+
+/// The internal redis response parser.
+pub struct Parser {
+    decoder: Decoder<AnySendSyncPartialState, PointerOffset<[u8]>>,
+    max_response_bytes: Option<usize>,
+}
+
+impl Default for Parser {
+    fn default() -> Self {
+        Parser::new()
+    }
+}
+
+/// The parser can be used to parse redis responses into values.  Generally
+/// you normally do not use this directly as it's already done for you by
+/// the client but in some more complex situations it might be useful to be
+/// able to parse the redis responses.
+impl Parser {
+    /// Creates a new parser that parses the data behind the reader.  More
+    /// than one value can be behind the reader in which case the parser can
+    /// be invoked multiple times.  In other words: the stream does not have
+    /// to be terminated.
+    pub fn new() -> Parser {
+        Parser {
+            decoder: Decoder::new(),
+            max_response_bytes: None,
+        }
+    }
+
+    // public api
+
+    /// Parses synchronously into a single value from the reader.
+    pub fn parse_value<T: Read>(&mut self, mut reader: T) -> RedisResult<Value> {
+        if let Some(limit) = self.max_response_bytes {
+            let exceeded = std::rc::Rc::new(std::cell::Cell::new(false));
+            let mut reader = ResponseLimitReader::new(&mut reader, limit, exceeded.clone());
+            let mut decoder = &mut self.decoder;
+            let result = combine::decode!(decoder, reader, value(None), |input, _| {
+                combine::stream::easy::Stream::from(input)
+            });
+            if exceeded.get() {
+                return Err(response_too_large());
+            }
+            return match result {
+                Err(err) => Err(to_redis_err!(err, decoder)),
+                Ok(result) => Ok(result),
+            };
+        }
+        let mut decoder = &mut self.decoder;
+        let result = combine::decode!(decoder, reader, value(None), |input, _| {
+            combine::stream::easy::Stream::from(input)
+        });
+        match result {
+            Err(err) => Err(to_redis_err!(err, decoder)),
+            Ok(result) => Ok(result),
+        }
+    }
+
+    /// Sets a maximum number of bytes accepted for each response frame.
+    pub fn set_max_response_bytes(mut self, max_response_bytes: Option<usize>) -> Self {
+        self.max_response_bytes = max_response_bytes;
+        self
+    }
+}
+
+fn response_too_large() -> RedisError {
+    RedisError::from((ErrorKind::ResponseTooLarge, "response frame too large"))
+}
+
+#[cfg(feature = "aio")]
+#[derive(Default)]
+struct FramePreflight {
+    frame_bytes: usize,
+    line: Vec<u8>,
+    marker: Option<u8>,
+    bulk_remaining: usize,
+    aggregate_remaining: Vec<usize>,
+    #[cfg(test)]
+    scanned_bytes: usize,
+}
+
+#[cfg(feature = "aio")]
+impl FramePreflight {
+    fn scan(&mut self, bytes: &[u8], limit: usize) -> Result<(usize, bool), ()> {
+        let mut cursor = 0;
+        let mut frame_complete = false;
+        while cursor < bytes.len() {
+            if self.bulk_remaining > 0 {
+                let count = self.bulk_remaining.min(bytes.len() - cursor);
+                self.account_bytes(count, limit)?;
+                self.bulk_remaining -= count;
+                #[cfg(test)]
+                {
+                    self.scanned_bytes += count;
+                }
+                cursor += count;
+                if self.bulk_remaining == 0 {
+                    frame_complete = self.complete_value();
+                    if frame_complete { break; }
+                }
+                continue;
+            }
+
+            self.account_bytes(1, limit)?;
+            let byte = bytes[cursor];
+            cursor += 1;
+            #[cfg(test)]
+            {
+                self.scanned_bytes += 1;
+            }
+            if let Some(marker) = self.marker {
+                self.line.push(byte);
+                if byte == b'\n' {
+                    let declaration = std::str::from_utf8(
+                        &self.line[..self.line.len().saturating_sub(2)],
+                    )
+                    .ok()
+                    .and_then(|value| value.parse::<i64>().ok());
+                    self.line.clear();
+                    self.marker = None;
+                    match marker {
+                        b'$' | b'!' | b'=' => {
+                            if let Some(length) = declaration.and_then(|n| usize::try_from(n).ok()) {
+                                let remaining = length.checked_add(2).ok_or(())?;
+                                if self.frame_bytes.checked_add(remaining).ok_or(())? > limit {
+                                    return Err(());
+                                }
+                                self.bulk_remaining = remaining;
+                            } else {
+                                frame_complete = self.complete_value();
+                            }
+                        }
+                        b'*' | b'%' | b'~' | b'|' | b'>' => {
+                            let children = declaration.map(|count| match marker {
+                                b'*' | b'~' | b'>' => usize::try_from(count).ok(),
+                                b'%' => usize::try_from(count).ok()?.checked_mul(2),
+                                b'|' => usize::try_from(count).ok()?.checked_mul(2)?.checked_add(1),
+                                _ => None,
+                            }).flatten();
+                            if let Some(children) = children {
+                                let minimum = children.checked_mul(3).ok_or(())?;
+                                if self.frame_bytes.checked_add(minimum).ok_or(())? > limit {
+                                    return Err(());
+                                }
+                                if children == 0 {
+                                    frame_complete = self.complete_value();
+                                } else {
+                                    if self.aggregate_remaining.len() >= MAX_RECURSE_DEPTH {
+                                        return Err(());
+                                    }
+                                    self.aggregate_remaining.push(children);
+                                }
+                            } else {
+                                frame_complete = self.complete_value();
+                            }
+                        }
+                        _ => frame_complete = self.complete_value(),
+                    }
+                    if frame_complete { break; }
+                }
+            } else if byte == b'\r' || byte == b'\n' {
+                return Err(());
+            } else {
+                self.marker = Some(byte);
+            }
+        }
+        Ok((cursor, frame_complete))
+    }
+
+    fn account_bytes(&mut self, count: usize, limit: usize) -> Result<(), ()> {
+        self.frame_bytes = self.frame_bytes.checked_add(count).ok_or(())?;
+        if self.frame_bytes > limit { Err(()) } else { Ok(()) }
+    }
+
+    fn complete_value(&mut self) -> bool {
+        loop {
+            let Some(remaining) = self.aggregate_remaining.last_mut() else {
+                self.frame_bytes = 0;
+                self.line.clear();
+                self.marker = None;
+                self.bulk_remaining = 0;
+                return true;
+            };
+            *remaining -= 1;
+            if *remaining > 0 { return false; }
+            self.aggregate_remaining.pop();
+        }
+    }
+}
+
+#[cfg(feature = "aio")]
+#[cfg(test)]
+fn response_frame_exceeds(bytes: &[u8], limit: usize) -> bool {
+    let mut preflight = FramePreflight::default();
+    matches!(preflight.scan(bytes, limit), Err(()))
+}
+
+struct ResponseLimitReader<R> {
+    inner: R,
+    limit: usize,
+    read: usize,
+    line: Vec<u8>,
+    bulk_remaining: usize,
+    exceeded: std::rc::Rc<std::cell::Cell<bool>>,
+}
+
+impl<R> ResponseLimitReader<R> {
+    fn new(inner: R, limit: usize, exceeded: std::rc::Rc<std::cell::Cell<bool>>) -> Self {
+        Self { inner, limit, read: 0, line: Vec::new(), bulk_remaining: 0, exceeded }
+    }
+}
+
+impl<R: Read> Read for ResponseLimitReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if buf.is_empty() { return Ok(0); }
+        if self.read >= self.limit {
+            self.exceeded.set(true);
+            return Err(io::Error::other("redis-response-too-large"));
+        }
+        if self.bulk_remaining > 0 {
+            let allowed = buf.len().min(self.bulk_remaining).min(self.limit - self.read);
+            let count = self.inner.read(&mut buf[..allowed])?;
+            self.read += count;
+            self.bulk_remaining -= count;
+            return Ok(count);
+        }
+        let count = self.inner.read(&mut buf[..1])?;
+        if count == 0 { return Ok(0); }
+        self.read += count;
+        self.line.push(buf[0]);
+        if buf[0] == b'\n' {
+            let marker = self.line.first().copied();
+            let declaration = std::str::from_utf8(&self.line[1..self.line.len().saturating_sub(2)])
+                .ok().and_then(|value| value.parse::<i64>().ok());
+            let bulk_len = matches!(marker, Some(b'$' | b'!' | b'='))
+                .then(|| declaration.and_then(|length| usize::try_from(length).ok()))
+                .flatten();
+            let aggregate_exceeds = match marker {
+                Some(b'*' | b'~' | b'>') => declaration.filter(|count| *count >= 0)
+                    .map(|count| usize::try_from(count).ok().and_then(|count| count.checked_mul(3))),
+                Some(b'%') => declaration.filter(|count| *count >= 0)
+                    .map(|count| usize::try_from(count).ok().and_then(|count| count.checked_mul(6))),
+                Some(b'|') => declaration.filter(|count| *count >= 0)
+                    .map(|count| usize::try_from(count).ok()
+                        .and_then(|count| count.checked_mul(6))
+                        .and_then(|count| count.checked_add(3))),
+                _ => None,
+            }
+            .is_some_and(|minimum| minimum.is_none_or(|minimum| {
+                self.read.saturating_add(minimum) > self.limit
+            }));
+            let bulk_exceeds = bulk_len
+                .is_some_and(|length| self.read.saturating_add(length).saturating_add(2) > self.limit);
+            self.line.clear();
+            if bulk_exceeds || aggregate_exceeds {
+                self.exceeded.set(true);
+                return Err(io::Error::other("redis-response-too-large"));
+            }
+            if let Some(length) = bulk_len {
+                self.bulk_remaining = length.saturating_add(2);
+            }
+        }
+        Ok(count)
+    }
+}
+
+/// Parses bytes into a redis value.
+///
+/// This is the most straightforward way to parse something into a low
+/// level redis value instead of having to use a whole parser.
+pub fn parse_redis_value(bytes: &[u8]) -> RedisResult<Value> {
+    let mut parser = Parser::new();
+    parser.parse_value(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[cfg(feature = "aio")]
+    use tokio_util::codec::Decoder;
+
+    struct CountingReader {
+        inner: std::io::Cursor<Vec<u8>>,
+        calls: usize,
+        multi_byte_calls: usize,
+        largest_request: usize,
+    }
+
+    impl Read for CountingReader {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            self.calls += 1;
+            self.largest_request = self.largest_request.max(buffer.len());
+            self.multi_byte_calls += usize::from(buffer.len() > 1);
+            self.inner.read(buffer)
+        }
+    }
+
+    #[test]
+    fn parser_rejects_declared_bulk_larger_than_frame_budget() {
+        let mut parser = Parser::new().set_max_response_bytes(Some(1_024));
+        let mut reader = std::io::Cursor::new(b"$999999999\r\n".as_slice());
+
+        let error = parser.parse_value(&mut reader).unwrap_err();
+
+        assert!(error.is_response_too_large());
+        assert_eq!(reader.position(), 12);
+    }
+
+    #[test]
+    fn parser_rejects_oversized_aggregate_before_allocating_elements() {
+        for response in [
+            &b"*999999999\r\n"[..],
+            &b"%999999999\r\n"[..],
+            &b"~999999999\r\n"[..],
+            &b"|999999999\r\n"[..],
+            &b">999999999\r\n"[..],
+        ] {
+            let mut parser = Parser::new().set_max_response_bytes(Some(1_024));
+            let error = parser.parse_value(response).unwrap_err();
+            assert!(error.is_response_too_large(), "{response:?}: {error}");
+        }
+    }
+
+    #[test]
+    fn parser_rejects_aggregate_count_overflow_before_allocating_elements() {
+        for response in [
+            &b"*9223372036854775807\r\n"[..],
+            &b"%9223372036854775807\r\n"[..],
+            &b"~9223372036854775807\r\n"[..],
+            &b"|9223372036854775807\r\n"[..],
+            &b">9223372036854775807\r\n"[..],
+        ] {
+            let mut parser = Parser::new().set_max_response_bytes(Some(usize::MAX));
+            let mut reader = std::io::Cursor::new(response);
+
+            let error = parser.parse_value(&mut reader).unwrap_err();
+
+            assert!(error.is_response_too_large(), "{response:?}: {error}");
+            assert_eq!(reader.position(), response.len() as u64);
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "aio")]
+    fn parser_preflights_all_aggregate_count_markers() {
+        for response in [
+            &b"*999999999\r\n"[..],
+            &b"%999999999\r\n"[..],
+            &b"~999999999\r\n"[..],
+            &b"|999999999\r\n"[..],
+            &b">999999999\r\n"[..],
+        ] {
+            assert!(response_frame_exceeds(response, 1_024), "{response:?}");
+        }
+        assert!(response_frame_exceeds(b"%9223372036854775807\r\n", usize::MAX));
+    }
+
+    #[test]
+    fn parser_rejects_invalid_negative_map_and_blob_lengths_without_panicking() {
+        for response in [b"%-1\r\n".as_slice(), b"|-1\r\n", b"!-1\r\n", b"=-1\r\n"] {
+            let result = std::panic::catch_unwind(|| parse_redis_value(response));
+            assert!(result.is_ok(), "parser panicked for {response:?}");
+            assert!(result.unwrap().is_err(), "invalid frame was accepted: {response:?}");
+        }
+    }
+
+    #[test]
+    fn parser_accepts_exact_frame_budget_and_resets_for_next_frame() {
+        let mut response = b"$1015\r\n".to_vec();
+        response.extend(std::iter::repeat_n(b'x', 1_015));
+        response.extend_from_slice(b"\r\n+OK\r\n");
+        let mut reader = std::io::Cursor::new(response);
+        let mut parser = Parser::new().set_max_response_bytes(Some(1_024));
+
+        let value = parser.parse_value(&mut reader).expect("frame at budget is accepted");
+        assert_eq!(value, Value::BulkString(vec![b'x'; 1_015]));
+        assert_eq!(parser.parse_value(&mut reader).expect("next frame starts fresh"), Value::Okay);
+    }
+
+    #[test]
+    fn response_limit_reader_batches_bulk_payload_reads() {
+        let mut response = b"$32768\r\n".to_vec();
+        response.extend(std::iter::repeat_n(b'x', 32_768));
+        response.extend_from_slice(b"\r\n");
+        let source = CountingReader {
+            inner: std::io::Cursor::new(response),
+            calls: 0,
+            multi_byte_calls: 0,
+            largest_request: 0,
+        };
+        let exceeded = std::rc::Rc::new(std::cell::Cell::new(false));
+        let mut reader = ResponseLimitReader::new(source, 40_000, exceeded);
+        let mut buffer = [0; 8_192];
+        while reader.read(&mut buffer).expect("bounded read succeeds") > 0 {}
+
+        let source = reader.inner;
+        assert!(source.multi_byte_calls >= 4);
+        assert!(source.calls <= 15, "unexpected read count: {}", source.calls);
+        assert!(source.largest_request <= 8_192);
+    }
+
+    #[test]
+    fn parser_does_not_treat_bulk_payload_as_an_aggregate_header() {
+        let payload = b"*999999999\r\n";
+        let mut response = format!("${}\r\n", payload.len()).into_bytes();
+        response.extend_from_slice(payload);
+        response.extend_from_slice(b"\r\n");
+        let mut parser = Parser::new().set_max_response_bytes(Some(1_024));
+
+        assert_eq!(parser.parse_value(response.as_slice()).unwrap(), Value::BulkString(payload.to_vec()));
+    }
+
+    #[cfg(feature = "aio")]
+    #[test]
+    fn value_codec_rejects_oversized_declared_bulk_across_chunks() {
+        let mut codec = ValueCodec::with_max_response_bytes(Some(1_024));
+        let mut bytes = bytes::BytesMut::new();
+
+        for chunk in b"$999999999\r\n".chunks(3) {
+            bytes.extend_from_slice(chunk);
+            let result: RedisResult<Option<Value>> = codec.decode(&mut bytes);
+            if let Err(error) = result {
+                assert!(error.is_response_too_large());
+                return;
+            }
+            assert!(bytes.len() <= 1_024 + 8 * 1_024);
+        }
+        panic!("oversized bulk declaration was not rejected");
+    }
+
+    #[cfg(feature = "aio")]
+    #[test]
+    fn value_codec_rejects_oversized_aggregate_before_allocating_elements() {
+        for response in [
+            &b"*999999999\r\n"[..],
+            &b"%999999999\r\n"[..],
+            &b"~999999999\r\n"[..],
+            &b"|999999999\r\n"[..],
+            &b">999999999\r\n"[..],
+        ] {
+            let mut codec = ValueCodec::with_max_response_bytes(Some(1_024));
+            let mut bytes = bytes::BytesMut::new();
+            let mut rejected = false;
+            for chunk in response.chunks(2) {
+                bytes.extend_from_slice(chunk);
+                let result: RedisResult<Option<Value>> = codec.decode(&mut bytes);
+                if let Err(error) = result {
+                    assert!(error.is_response_too_large(), "{response:?}: {error}");
+                    rejected = true;
+                    break;
+                }
+            }
+            assert!(rejected, "{response:?} was not rejected");
+        }
+    }
+
+    #[cfg(feature = "aio")]
+    #[test]
+    fn value_codec_does_not_reject_a_later_frame_with_the_current_frame() {
+        let mut codec = ValueCodec::with_max_response_bytes(Some(1_024));
+        let mut bytes = bytes::BytesMut::from(&b"+OK\r\n*999999999\r\n"[..]);
+
+        assert_eq!(codec.decode(&mut bytes).unwrap(), Some(Value::Okay));
+        let error = codec.decode(&mut bytes).unwrap_err();
+        assert!(error.is_response_too_large());
+    }
+
+    #[cfg(feature = "aio")]
+    #[test]
+    fn value_codec_does_not_treat_bulk_payload_as_an_aggregate_header() {
+        let payload = b"*999999999\r\n";
+        let mut response = format!("${}\r\n", payload.len()).into_bytes();
+        response.extend_from_slice(payload);
+        response.extend_from_slice(b"\r\n");
+        let mut codec = ValueCodec::with_max_response_bytes(Some(1_024));
+        let mut bytes = bytes::BytesMut::from(response.as_slice());
+
+        assert_eq!(codec.decode(&mut bytes).unwrap(), Some(Value::BulkString(payload.to_vec())));
+    }
+
+    #[cfg(feature = "aio")]
+    #[test]
+    fn value_codec_scans_chunked_frame_bytes_once() {
+        let payload = vec![b'x'; 1024 * 1024];
+        let mut response = format!("${}\r\n", payload.len()).into_bytes();
+        response.extend_from_slice(&payload);
+        response.extend_from_slice(b"\r\n");
+        let expected_scanned = response.len();
+        let mut codec = ValueCodec::with_max_response_bytes(Some(expected_scanned));
+        let mut bytes = bytes::BytesMut::new();
+        let mut decoded = None;
+
+        for chunk in response.chunks(4 * 1_024) {
+            bytes.extend_from_slice(chunk);
+            let result = codec.decode(&mut bytes).expect("frame is within the limit");
+            if let Some(value) = result {
+                decoded = Some(value);
+                break;
+            }
+        }
+
+        assert_eq!(decoded, Some(Value::BulkString(payload)));
+        assert_eq!(codec.scanned_bytes(), expected_scanned);
+    }
+
+    #[cfg(feature = "aio")]
+    #[test]
+    fn decode_eof_returns_none_at_eof() {
+        use tokio_util::codec::Decoder;
+        let mut codec = ValueCodec::default();
+
+        let mut bytes = bytes::BytesMut::from(&b"+GET 123\r\n"[..]);
+        assert_eq!(
+            codec.decode_eof(&mut bytes),
+            Ok(Some(parse_redis_value(b"+GET 123\r\n").unwrap()))
+        );
+        assert_eq!(codec.decode_eof(&mut bytes), Ok(None));
+        assert_eq!(codec.decode_eof(&mut bytes), Ok(None));
+    }
+
+    #[cfg(feature = "aio")]
+    #[test]
+    fn decode_eof_returns_error_inside_array_and_can_parse_more_inputs() {
+        use tokio_util::codec::Decoder;
+        let mut codec = ValueCodec::default();
+
+        let mut bytes =
+            bytes::BytesMut::from(b"*3\r\n+OK\r\n-LOADING server is loading\r\n+OK\r\n".as_slice());
+        let result = codec.decode_eof(&mut bytes).unwrap().unwrap();
+
+        assert_eq!(
+            result,
+            Value::Array(vec![
+                Value::Okay,
+                Value::ServerError(ServerError::KnownError {
+                    kind: ServerErrorKind::BusyLoadingError,
+                    detail: Some("server is loading".to_string())
+                }),
+                Value::Okay
+            ])
+        );
+
+        let mut bytes = bytes::BytesMut::from(b"+OK\r\n".as_slice());
+        let result = codec.decode_eof(&mut bytes).unwrap().unwrap();
+
+        assert_eq!(result, Value::Okay);
+    }
+
+    #[test]
+    fn parse_nested_error_and_handle_more_inputs() {
+        // from https://redis.io/docs/interact/transactions/ -
+        // "EXEC returned two-element bulk string reply where one is an OK code and the other an error reply. It's up to the client library to find a sensible way to provide the error to the user."
+
+        let bytes = b"*3\r\n+OK\r\n-LOADING server is loading\r\n+OK\r\n";
+        let result = parse_redis_value(bytes);
+
+        assert_eq!(
+            result.unwrap(),
+            Value::Array(vec![
+                Value::Okay,
+                Value::ServerError(ServerError::KnownError {
+                    kind: ServerErrorKind::BusyLoadingError,
+                    detail: Some("server is loading".to_string())
+                }),
+                Value::Okay
+            ])
+        );
+
+        let result = parse_redis_value(b"+OK\r\n").unwrap();
+
+        assert_eq!(result, Value::Okay);
+    }
+
+    #[test]
+    fn decode_resp3_double() {
+        let val = parse_redis_value(b",1.23\r\n").unwrap();
+        assert_eq!(val, Value::Double(1.23));
+        let val = parse_redis_value(b",nan\r\n").unwrap();
+        if let Value::Double(val) = val {
+            assert!(val.is_sign_positive());
+            assert!(val.is_nan());
+        } else {
+            panic!("expected double");
+        }
+        // -nan is supported prior to redis 7.2
+        let val = parse_redis_value(b",-nan\r\n").unwrap();
+        if let Value::Double(val) = val {
+            assert!(val.is_sign_negative());
+            assert!(val.is_nan());
+        } else {
+            panic!("expected double");
+        }
+        //Allow doubles in scientific E notation
+        let val = parse_redis_value(b",2.67923e+8\r\n").unwrap();
+        assert_eq!(val, Value::Double(267923000.0));
+        let val = parse_redis_value(b",2.67923E+8\r\n").unwrap();
+        assert_eq!(val, Value::Double(267923000.0));
+        let val = parse_redis_value(b",-2.67923E+8\r\n").unwrap();
+        assert_eq!(val, Value::Double(-267923000.0));
+        let val = parse_redis_value(b",2.1E-2\r\n").unwrap();
+        assert_eq!(val, Value::Double(0.021));
+
+        let val = parse_redis_value(b",-inf\r\n").unwrap();
+        assert_eq!(val, Value::Double(-f64::INFINITY));
+        let val = parse_redis_value(b",inf\r\n").unwrap();
+        assert_eq!(val, Value::Double(f64::INFINITY));
+    }
+
+    #[test]
+    fn decode_resp3_map() {
+        let val = parse_redis_value(b"%2\r\n+first\r\n:1\r\n+second\r\n:2\r\n").unwrap();
+        let mut v = val.as_map_iter().unwrap();
+        assert_eq!(
+            (&Value::SimpleString("first".to_string()), &Value::Int(1)),
+            v.next().unwrap()
+        );
+        assert_eq!(
+            (&Value::SimpleString("second".to_string()), &Value::Int(2)),
+            v.next().unwrap()
+        );
+    }
+
+    #[test]
+    fn decode_resp3_boolean() {
+        let val = parse_redis_value(b"#t\r\n").unwrap();
+        assert_eq!(val, Value::Boolean(true));
+        let val = parse_redis_value(b"#f\r\n").unwrap();
+        assert_eq!(val, Value::Boolean(false));
+        let val = parse_redis_value(b"#x\r\n");
+        assert!(val.is_err());
+        let val = parse_redis_value(b"#\r\n");
+        assert!(val.is_err());
+    }
+
+    #[test]
+    fn decode_resp3_blob_error() {
+        let val = parse_redis_value(b"!21\r\nSYNTAX invalid syntax\r\n");
+        assert_eq!(
+            val.unwrap(),
+            Value::ServerError(ServerError::ExtensionError {
+                code: "SYNTAX".to_string(),
+                detail: Some("invalid syntax".to_string())
+            })
+        )
+    }
+
+    #[test]
+    fn decode_resp3_big_number() {
+        let val = parse_redis_value(b"(3492890328409238509324850943850943825024385\r\n").unwrap();
+        assert_eq!(
+            val,
+            Value::BigNumber(
+                BigInt::parse_bytes(b"3492890328409238509324850943850943825024385", 10).unwrap()
+            )
+        );
+    }
+
+    #[test]
+    fn decode_resp3_set() {
+        let val = parse_redis_value(b"~5\r\n+orange\r\n+apple\r\n#t\r\n:100\r\n:999\r\n").unwrap();
+        let v = val.as_sequence().unwrap();
+        assert_eq!(Value::SimpleString("orange".to_string()), v[0]);
+        assert_eq!(Value::SimpleString("apple".to_string()), v[1]);
+        assert_eq!(Value::Boolean(true), v[2]);
+        assert_eq!(Value::Int(100), v[3]);
+        assert_eq!(Value::Int(999), v[4]);
+    }
+
+    #[test]
+    fn decode_resp3_push() {
+        let val = parse_redis_value(b">3\r\n+message\r\n+somechannel\r\n+this is the message\r\n")
+            .unwrap();
+        if let Value::Push { ref kind, ref data } = val {
+            assert_eq!(&PushKind::Message, kind);
+            assert_eq!(Value::SimpleString("somechannel".to_string()), data[0]);
+            assert_eq!(
+                Value::SimpleString("this is the message".to_string()),
+                data[1]
+            );
+        } else {
+            panic!("Expected Value::Push")
+        }
+    }
+
+    #[test]
+    fn test_max_recursion_depth_set_and_array() {
+        for test_byte in ["*", "~"] {
+            let initial = format!("{test_byte}1\r\n").as_bytes().to_vec();
+            let end = format!("{test_byte}0\r\n").as_bytes().to_vec();
+
+            let mut ba = initial.repeat(MAX_RECURSE_DEPTH - 1).to_vec();
+            ba.extend(end.clone());
+            match parse_redis_value(&ba) {
+                Ok(Value::Array(a)) => assert_eq!(a.len(), 1),
+                Ok(Value::Set(s)) => assert_eq!(s.len(), 1),
+                _ => panic!("Expected valid array or set"),
+            }
+
+            let mut ba = initial.repeat(MAX_RECURSE_DEPTH).to_vec();
+            ba.extend(end);
+            match parse_redis_value(&ba) {
+                Ok(_) => panic!("Expected ParseError"),
+                Err(e) => assert!(matches!(e.kind(), ErrorKind::ParseError)),
+            }
+        }
+    }
+
+    #[test]
+    fn test_max_recursion_depth_map() {
+        let initial = b"%1\r\n+a\r\n";
+        let end = b"%0\r\n";
+
+        let mut ba = initial.repeat(MAX_RECURSE_DEPTH - 1).to_vec();
+        ba.extend(*end);
+        match parse_redis_value(&ba) {
+            Ok(Value::Map(m)) => assert_eq!(m.len(), 1),
+            Ok(Value::Set(s)) => assert_eq!(s.len(), 1),
+            _ => panic!("Expected valid array or set"),
+        }
+
+        let mut ba = initial.repeat(MAX_RECURSE_DEPTH).to_vec();
+        ba.extend(end);
+        match parse_redis_value(&ba) {
+            Ok(_) => panic!("Expected ParseError"),
+            Err(e) => assert!(matches!(e.kind(), ErrorKind::ParseError)),
+        }
+    }
+}

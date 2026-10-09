@@ -13,6 +13,7 @@ use crate::stream_protocol::parse_auto_claim;
 use crate::stream_protocol::parse_pending_entries;
 use crate::stream_protocol::parse_range;
 use crate::stream_protocol::parse_read_group;
+use crate::stream_protocol::trusted_attempt;
 
 #[test]
 fn test_parse_auto_claim_moves_wire_buffer_without_clone() {
@@ -131,7 +132,7 @@ fn test_parse_auto_claim_preserves_redis_6_2_nil_tombstones() {
 }
 
 #[test]
-fn test_parse_pending_entries_returns_owner_and_idle_time() {
+fn test_parse_pending_entries_returns_delivery_count() {
     let value = Value::Array(vec![Value::Array(vec![
         Value::BulkString(b"1-0".to_vec()),
         Value::BulkString(b"worker-a".to_vec()),
@@ -140,8 +141,45 @@ fn test_parse_pending_entries_returns_owner_and_idle_time() {
     ])]);
     assert_eq!(
         parse_pending_entries(value).unwrap(),
-        vec![("1-0".into(), "worker-a".into(), 501)]
+        vec![crate::stream_protocol::PendingEntry {
+            id: "1-0".into(),
+            owner: "worker-a".into(),
+            idle_ms: 501,
+            times_delivered: 2,
+        }]
     );
+}
+
+#[test]
+fn test_trusted_attempt_requires_matching_id_owner_and_positive_count() {
+    let entry = crate::stream_protocol::PendingEntry {
+        id: "1-0".to_owned(),
+        owner: "worker-a".to_owned(),
+        idle_ms: 501,
+        times_delivered: 3,
+    };
+    assert_eq!(
+        trusted_attempt(&entry, "1-0", "worker-a").map(|value| value.get()),
+        Some(3)
+    );
+    assert_eq!(trusted_attempt(&entry, "2-0", "worker-a"), None);
+    assert_eq!(trusted_attempt(&entry, "1-0", "worker-b"), None);
+    let zero = entry_with_count("1-0", "worker-a", 501, 0);
+    assert_eq!(trusted_attempt(&zero, "1-0", "worker-a"), None);
+    let overflow = entry_with_count("1-0", "worker-a", 501, u64::from(u32::MAX) + 1);
+    assert_eq!(
+        trusted_attempt(&overflow, "1-0", "worker-a").map(|value| value.get()),
+        Some(u32::MAX)
+    );
+}
+
+fn entry_with_count(id: &str, owner: &str, idle_ms: u64, times_delivered: u64) -> crate::stream_protocol::PendingEntry {
+    crate::stream_protocol::PendingEntry {
+        id: id.to_owned(),
+        owner: owner.to_owned(),
+        idle_ms,
+        times_delivered,
+    }
 }
 
 #[test]
@@ -164,4 +202,15 @@ fn test_parse_pending_entries_rejects_invalid_shapes() {
         ])]))
         .is_err()
     );
+    for invalid_count in [Value::Int(-1), Value::SimpleString("bad".into())] {
+        assert!(
+            parse_pending_entries(Value::Array(vec![Value::Array(vec![
+                Value::BulkString(b"1-0".to_vec()),
+                Value::BulkString(b"worker".to_vec()),
+                Value::Int(1),
+                invalid_count,
+            ])]))
+            .is_err()
+        );
+    }
 }

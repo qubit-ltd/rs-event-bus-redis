@@ -61,7 +61,9 @@ use crate::internal::decode_entry as decode_wire_entry;
 use crate::internal::read_group_command;
 use crate::poison::quarantine;
 use crate::stream_protocol::parse_auto_claim;
+use crate::stream_protocol::parse_pending_entries;
 use crate::stream_protocol::parse_read_group;
+use crate::stream_protocol::trusted_attempt;
 
 /// One blocking consumer owned by a facade subscription.
 pub(crate) struct Subscription {
@@ -180,6 +182,7 @@ impl EventSubscriptionSpi for Subscription {
                 .get_dedicated_connection()
                 .map_err(|error| spi_error("receive", Some(&self.topic), error))?,
         };
+        let mut connection_reusable = true;
         let result: Result<ReceiveOutcome, SpiError> = (|| {
             let mut driver = ReceiveDriver::new(
                 timeout,
@@ -201,7 +204,14 @@ impl EventSubscriptionSpi for Subscription {
                         .filter(|entry| recovery.can_deliver(&entry.id))
                 };
                 if let Some(entry) = deferred
-                    && let Some(outcome) = read_entry(self, &mut connection, entry, &mut driver)?
+                    && let Some(outcome) = read_entry(
+                        self,
+                        &mut connection,
+                        entry,
+                        true,
+                        &mut connection_reusable,
+                        &mut driver,
+                    )?
                 {
                     return Ok(outcome);
                 }
@@ -271,7 +281,16 @@ impl EventSubscriptionSpi for Subscription {
                         if let Some(entry) = claimed {
                             let available = lock_state(&self.recovery, &self.topic, "receive", "recovery lock")?
                                 .can_deliver(&entry.id);
-                            if available && let Some(outcome) = read_entry(self, &mut connection, entry, &mut driver)? {
+                            if available
+                                && let Some(outcome) = read_entry(
+                                    self,
+                                    &mut connection,
+                                    entry,
+                                    true,
+                                    &mut connection_reusable,
+                                    &mut driver,
+                                )?
+                            {
                                 return Ok(outcome);
                             }
                         }
@@ -311,7 +330,16 @@ impl EventSubscriptionSpi for Subscription {
                             .set_pending_cursor(id.clone());
                         let available =
                             lock_state(&self.recovery, &self.topic, "receive", "recovery lock")?.can_deliver(&id);
-                        if available && let Some(outcome) = read_entry(self, &mut connection, entry, &mut driver)? {
+                        if available
+                            && let Some(outcome) = read_entry(
+                                self,
+                                &mut connection,
+                                entry,
+                                true,
+                                &mut connection_reusable,
+                                &mut driver,
+                            )?
+                        {
                             return Ok(outcome);
                         }
                     }
@@ -347,7 +375,14 @@ impl EventSubscriptionSpi for Subscription {
                             ReceiveReply::NewEmpty
                         });
                         if let Some(entry) = entry
-                            && let Some(outcome) = read_entry(self, &mut connection, entry, &mut driver)?
+                            && let Some(outcome) = read_entry(
+                                self,
+                                &mut connection,
+                                entry,
+                                false,
+                                &mut connection_reusable,
+                                &mut driver,
+                            )?
                         {
                             return Ok(match outcome {
                                 ReceiveOutcome::Message(message) => {
@@ -361,9 +396,16 @@ impl EventSubscriptionSpi for Subscription {
                 }
             }
         })();
-        if result.is_ok() {
+        if result.is_ok() && connection_reusable {
             recovery_guard.disarm();
             self.receive_connection = Some(connection);
+        }
+        if result
+            .as_ref()
+            .is_err_and(|error| error.kind() == "receive_response_too_large")
+        {
+            self.closed = true;
+            self.receive_connection.take();
         }
         if let Some(diagnostics) = self.client.diagnostics() {
             match &result {
@@ -531,13 +573,15 @@ fn read_entry(
     subscription: &Subscription,
     connection: &mut PooledConnection,
     entry: StreamId,
+    recovered: bool,
+    connection_reusable: &mut bool,
     driver: &mut ReceiveDriver,
 ) -> Result<Option<ReceiveOutcome>, SpiError> {
     let id = entry.id.clone();
     match decode_entry(subscription, entry) {
         Ok(message) => {
             let marked = lock_state(&subscription.recovery, &subscription.topic, "receive", "recovery lock")?
-                .mark_delivered(id, subscription.max_unsettled);
+                .mark_delivered(id.clone(), subscription.max_unsettled);
             if !marked {
                 return Err(spi_error(
                     "receive",
@@ -545,6 +589,47 @@ fn read_entry(
                     RedisProviderError::Operation("active delivery limit"),
                 ));
             }
+            let provider_attempt = if recovered {
+                let timeout = subscription.client.command_timeout();
+                connection
+                    .set_read_timeout(Some(timeout))
+                    .map_err(|error| classified_spi_error("receive", Some(&subscription.topic), &error))?;
+                connection
+                    .set_write_timeout(Some(timeout))
+                    .map_err(|error| classified_spi_error("receive", Some(&subscription.topic), &error))?;
+                let pending: Result<Value, _> = cmd("XPENDING")
+                    .arg(&subscription.key)
+                    .arg(&subscription.group)
+                    .arg(&id)
+                    .arg(&id)
+                    .arg(1)
+                    .query_receive(connection);
+                match pending {
+                    Ok(value) => match parse_pending_entries(value) {
+                        Ok(rows) => (rows.len() == 1)
+                            .then(|| rows.into_iter().next())
+                            .flatten()
+                            .and_then(|row| trusted_attempt(&row, &id, &subscription.consumer)),
+                        Err(_) => {
+                            connection.discard();
+                            *connection_reusable = false;
+                            None
+                        }
+                    },
+                    Err(_) => {
+                        connection.discard();
+                        *connection_reusable = false;
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            let message = if let Some(attempt) = provider_attempt {
+                message.with_provider_attempt(attempt)
+            } else {
+                message
+            };
             Ok(Some(ReceiveOutcome::Message(message)))
         }
         Err(DecodeFailure::LimitExceeded) => Err(spi_error(

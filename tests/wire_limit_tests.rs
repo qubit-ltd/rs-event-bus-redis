@@ -122,6 +122,8 @@ mod durable {
     use super::WireFields;
     use super::message;
     use crate::support::redis_server::RedisServer;
+    use crate::support::scripted_redis::ScriptedRedis;
+    use crate::support::scripted_redis::Step;
 
     /// Constructs direct SPI settings with one independently restricted
     /// component.
@@ -159,6 +161,102 @@ mod durable {
             ProviderOptions::new(),
             TypeId::of::<Vec<u8>>(),
         )
+    }
+
+    fn response_limited_bus(url: &str, namespace: &str) -> Arc<dyn EventBusSpi> {
+        let options: ProviderOptions = [
+            ("redis.url".into(), url.into()),
+            ("redis.namespace".into(), namespace.into()),
+            ("redis.max_wire_bytes".into(), "1024".into()),
+            ("redis.max_payload_bytes".into(), "1024".into()),
+            ("redis.claim_min_idle_ms".into(), "0".into()),
+            ("redis.command_timeout_ms".into(), "250".into()),
+        ]
+        .into();
+        RedisEventBusProvider
+            .create_configured(&EventBusConfig::default().with_provider_options(options))
+            .unwrap()
+    }
+
+    fn oversized_stream_response(stream: &str) -> Vec<u8> {
+        format!(
+            "*1\r\n*2\r\n${}\r\n{}\r\n*1\r\n*2\r\n$3\r\n1-0\r\n*2\r\n$4\r\nwire\r\n$999999999\r\n",
+            stream.len(),
+            stream
+        )
+        .into_bytes()
+    }
+
+    #[test]
+    fn scripted_oversized_receive_frame_stops_the_subscription() {
+        let namespace = "scripted-response-limit";
+        let stream = stream_key(namespace, "limits");
+        let server = ScriptedRedis::start(vec![
+            Step::reply("XGROUP", b"+OK\r\n"),
+            Step::reply("XAUTOCLAIM", b"*2\r\n$3\r\n0-0\r\n*0\r\n"),
+            Step::reply("XREADGROUP", b"*0\r\n"),
+            Step::reply("XREADGROUP", &oversized_stream_response(&stream)),
+        ])
+        .unwrap();
+        let spi = response_limited_bus(server.url(), namespace);
+        let mut receiver = spi.subscribe(request_at(80, StartPosition::New)).unwrap();
+        let error = match receiver.receive(Duration::from_secs(2)) {
+            Err(error) => error,
+            Ok(_) => panic!("oversized RESP frame must be rejected before timeout"),
+        };
+        assert_eq!(error.kind(), "receive_response_too_large");
+        assert_eq!(error.retryable(), Some(true));
+        assert!(matches!(receiver.receive(Duration::ZERO), Ok(ReceiveOutcome::Closed)));
+        assert_eq!(server.finish().len(), 4, "the failed receiver socket is never reused");
+    }
+
+    #[test]
+    fn real_oversized_receive_frame_keeps_record_pending_for_recovery() -> Result<(), Box<dyn std::error::Error>> {
+        let server = RedisServer::start()?;
+        let mut observer = redis::Client::open(server.url())?.get_connection()?;
+        let namespace = "real-response-limit";
+        let stream = stream_key(namespace, "limits");
+        redis::cmd("XADD")
+            .arg(&stream)
+            .arg("*")
+            .arg("wire")
+            .arg(vec![b'x'; 70_000])
+            .query::<String>(&mut observer)?;
+        let spi = response_limited_bus(server.url(), namespace);
+        let mut receiver = spi.subscribe(request(81))?;
+        let error = match receiver.receive(Duration::from_secs(2)) {
+            Err(error) => error,
+            Ok(_) => panic!("oversized Redis reply must stop this receiver"),
+        };
+        assert_eq!(error.kind(), "receive_response_too_large");
+        receiver.close()?;
+
+        let group = group_name(namespace, "limits", "worker", Some("group"));
+        let pending: Vec<redis::Value> = redis::cmd("XPENDING")
+            .arg(&stream)
+            .arg(&group)
+            .arg("-")
+            .arg("+")
+            .arg(10)
+            .query(&mut observer)?;
+        assert_eq!(pending.len(), 1, "the oversized entry remains in the PEL");
+
+        let mut reopened = spi.subscribe(request_at(82, StartPosition::New))?;
+        let second_error = match reopened.receive(Duration::from_secs(2)) {
+            Err(error) => error,
+            Ok(_) => panic!("new subscription must observe the still-pending oversized entry"),
+        };
+        assert_eq!(second_error.kind(), "receive_response_too_large");
+        let pending_after_reopen: Vec<redis::Value> = redis::cmd("XPENDING")
+            .arg(&stream)
+            .arg(&group)
+            .arg("-")
+            .arg("+")
+            .arg(10)
+            .query(&mut observer)?;
+        assert_eq!(pending_after_reopen.len(), 1);
+        reopened.close()?;
+        Ok(())
     }
 
     #[test]
@@ -543,5 +641,90 @@ mod durable {
             assert_eq!(commands[0][0], "XADD");
         }
         Ok(())
+    }
+}
+
+#[cfg(feature = "async")]
+mod async_response_limit {
+    use std::any::TypeId;
+    use std::time::Duration;
+
+    use futures_lite::future::block_on;
+    use qubit_event_bus::EventBusConfig;
+    use qubit_event_bus::model::ConsumerGroup;
+    use qubit_event_bus::model::ProviderOptions;
+    use qubit_event_bus::model::StartPosition;
+    use qubit_event_bus::model::SubscriberId;
+    use qubit_event_bus::model::SubscriptionDurability;
+    use qubit_event_bus::spi::ReceiveOutcome;
+    use qubit_event_bus::spi::SpiSubscriptionRequest;
+    use qubit_event_bus::spi::TopicAddress;
+    use qubit_event_bus_redis::r#async::AsyncRedisEventBusProvider;
+    use qubit_id::Id;
+    use qubit_spi::AsyncServiceProvider;
+
+    use crate::support::scripted_redis::ScriptedRedis;
+    use crate::support::scripted_redis::Step;
+
+    fn request() -> SpiSubscriptionRequest {
+        SpiSubscriptionRequest::new(
+            Id::new(90),
+            TopicAddress::new("limits").unwrap(),
+            SubscriberId::new("worker").unwrap(),
+            Some(ConsumerGroup::new("group").unwrap()),
+            SubscriptionDurability::Durable,
+            StartPosition::New,
+            ProviderOptions::new(),
+            TypeId::of::<Vec<u8>>(),
+        )
+    }
+
+    fn oversized_stream_response(stream: &str) -> Vec<u8> {
+        format!(
+            "*1\r\n*2\r\n${}\r\n{}\r\n*1\r\n*2\r\n$3\r\n1-0\r\n*2\r\n$4\r\nwire\r\n$999999999\r\n",
+            stream.len(),
+            stream
+        )
+        .into_bytes()
+    }
+
+    #[test]
+    fn scripted_oversized_async_receive_frame_stops_the_subscription() {
+        block_on(async {
+            let namespace = "scripted-async-response-limit";
+            let stream = format!("{namespace}:limits");
+            let server = ScriptedRedis::start(vec![
+                Step::reply("XGROUP", b"+OK\r\n"),
+                Step::reply("XAUTOCLAIM", b"*2\r\n$3\r\n0-0\r\n*0\r\n"),
+                Step::reply("XREADGROUP", b"*0\r\n"),
+                Step::reply("XREADGROUP", &oversized_stream_response(&stream)),
+            ])
+            .unwrap();
+            let options: ProviderOptions = [
+                ("redis.url".into(), server.url().into()),
+                ("redis.namespace".into(), namespace.into()),
+                ("redis.max_wire_bytes".into(), "1024".into()),
+                ("redis.max_payload_bytes".into(), "1024".into()),
+                ("redis.claim_min_idle_ms".into(), "0".into()),
+                ("redis.command_timeout_ms".into(), "250".into()),
+            ]
+            .into();
+            let spi = AsyncRedisEventBusProvider
+                .create_configured(&EventBusConfig::default().with_provider_options(options))
+                .await
+                .unwrap();
+            let mut receiver = spi.subscribe(request()).await.unwrap();
+            let error = match receiver.receive(Duration::from_secs(2)).await {
+                Err(error) => error,
+                Ok(_) => panic!("oversized RESP frame must be rejected before timeout"),
+            };
+            assert_eq!(error.kind(), "receive_response_too_large");
+            assert_eq!(error.retryable(), Some(true));
+            assert!(matches!(
+                receiver.receive(Duration::ZERO).await,
+                Ok(ReceiveOutcome::Closed)
+            ));
+            assert_eq!(server.finish().len(), 4, "the failed receiver socket is never reused");
+        });
     }
 }

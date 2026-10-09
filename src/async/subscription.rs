@@ -61,6 +61,7 @@ use crate::stream_protocol::parse_auto_claim;
 use crate::stream_protocol::parse_pending_entries;
 use crate::stream_protocol::parse_range;
 use crate::stream_protocol::parse_read_group;
+use crate::stream_protocol::trusted_attempt;
 
 /// Asynchronous receiver whose cancelled reads remain in Redis PEL.
 pub(crate) struct Subscription {
@@ -181,6 +182,7 @@ impl AsyncEventSubscriptionSpi for Subscription {
                     .await
                     .map_err(|error| spi_error("receive", &self.topic, error))?,
             };
+            let mut connection_reusable = true;
             let result: Result<ReceiveOutcome, SpiError> = async {
                 let mut driver = ReceiveDriver::new(
                     timeout,
@@ -201,7 +203,15 @@ impl AsyncEventSubscriptionSpi for Subscription {
                             .filter(|entry| recovery.can_deliver(&entry.id))
                     };
                     if let Some(entry) = deferred
-                        && let Some(outcome) = read_entry(self, &mut connection, entry, &mut driver).await?
+                        && let Some(outcome) = read_entry(
+                            self,
+                            &mut connection,
+                            entry,
+                            true,
+                            &mut connection_reusable,
+                            &mut driver,
+                        )
+                        .await?
                     {
                         return Ok(outcome);
                     }
@@ -263,7 +273,15 @@ impl AsyncEventSubscriptionSpi for Subscription {
                             if let Some(entry) = claim.claimed.into_iter().next()
                                 && lock_state(&self.recovery, &self.topic, "receive", "recovery lock")?
                                     .can_deliver(&entry.id)
-                                && let Some(outcome) = read_entry(self, &mut connection, entry, &mut driver).await?
+                                && let Some(outcome) = read_entry(
+                                    self,
+                                    &mut connection,
+                                    entry,
+                                    true,
+                                    &mut connection_reusable,
+                                    &mut driver,
+                                )
+                                .await?
                             {
                                 return Ok(outcome);
                             }
@@ -293,7 +311,15 @@ impl AsyncEventSubscriptionSpi for Subscription {
                                 lock_state(&self.recovery, &self.topic, "receive", "recovery lock")?
                                     .set_pending_cursor(id.clone());
                                 if lock_state(&self.recovery, &self.topic, "receive", "recovery lock")?.can_deliver(&id)
-                                    && let Some(outcome) = read_entry(self, &mut connection, entry, &mut driver).await?
+                                    && let Some(outcome) = read_entry(
+                                        self,
+                                        &mut connection,
+                                        entry,
+                                        true,
+                                        &mut connection_reusable,
+                                        &mut driver,
+                                    )
+                                    .await?
                                 {
                                     return Ok(outcome);
                                 }
@@ -335,7 +361,15 @@ impl AsyncEventSubscriptionSpi for Subscription {
                                 ReceiveReply::NewEmpty
                             });
                             if let Some(entry) = entry
-                                && let Some(outcome) = read_entry(self, &mut connection, entry, &mut driver).await?
+                                && let Some(outcome) = read_entry(
+                                    self,
+                                    &mut connection,
+                                    entry,
+                                    false,
+                                    &mut connection_reusable,
+                                    &mut driver,
+                                )
+                                .await?
                             {
                                 return Ok(match outcome {
                                     ReceiveOutcome::Message(message) => {
@@ -350,9 +384,16 @@ impl AsyncEventSubscriptionSpi for Subscription {
                 }
             }
             .await;
-            if result.is_ok() {
+            if result.is_ok() && connection_reusable {
                 recovery_guard.disarm();
                 self.receive_connection = Some(connection);
+            }
+            if result
+                .as_ref()
+                .is_err_and(|error| error.kind() == "receive_response_too_large")
+            {
+                self.closed = true;
+                self.receive_connection.take();
             }
             if let Some(diagnostics) = self.client.diagnostics() {
                 match &result {
@@ -543,8 +584,10 @@ async fn scan_missing_tombstones(
     })?;
     let pending_row_count = pending_rows.len();
     let mut scan_complete = true;
-    for (id, owner, idle_ms) in pending_rows {
-        if idle_ms < subscription.claim_min_idle_ms as u64 {
+    for pending_entry in pending_rows {
+        let id = pending_entry.id;
+        let owner = pending_entry.owner;
+        if pending_entry.idle_ms < subscription.claim_min_idle_ms as u64 {
             lock_state(&subscription.recovery, &subscription.topic, "receive", "recovery lock")?
                 .set_tombstone_cursor(id);
             continue;
@@ -638,6 +681,8 @@ async fn read_entry(
     subscription: &Subscription,
     connection: &mut MultiplexedConnection,
     entry: StreamId,
+    recovered: bool,
+    connection_reusable: &mut bool,
     driver: &mut ReceiveDriver,
 ) -> Result<Option<ReceiveOutcome>, SpiError> {
     let id = entry.id.clone();
@@ -707,6 +752,40 @@ async fn read_entry(
                 PoisonOutcome::OwnershipChanged => None,
             });
         }
+    };
+    let provider_attempt = if recovered {
+        connection.set_response_timeout(subscription.client.command_timeout());
+        let pending: Result<Value, _> = cmd("XPENDING")
+            .arg(&subscription.key)
+            .arg(&subscription.group)
+            .arg(&id)
+            .arg(&id)
+            .arg(1)
+            .query_receive(connection)
+            .await;
+        match pending {
+            Ok(value) => match parse_pending_entries(value) {
+                Ok(rows) => (rows.len() == 1)
+                    .then(|| rows.into_iter().next())
+                    .flatten()
+                    .and_then(|row| trusted_attempt(&row, &id, &subscription.consumer)),
+                Err(_) => {
+                    *connection_reusable = false;
+                    None
+                }
+            },
+            Err(_) => {
+                *connection_reusable = false;
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let message = if let Some(attempt) = provider_attempt {
+        message.with_provider_attempt(attempt)
+    } else {
+        message
     };
     let marked = lock_state(&subscription.recovery, &subscription.topic, "receive", "recovery lock")?
         .mark_delivered(id, subscription.max_unsettled);

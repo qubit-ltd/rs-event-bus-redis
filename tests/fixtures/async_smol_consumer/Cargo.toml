@@ -12,3 +12,7 @@ qubit-event-bus = { version = "0.20", path = "../../../../rs-event-bus", default
 qubit-spi = "0.13"
 qubit-id = { version = "0.7", default-features = false, features = ["uuid"] }
 futures-lite = "2"
+
+[patch.crates-io]
+redis = { path = "../../../third_party/redis-rs" }
+qubit-event-bus = { version = "0.20", path = "../../../../rs-event-bus" }

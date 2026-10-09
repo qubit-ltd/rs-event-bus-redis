@@ -71,8 +71,8 @@ fn create_bus_with_claim_min_idle(url: &str, claim_min_idle_ms: usize) -> Result
         .map_err(Into::into)
 }
 
-/// A new stream delivery has one known provider attempt, while recovery paths
-/// retain unknown attempt counts.
+/// A new stream delivery has one known provider attempt; pending and claimed
+/// recovery deliveries report the trusted Redis delivery count.
 #[test]
 fn test_receive_provider_attempt_distinguishes_new_pending_and_claimed() -> TestResult {
     let pending_server = RedisServer::start()?;
@@ -90,7 +90,7 @@ fn test_receive_provider_attempt_distinguishes_new_pending_and_claimed() -> Test
     let ReceiveOutcome::Message(pending_message) = pending_receiver.receive(Duration::from_secs(2))? else {
         return Err("pending message missing".into());
     };
-    assert_eq!(pending_message.provider_attempt(), None);
+    assert_eq!(pending_message.provider_attempt().map(|attempt| attempt.get()), Some(2));
 
     let claim_server = RedisServer::start()?;
     let claim_bus = create_bus(claim_server.url())?;
@@ -105,7 +105,7 @@ fn test_receive_provider_attempt_distinguishes_new_pending_and_claimed() -> Test
     let ReceiveOutcome::Message(claimed_message) = claiming_receiver.receive(Duration::from_secs(2))? else {
         return Err("claimed message missing".into());
     };
-    assert_eq!(claimed_message.provider_attempt(), None);
+    assert_eq!(claimed_message.provider_attempt().map(|attempt| attempt.get()), Some(2));
     Ok(())
 }
 /// Builds the settlement event for `id` without I/O; returns invalid event

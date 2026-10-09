@@ -7,6 +7,8 @@
 // =============================================================================
 //! Normalization of Redis Streams protocol replies across Redis versions.
 
+use std::num::NonZeroU32;
+
 use redis::ErrorKind;
 use redis::RedisError;
 use redis::Value;
@@ -187,6 +189,19 @@ fn parse_pair(value: Value) -> Result<(Value, Value), RedisError> {
     ))
 }
 
+/// One row returned by the detailed XPENDING command.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct PendingEntry {
+    /// Redis stream entry ID.
+    pub(crate) id: String,
+    /// Consumer that currently owns the pending delivery.
+    pub(crate) owner: String,
+    /// Idle duration reported by Redis, in milliseconds.
+    pub(crate) idle_ms: u64,
+    /// Number of times Redis delivered this entry.
+    pub(crate) times_delivered: u64,
+}
+
 /// Parses rows returned by the detailed XPENDING command.
 ///
 /// # Parameters
@@ -195,12 +210,13 @@ fn parse_pair(value: Value) -> Result<(Value, Value), RedisError> {
 ///
 /// # Returns
 ///
-/// Each row's stream ID, current consumer name, and idle time in milliseconds.
+/// Each row's ID, current owner, idle time in milliseconds, and delivery count.
 ///
 /// # Errors
 ///
-/// Returns a type error if any row is missing one of those fields.
-pub(crate) fn parse_pending_entries(value: Value) -> Result<Vec<(String, String, u64)>, RedisError> {
+/// Returns a type error if any row is missing one of those fields or contains
+/// a negative integer.
+pub(crate) fn parse_pending_entries(value: Value) -> Result<Vec<PendingEntry>, RedisError> {
     let Value::Array(rows) = value else {
         return Err(invalid_reply());
     };
@@ -216,9 +232,25 @@ pub(crate) fn parse_pending_entries(value: Value) -> Result<Vec<(String, String,
             let consumer = from_redis_value(&fields[1])?;
             let idle_ms: i64 = from_redis_value(&fields[2])?;
             let idle_ms = u64::try_from(idle_ms).map_err(|_| invalid_reply())?;
-            Ok((id, consumer, idle_ms))
+            let times_delivered: i64 = from_redis_value(&fields[3])?;
+            let times_delivered = u64::try_from(times_delivered).map_err(|_| invalid_reply())?;
+            Ok(PendingEntry {
+                id,
+                owner: consumer,
+                idle_ms,
+                times_delivered,
+            })
         })
         .collect()
+}
+
+/// Returns a delivery count only when the pending detail matches its expected
+/// ID and owner.
+pub(crate) fn trusted_attempt(entry: &PendingEntry, expected_id: &str, consumer: &str) -> Option<NonZeroU32> {
+    if entry.id != expected_id || entry.owner != consumer || entry.times_delivered == 0 {
+        return None;
+    }
+    NonZeroU32::new(entry.times_delivered.min(u64::from(u32::MAX)) as u32)
 }
 
 /// Creates a stable type-error category for an invalid internal stream

@@ -94,13 +94,13 @@ adapter 按实际操作阶段分类失败，不额外定义两状态 outcome enu
 
 wire 保持为 stream 的 `wire` 字段中的版本 1 JSON，保存 byte-array 编码 payload 和元数据。发布先检查原始 payload 长度，通过 Write sink 限制外层 wire 和中间 headers JSON，不先构造无限增长的最终 String。provider 编码借用调用方 event ID、content type、schema ID、ordering key 和 payload，不复制任意长度的元数据；只分配受限的 headers JSON 和完整 wire String。公开的 `WireFields::from_outbound` 便捷转换是另一条路径，不应用 provider 配置限额。接收借用 Redis wire 原始字节，先限额再解析 UTF-8/JSON，先读取小版本结构，再读取 typed v1 字段并检查解码 payload 长度；版本 1 还通过常量空间计数器扫描结构深度，包括被忽略的字段：最多接受 127 层容器，拒绝第 128 层；保留 Serde 递归限制。未知版本在 v1 字段形状和深度检查前返回。版本探针忽略字段的 scratch 可随嵌套增长，但已先执行 wire 字节限额；不能因此将整个 decoder 描述为常量空间。
 
-wire 限额优先：超限历史记录作为 poison，即使其版本本来未知。wire 限额内的未知 `u64` 整数版本报错并保留 PEL，其余畸形记录和超限 v1 payload 隔离、ACK 并返回 Gap。限制约束 provider 追加解析、复制分配，不保证 RESP 库接收任意 bulk 的硬内存上限或应用整体内存上限。
+wire 限额优先：超限历史记录作为 poison，即使其版本本来未知。wire 限额内的未知 `u64` 整数版本报错并保留 PEL，其余畸形记录和超限 v1 payload 隔离、ACK 并返回 Gap。此外，专用 receiver 连接会在构造 Redis 响应值前，把完整 RESP 响应帧限制为 `redis.max_wire_bytes + 65,536` 字节；普通连接沿用现有 parser 策略。这只是响应帧上限，不是进程 RSS 上限。receiver 响应超限时，provider 会关闭连接，以 `receive_response_too_large` 停止订阅，并保留可能产生的 PEL 记录。操作人员应先检查 `XPENDING`；由于 provider 未能可靠读取完整记录 ID 和 wire 数据，是否删除或隔离须人工决策。
 
 隔离 Lua 在检查源/目标类型及当前 PEL owner 后，于 Redis 内读取 wire、复制隔离记录，再执行 XACK。重复 `wire` 字段按最后一个值生效，与 Redis owned parser 一致。脚本执行中不能插入其他命令，但后续失败不会回滚已复制记录。回复丢失或部分失败可能产生重复隔离副本，须通过 `source_stream`、`group`、`source_id` 关联。OwnershipChanged 不确认其他 owner 的记录，源记录缺失不伪造 payload；tombstone 清除及隔离成功返回 Gap。隔离流保留由运维负责。
 
 ## 持久化、下游集成与迁移
 
-Accept/Reject 确认 Redis PEL，Retry 只释放本地占用并保留 PEL。`XREADGROUP >` 返回的新消息携带 `provider_attempt = Some(1)`；pending 和 `XAUTOCLAIM` 恢复路径因当前没有传递历史次数而保持未知（`None`）。关闭不 ACK，不删除消费组或 stream。可选 `XADD MAXLEN ~` 会丢失未读/pending 历史；未读记录被裁剪不一定返回 Gap。至少一次投递要求业务幂等，claim idle 阈值应匹配 handler 时长。
+Accept/Reject 确认 Redis PEL，Retry 只释放本地占用并保留 PEL。`XREADGROUP >` 返回的新消息携带 `provider_attempt = Some(1)`。每条准备交付的恢复记录会先额外执行一次精确 ID 的 `XPENDING` 明细查询；只有 Redis 返回的记录 ID 与本 consumer owner 均匹配时才报告投递次数。查询失败、空结果、格式错误或 owner/ID 不匹配时，次数保持未知（`None`）。因此每条恢复消息多一次 Redis 命令，新消息路径不增加查询。关闭不 ACK，不删除消费组或 stream。可选 `XADD MAXLEN ~` 会丢失未读/pending 历史；未读记录被裁剪不一定返回 Gap。至少一次投递要求业务幂等，claim idle 阈值应匹配 handler 时长。
 
 XADD Accepted 不证明 fsync、副本持久化或业务完成。新 observer 连接上的 WAIT 无法为 provider 连接写入提供 fencing；Sentinel 验收应观察实际复制的消费组游标、PEL ID 和 owner。旧 consumer 清理须先停实例、确认 PEL 清空并满足业务保留要求，不引入自动 DELCONSUMER。
 

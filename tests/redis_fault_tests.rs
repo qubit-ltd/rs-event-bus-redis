@@ -54,6 +54,7 @@ use support::scripted_redis::Step;
 const EMPTY_CLAIM: &[u8] = b"*2\r\n$3\r\n0-0\r\n*0\r\n";
 const TOMBSTONE_CLAIM: &[u8] = b"*2\r\n$3\r\n0-0\r\n*1\r\n*1\r\n$-1\r\n";
 const PENDING_ROW: &[u8] = b"*1\r\n*4\r\n$3\r\n1-0\r\n$5\r\nowner\r\n:100\r\n:1\r\n";
+const TRUSTED_PENDING_ROW: &[u8] = b"*1\r\n*4\r\n$13\r\nclaimed-event\r\n$6\r\nworker\r\n:100\r\n:2\r\n";
 const FAULT: &[u8] = b"-ERR password=fault-secret\r\n";
 
 struct ReceiveFault {
@@ -449,6 +450,7 @@ fn test_sync_gap_preserves_a_claimed_record_without_another_redis_read() {
         let server = ScriptedRedis::start(vec![
             Step::reply("XGROUP", b"+OK\r\n"),
             Step::reply("XAUTOCLAIM", &claimed_record(true)),
+            Step::reply("XPENDING", TRUSTED_PENDING_ROW),
         ])
         .expect("start RESP endpoint");
         let bus = sync_bus(&server);
@@ -462,7 +464,11 @@ fn test_sync_gap_preserves_a_claimed_record_without_another_redis_read() {
         };
         assert_eq!(message.id().as_str(), "claimed-event");
         assert!(message.settlement().is_some());
-        assert_eq!(server.finish().len(), 2, "deferred delivery needs no Redis command");
+        assert_eq!(
+            server.finish().len(),
+            3,
+            "deferred delivery checks the trusted attempt count"
+        );
         completed.send(()).expect("test still waits for deferred delivery");
     });
     received
@@ -478,6 +484,7 @@ fn test_async_gap_preserves_a_claimed_record_without_another_redis_read() {
         let server = ScriptedRedis::start(vec![
             Step::reply("XGROUP", b"+OK\r\n"),
             Step::reply("XAUTOCLAIM", &claimed_record(true)),
+            Step::reply("XPENDING", TRUSTED_PENDING_ROW),
         ])
         .expect("start RESP endpoint");
         let bus = async_bus(&server).await;
@@ -491,7 +498,49 @@ fn test_async_gap_preserves_a_claimed_record_without_another_redis_read() {
         };
         assert_eq!(message.id().as_str(), "claimed-event");
         assert!(message.settlement().is_some());
-        assert_eq!(server.finish().len(), 2, "deferred delivery needs no Redis command");
+        assert_eq!(
+            server.finish().len(),
+            3,
+            "deferred delivery checks the trusted attempt count"
+        );
+    });
+}
+
+#[cfg(feature = "sync")]
+#[test]
+fn test_sync_attempt_query_failure_delivers_unknown_and_discards_connection() {
+    let server = ScriptedRedis::start(vec![
+        Step::reply("XGROUP", b"+OK\r\n"),
+        Step::reply("XAUTOCLAIM", &claimed_record(false)),
+        Step::reply("XPENDING", FAULT),
+    ])
+    .expect("start RESP endpoint");
+    let bus = sync_bus(&server);
+    let mut subscription = bus.subscribe(request()).expect("group creation succeeds");
+    let ReceiveOutcome::Message(message) = subscription.receive(Duration::ZERO).expect("receive") else {
+        panic!("claimed record must be delivered when attempt lookup fails");
+    };
+    assert_eq!(message.provider_attempt(), None);
+    server.finish();
+}
+
+#[cfg(feature = "async")]
+#[test]
+fn test_async_attempt_query_failure_delivers_unknown_and_discards_connection() {
+    block_on(async {
+        let server = ScriptedRedis::start(vec![
+            Step::reply("XGROUP", b"+OK\r\n"),
+            Step::reply("XAUTOCLAIM", &claimed_record(false)),
+            Step::reply("XPENDING", FAULT),
+        ])
+        .expect("start RESP endpoint");
+        let bus = async_bus(&server).await;
+        let mut subscription = bus.subscribe(request()).await.expect("group creation succeeds");
+        let ReceiveOutcome::Message(message) = subscription.receive(Duration::ZERO).await.expect("receive") else {
+            panic!("claimed record must be delivered when attempt lookup fails");
+        };
+        assert_eq!(message.provider_attempt(), None);
+        server.finish();
     });
 }
 
@@ -501,6 +550,7 @@ fn test_sync_settlement_connection_failure_keeps_the_token_unapplied() {
     let server = ScriptedRedis::start(vec![
         Step::reply("XGROUP", b"+OK\r\n"),
         Step::reply("XAUTOCLAIM", &claimed_record(false)),
+        Step::reply("XPENDING", TRUSTED_PENDING_ROW),
         Step::disconnect("XACK", true),
     ])
     .expect("start RESP endpoint");
@@ -547,6 +597,7 @@ fn test_async_settlement_connection_failure_keeps_the_token_unapplied() {
         let server = ScriptedRedis::start(vec![
             Step::reply("XGROUP", b"+OK\r\n"),
             Step::reply("XAUTOCLAIM", &claimed_record(false)),
+            Step::reply("XPENDING", TRUSTED_PENDING_ROW),
             Step::disconnect("XACK", true),
         ])
         .expect("start RESP endpoint");

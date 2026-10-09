@@ -65,6 +65,8 @@ pub(crate) struct Client {
     diagnostics: Option<Arc<RedisDiagnosticsState>>,
     /// Finite per-endpoint setup and per-command response waiting budgets.
     policy: TransportPolicy,
+    /// Maximum RESP frame size accepted on dedicated receiver connections.
+    max_receive_response_bytes: usize,
     /// Standalone idle short-command connections; receiver sockets are
     /// excluded.
     #[cfg(feature = "sync")]
@@ -91,6 +93,12 @@ impl Client {
     /// Returns a Redis configuration error if a stored endpoint cannot be
     /// parsed.
     pub(crate) fn new(config: &RedisEventBusConfig) -> Result<Self, RedisError> {
+        let max_receive_response_bytes = config.max_wire_bytes().checked_add(65_536).ok_or_else(|| {
+            RedisError::from((
+                redis::ErrorKind::InvalidClientConfig,
+                "receive response byte limit overflow",
+            ))
+        })?;
         let (standalone, sentinel) = if config.sentinel_nodes().is_some() {
             (None, Some(SentinelResolver::new(config)?))
         } else {
@@ -117,6 +125,7 @@ impl Client {
             )),
             diagnostics: None,
             policy: TransportPolicy::from_config(config),
+            max_receive_response_bytes,
             #[cfg(feature = "sync")]
             sync_pool: Arc::new(SyncConnectionPool::new(config.max_idle_connections())),
             #[cfg(feature = "async")]
@@ -248,7 +257,7 @@ impl Client {
                 .pop();
             let connection = match idle {
                 Some(connection) => connection,
-                None => self.open_sync()?,
+                None => self.open_sync(None)?,
             };
             configure_sync(&connection, self.policy.command_timeout)
                 .map_err(|error| from_redis_error("connect", &error))?;
@@ -258,7 +267,7 @@ impl Client {
                 Some(permit),
             ))
         } else {
-            Ok(PooledConnection::new(self.open_sync()?, None, Some(permit)))
+            Ok(PooledConnection::new(self.open_sync(None)?, None, Some(permit)))
         }
     }
     /// Opens a receiver socket outside the idle pool with bounded setup waits.
@@ -273,7 +282,11 @@ impl Client {
     /// failures.
     #[cfg(feature = "sync")]
     pub(crate) fn get_dedicated_connection(&self) -> Result<PooledConnection, RedisProviderError> {
-        Ok(PooledConnection::new(self.open_sync()?, None, None))
+        Ok(PooledConnection::new(
+            self.open_sync(Some(self.max_receive_response_bytes))?,
+            None,
+            None,
+        ))
     }
 
     /// Reserves admission and single-flights standalone cold connection setup.
@@ -303,9 +316,9 @@ impl Client {
             }
         })?;
         let (generation, connection) = if self.standalone.is_some() {
-            self.async_cache.get_or_connect(self.open_async()).await?
+            self.async_cache.get_or_connect(self.open_async(None)).await?
         } else {
-            (0, self.open_async().await?)
+            (0, self.open_async(None).await?)
         };
         Ok(AsyncCommandConnection {
             generation,
@@ -326,7 +339,7 @@ impl Client {
     /// failures.
     #[cfg(feature = "async")]
     pub(crate) async fn get_async_dedicated_connection(&self) -> Result<MultiplexedConnection, RedisProviderError> {
-        self.open_async().await
+        self.open_async(Some(self.max_receive_response_bytes)).await
     }
 
     /// Clears only the failing lease generation while holding the async cache
@@ -356,19 +369,19 @@ impl Client {
     /// error. Failed factory calls count as connection failures; the missing
     /// factory invariant does not count as an attempt.
     #[cfg(feature = "sync")]
-    fn open_sync(&self) -> Result<Connection, RedisProviderError> {
+    fn open_sync(&self, max_response_bytes: Option<usize>) -> Result<Connection, RedisProviderError> {
         let result = match (&self.standalone, &self.sentinel) {
             (Some(client), _) => {
                 if let Some(diagnostics) = self.diagnostics() {
                     diagnostics.increment(RedisDiagnosticCounter::ConnectionAttempts);
                 }
-                open_sync_connection(client, self.policy)
+                open_sync_connection(client, self.policy, max_response_bytes)
             }
             (_, Some(resolver)) => {
                 if let Some(diagnostics) = self.diagnostics() {
                     diagnostics.increment(RedisDiagnosticCounter::ConnectionAttempts);
                 }
-                resolver.connect_sync()
+                resolver.connect_sync(max_response_bytes)
             }
             _ => return Err(RedisProviderError::Operation("missing Redis client")),
         };
@@ -394,19 +407,19 @@ impl Client {
     /// invariant error. Failed factory calls count as connection failures; the
     /// missing factory invariant does not count as an attempt.
     #[cfg(feature = "async")]
-    async fn open_async(&self) -> Result<MultiplexedConnection, RedisProviderError> {
+    async fn open_async(&self, max_response_bytes: Option<usize>) -> Result<MultiplexedConnection, RedisProviderError> {
         let result = match (&self.standalone, &self.sentinel) {
             (Some(client), _) => {
                 if let Some(diagnostics) = self.diagnostics() {
                     diagnostics.increment(RedisDiagnosticCounter::ConnectionAttempts);
                 }
-                open_async_connection(client, self.policy).await
+                open_async_connection(client, self.policy, max_response_bytes).await
             }
             (_, Some(resolver)) => {
                 if let Some(diagnostics) = self.diagnostics() {
                     diagnostics.increment(RedisDiagnosticCounter::ConnectionAttempts);
                 }
-                resolver.connect_async().await
+                resolver.connect_async(max_response_bytes).await
             }
             _ => return Err(RedisProviderError::Operation("missing Redis client")),
         };

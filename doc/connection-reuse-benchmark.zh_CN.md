@@ -2,6 +2,14 @@
 
 集成重构源码的补充测量见[2026-10-03 重构基准](redis-redesign-benchmark-2026-10-03.zh_CN.md)。原始证据保存在 `/tmp/redis-event-bus-redesign-benchmark-20261003`。
 
+## 2026-10-09 接收/恢复抽样测量
+
+当前未提交实现运行于 x86_64 Linux、Rust 1.94.0 和独立 Redis 7.4.8 fixture。源码 checkout 基于 `ba8d26686f0ff6c059621bed6cf0d4284a4ce095`，`rs-event-bus` 固定为 `387f16df9a1b380946dd559ad7632c66b8c19fa1`，`rs-task` 固定为 `87148632e07ce4136ca1db5eef78db3365f2c27a`。逐次原始 CSV 和 summary 位于 `/tmp/redis-provider-improvements-benchmark`。
+
+新消息抽样每种模式三轮，每轮 100 次、64 字节串行 round trip。sync 吞吐为 1,953.6–4,357.3 events/s（各轮 p50 为 184.7–203.3 µs）；async 吞吐为 4,329.3–5,880.7 events/s（p50 为 146.0–168.2 µs）。每轮 100 条消息全部送达，没有错误或未知结果。样本较小，仅描述本次 fixture 运行，不构成前后对比。
+
+Sentinel 抽样每种模式执行三轮故障转移/重连，每轮一个新事件。包含主从提升和重试的总恢复耗时为 sync 1.695–3.104 秒、async 2.006–2.525 秒。每轮在故障转移期间记录一次预期的 `receive:outcome_unknown`，随后成功送达；没有消息丢失。该场景测量同一实例的 Sentinel 恢复，不是独立 pending 查找耗时。实现会为每条恢复的 pending 消息执行一次精确 `XPENDING` 查询，因此恢复消息延迟包含一次额外 Redis 往返；本次测量没有单独隔离该查询的耗时。
+
 ## 2026-10-03 最终源码固定矩阵（`108d0ad`）
 
 本轮以最终 provider 源码 `108d0ad947f98e26a723adbc50878e58c9684cf9` 和同一公开 SPI harness 测量。环境为 Rust 1.94.0、独立 Redis 7.4.8 standalone fixture。完整固定矩阵覆盖 sync/async、64/4,096/262,144 字节原始 payload、并发 1/8/32、default/limited 准入以及 10/100 个空闲 receiver；每项配置三轮，每轮 1,000 次尝试。进程退出码为 0，生成完整的 120 行 summary 和 120,000 条逐次尝试样本。退出码 0 表示 harness 完成，不代表所有尝试都成功。

@@ -21,3 +21,4 @@ tokio = { version = "1.53", features = ["rt-multi-thread", "macros"] }
 [patch.crates-io]
 qubit-event-bus = { version = "0.20", path = "../../../../rs-event-bus" }
 qubit-codec = { version = "0.16", path = "../../../../rs-codec" }
+redis = { path = "../../../third_party/redis-rs" }

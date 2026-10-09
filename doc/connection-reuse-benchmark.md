@@ -2,6 +2,14 @@
 
 Follow-up measurements against the integrated redesign source are in the [2026-10-03 redesign benchmark](redis-redesign-benchmark-2026-10-03.md). Its raw evidence is retained under `/tmp/redis-event-bus-redesign-benchmark-20261003`.
 
+## 2026-10-09 receive/recovery spot measurements
+
+The current uncommitted implementation was measured on x86_64 Linux with Rust 1.94.0 and owned Redis 7.4.8 fixtures. The source checkout was based on `ba8d26686f0ff6c059621bed6cf0d4284a4ce095`, with `rs-event-bus` fixed at `387f16df9a1b380946dd559ad7632c66b8c19fa1` and `rs-task` at `87148632e07ce4136ca1db5eef78db3365f2c27a`. Raw per-attempt CSV and summaries are under `/tmp/redis-provider-improvements-benchmark`.
+
+The new-message spot run measured three rounds of 100 64-byte sequential round trips per mode. Sync throughput was 1,953.6–4,357.3 events/s (round p50 184.7–203.3 µs); async throughput was 4,329.3–5,880.7 events/s (p50 146.0–168.2 µs). Each round delivered all 100 events with no errors or unknown outcomes. These small samples describe this fixture run only; they are not a before/after comparison.
+
+The Sentinel run measured three failover/reconnect rounds per mode with one new event per round. Total recovery elapsed time, including promotion and retry, was 1.695–3.104 s for sync and 2.006–2.525 s for async. Each round recorded one expected `receive:outcome_unknown` during failover followed by successful delivery; no event was lost. This scenario measures same-instance Sentinel recovery, not isolated pending-entry lookup cost. The implementation performs one exact `XPENDING` query for each recovered pending entry, so recovered-message latency includes one additional Redis round trip; this run does not isolate that query's duration.
+
 ## 2026-10-03 final-source fixed matrix (`108d0ad`)
 
 This run measures the final provider source revision `108d0ad947f98e26a723adbc50878e58c9684cf9` with the same public-SPI harness. It ran on Rust 1.94.0 against an owned Redis 7.4.8 standalone fixture. The complete fixed matrix covers sync/async, raw payloads of 64/4,096/262,144 bytes, concurrency 1/8/32, default/limited admission, and idle receivers 10/100; every configuration has three rounds of 1,000 attempts. The process exited 0, emitted all 120 summary rows and 120,000 per-attempt samples. Exit 0 means the harness completed; it does not mean every attempt succeeded.

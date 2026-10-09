@@ -88,8 +88,10 @@ pub(super) fn scan(
     })?;
     let pending_row_count = pending_rows.len();
     let mut scan_complete = true;
-    for (id, owner, idle_ms) in pending_rows {
-        if idle_ms < subscription.claim_min_idle_ms as u64 {
+    for pending_entry in pending_rows {
+        let id = pending_entry.id;
+        let owner = pending_entry.owner;
+        if pending_entry.idle_ms < subscription.claim_min_idle_ms as u64 {
             lock_state(&subscription.recovery, &subscription.topic, "receive", "recovery lock")?
                 .set_tombstone_cursor(id);
             continue;
