@@ -2,17 +2,17 @@
 
 [简体中文](coverage-review.zh_CN.md)
 
-## Latest CI verification
+## Historical CI run: 2026-10-09
 
-The full CI run on 2026-10-09 (Asia/Shanghai) exited with status 0. The clean package coverage measurement passes the existing gates:
+The recorded full CI run on 2026-10-09 (Asia/Shanghai) exited with status 0. Its clean package coverage measurement passed the existing gates:
 
-| Metric | Latest measured result | Gate |
+| Metric | Historical measured result | Gate |
 | --- | ---: | ---: |
 | Functions | 508/534 (95.13%) | at least 95% |
 | Lines | 4,865/5,063 (96.09%) | above 90% |
 | Regions | 7,566/7,976 (94.86%) | above 85% |
 
-Coverage runs through `.infra/bin/ci-check.sh` → `project-hook` → `project-ci-check.sh` → `.infra/bin/coverage.sh`, selecting `qubit-event-bus-redis` with `--locked --all-features -- --test-threads=1`. The package-level totals include the source files selected by the coverage configuration; inline private tests and helpers in those files participate in LLVM summaries, so these metrics are not coverage of production declarations alone. Their denominator differs from the manual Rustdoc declaration count. The generated `coverage.json` and `ci-summary.json` agree on function, line and region totals. CI cleanup removed the raw profile report after successful collection.
+Coverage runs through `.infra/bin/ci-check.sh` → `project-hook` → `project-ci-check.sh` → `.infra/bin/coverage.sh`, selecting `qubit-event-bus-redis` with `--locked --all-features -- --test-threads=1`. The package-level totals include the source files selected by the coverage configuration; inline private tests and helpers in those files participate in LLVM summaries, so these metrics are not coverage of production declarations alone. Their denominator differs from the manual Rustdoc declaration count. The historical run record says its generated `coverage.json` and `ci-summary.json` agreed on function, line and region totals. CI cleanup removed the raw profile report after successful collection.
 
 `.infra/bin/coverage.sh` cleans profile data before building the instrumented examples and measuring coverage. The measurement used the uncommitted implementation on branch `codex/redis-provider-improvements-20261009`, based on baseline HEAD `214cca830b6e3c8ff03d28dd3545387e88057f55`. Its reproducible source seal is SHA256 `6b86ea82115554016bc3601eeff59881fdfb9f6665e01761fc5e8ffe5b95fd4b` over 202 sorted relative paths and file contents: Rust files under `src`, `tests`, `examples`, `benches` and `fuzz/fuzz_targets`; root `Cargo.lock`, `fuzz/Cargo.lock` and all fixture `Cargo.lock` files; root `Cargo.toml`; and `.infra/bin/coverage.sh` and `.infra/bin/ci-check.sh`. The local `qubit-event-bus` and `qubit-task` dependencies were pinned to commits `387f16df9a1b380946dd559ad7632c66b8c19fa1` and `87148632e07ce4136ca1db5eef78db3365f2c27a`. Cargo remains at `0.4.0`, and these changes are unreleased.
 
@@ -25,7 +25,24 @@ The run used `x86_64-unknown-linux-gnu`, rustc `1.94.0` (`4a4ef493e`, LLVM `21.1
 | `coverage.json` | `d920a0de2d6738a9cb5949f1e12c0271ecf9b86fbaadfc09aaf2737cd5c3bd32` |
 | `ci-summary.json` | `5635b7354c2d561950e8d22002c1f9eb1da864b3b7be6fcf3780e46b8d7736f1` |
 
-The reports were written to the repository root as `coverage.json` and `ci-summary.json`; the detailed `target/infra/coverage/raw.json` report was removed by CI artifact cleanup after successful collection.
+These are the hashes recorded for that historical run; the corresponding files are not available in the current worktree for verification. The detailed `target/infra/coverage/raw.json` report was removed by CI artifact cleanup after successful collection.
+
+## Artifacts currently present in the original checkout root
+
+The current original checkout at `/data/working/qubit/rust-common/rs-event-bus-redis` contains a different artifact batch. The implementation worktree does not contain `coverage.json` or `ci-summary.json`; the values below were read directly from the original checkout root on 2026-10-09.
+
+| Metric | Current artifact result |
+| --- | ---: |
+| Functions | 489/512 |
+| Lines | 5,080/5,340 |
+| Regions | 7,129/7,544 |
+
+| Artifact | SHA256 |
+| --- | --- |
+| `coverage.json` | `6c226818e382548f92f505171a3ab44e37448b0071fe3e76435ae04c6eb237db` |
+| `ci-summary.json` | `324ace1401cb512f1d94a8b345acd9ac732c9fb9248c2e8502aca1fa249aaf51` |
+
+This artifact batch is separate from the 2026-10-09 historical CI run above. These files do not verify that historical run's metrics or successful CI status.
 
 ## Earlier CI6 gaps in file summaries
 
