@@ -2,11 +2,17 @@
 
 [English](coverage-review.md)
 
-## 最新 CI 验证
+## 2026-10-09 实施 checkout
 
-2026-10-09（Asia/Shanghai）完整 CI 以状态 0 退出。干净的包级覆盖率测量通过现有门槛：
+当前任务 checkout 的插桩测试套件全部通过，但覆盖率门禁未通过：函数为 516/545（94.68%），低于 95% 下限；行覆盖为 5,039/5,253（95.93%），区域为 7,747/8,176（94.75%），均高于各自门槛。原始 LLVM 报告位于 `/tmp/redis-provider-improvements-coverage.json`（SHA256 `0ca405be9fec70b8b6381fbab02e9dc7a85d52e6f080e4737255ec89236e84e6`）。这是当前实施的独立采集，不替代或改写下方历史封存证据；它也不能证明覆盖率门禁通过或已可发布。
 
-| 指标 | 最新实测结果 | 门槛 |
+## 已记录的 CI 证据（2026-10-09）
+
+当前清单版本为 `0.7.0`。本节数据来自下文标识的、未提交实现源码封存快照，不是当前 HEAD 的测量。根目录中其他采集批次的覆盖率产物（包括函数数为 489/512 的汇总）也只对应各自源码快照，不能作为当前 HEAD 的覆盖率。
+
+记录于 2026-10-09（Asia/Shanghai）的完整 CI 以状态 0 退出；该次干净的包级覆盖率测量通过当时的门槛：
+
+| 指标 | 封存快照记录值 | 门槛 |
 | --- | ---: | ---: |
 | 函数 | 508/534（95.13%） | 至少 95% |
 | 行 | 4,865/5,063（96.09%） | 高于 90% |
@@ -14,7 +20,7 @@
 
 覆盖率执行链为 `.infra/bin/ci-check.sh` → `project-hook` → `project-ci-check.sh` → `.infra/bin/coverage.sh`，选择 `qubit-event-bus-redis`，使用 `--locked --all-features -- --test-threads=1`。包级汇总覆盖 coverage 配置选定的源码文件；这些文件中的内联私有测试与 helper 也参与 LLVM 汇总，因此这些指标不等于仅生产声明的覆盖率，其分母与手工 Rustdoc 声明计数不同。生成的 `coverage.json` 与 `ci-summary.json` 函数、行及区域计数一致。CI 清理在成功采集后移除了原始 profile 报告。
 
-`.infra/bin/coverage.sh` 在构建插桩示例及测量前清理 profile 数据。测量使用分支 `codex/redis-provider-improvements-20261009` 上尚未提交的实现，基线 HEAD 为 `214cca830b6e3c8ff03d28dd3545387e88057f55`。可复现源码 seal 的 SHA256 为 `6b86ea82115554016bc3601eeff59881fdfb9f6665e01761fc5e8ffe5b95fd4b`，由 202 个排序后的相对路径及文件内容计算：`src`、`tests`、`examples`、`benches`、`fuzz/fuzz_targets` 下的 Rust 文件；根 `Cargo.lock`、`fuzz/Cargo.lock` 和所有 fixture `Cargo.lock`；根 `Cargo.toml`；以及 `.infra/bin/coverage.sh` 和 `.infra/bin/ci-check.sh`。本地 `qubit-event-bus` 与 `qubit-task` 依赖固定在 commit `387f16df9a1b380946dd559ad7632c66b8c19fa1` 和 `87148632e07ce4136ca1db5eef78db3365f2c27a`。Cargo 版本仍为 `0.4.0`，变更尚未发布。
+`.infra/bin/coverage.sh` 会在构建插桩示例和测量前清理 profile 数据。该次测量使用分支 `codex/redis-provider-improvements-20261009` 上尚未提交的实现，基线 HEAD 为 `214cca830b6e3c8ff03d28dd3545387e88057f55`。可复现源码 seal 的 SHA256 为 `6b86ea82115554016bc3601eeff59881fdfb9f6665e01761fc5e8ffe5b95fd4b`，由 202 个排序后的相对路径及文件内容计算：`src`、`tests`、`examples`、`benches`、`fuzz/fuzz_targets` 下的 Rust 文件；根 `Cargo.lock`、`fuzz/Cargo.lock` 和所有 fixture `Cargo.lock`；根 `Cargo.toml`；以及 `.infra/bin/coverage.sh` 和 `.infra/bin/ci-check.sh`。本地 `qubit-event-bus` 与 `qubit-task` 依赖固定在 commit `387f16df9a1b380946dd559ad7632c66b8c19fa1` 和 `87148632e07ce4136ca1db5eef78db3365f2c27a`。封存材料没有提供可独立检查的原始 manifest，因此该历史运行使用的包版本未复核；当前清单版本为 `0.7.0`。测量时这些变更尚未发布。
 
 覆盖率 hook 及完整测试套件均通过，包括 TLS 传输、TLS Sentinel 故障转移和 TLS 下游 outbox 回归。配置中的九种组合均通过：默认、无默认 feature、sync、async、sync+discovery、async+discovery、sync+conformance、async+conformance 及 all-features。完整 CI 还通过 style/Clippy/Rustdoc、README 检查、release 构建、打包验证和 fuzz smoke 检查。依赖审计使用本地缓存的 1,295 条 advisory 数据库扫描了 180 个依赖；从 GitHub 刷新数据库时遇到网络错误，因此本次审计没有使用最新下载的数据。
 
@@ -53,12 +59,11 @@ CI3 的覆盖率 hook 有 285 项通过、1 项基准忽略，随后因函数门
 
 下方 306/312、2,910/3,038、4,591/4,812 来自 commit `0dc7a551f0c91d57d612d78644c8258671b0ca56` 的记录，使用尚未发布的上游 `qubit-event-bus` 0.15.0 快照本地 patch。另一个 293 函数分析来自 commit `1f833e944a53cdbeb7c8ffd571ca6dea6390cf5f`。本轮重构未独立重新核验其原始报告，两组分母描述不同源码快照。历史“失败后改用 Retry”的描述不能证明未知 XACK 后的安全性。
 
-## 历史覆盖率：0.4.0 候选快照
+## 历史覆盖率：候选快照（包版本未复核）
 
-项目使用 `.infra/bin/coverage.sh` 和 `.infra/bin/ci-check.sh` 收集的包级指标执行覆盖率门槛检查。
-0.4.0 发布候选历史快照的结果如下：
+当前清单版本为 `0.7.0`。尚未找回或核验这次历史候选测量所用的原始 Cargo manifest，因此不确认其包版本；下表仅保留历史指标：
 
-| 指标 | 0.4.0 候选版本 | 要求 |
+| 指标 | 历史候选快照 | 要求 |
 | --- | ---: | ---: |
 | 函数 | 306/312（98.08%） | 至少 95% |
 | 行 | 2,910/3,038（95.79%） | 高于 90% |

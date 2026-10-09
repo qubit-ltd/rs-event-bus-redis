@@ -49,11 +49,11 @@ Redis 短命令额度默认是 64，其中 8 个名额专供结算；专用 rece
 
 Redis 使用至少一次投递，业务 handler 应能处理重复事件。`XADD` 成功只表示 Redis 接受了命令，不能证明记录已经 fsync 或完成处理。默认不会裁剪 stream。只有同时设置 `redis.stream_maxlen_approx` 和 `redis.allow_lossy_retention=true`，并完成人工损失评估，才启用 Redis `XADD MAXLEN ~ N`；近似保留策略可能删除尚未消费或仍处于 pending 的历史记录并产生缺口。单实例和 Sentinel 连接均可按需启用 TLS，并验证证书及主机名；Sentinel 与主节点的 TLS 设置彼此独立。当前不支持 Cluster、native/delayed delivery 或死信策略。stream 和消费组由运维人员负责清理。
 
-provider 对单条 wire、payload 和解码后的 headers 字符串设置有限容量，默认分别为 8 MiB、1 MiB 和 64 KiB；facade 另有默认各 1 MiB 的编码发布/接收限制。接收超限会停止订阅，保留 pending 记录，不确认也不隔离。公开发布错误可通过 `PublishFailure.effect()` 判断效果；`XADD` 回复丢失属于未知结果，默认禁止盲目重发。仍支持 wire 版本 1。升级步骤见[迁移指南](doc/migration.zh_CN.md)。
+provider 对单条 wire、payload 和解码后的 headers 字符串设置有限容量，默认分别为 8 MiB、1 MiB 和 64 KiB；facade 另有默认各 1 MiB 的编码发布/接收限制。专用 receiver 还会把每个 RESP 响应帧限制在 `redis.max_wire_bytes + 65,536` 字节以内。响应超限时订阅会停止，记录仍留在 PEL 中，不确认也不隔离。应先用 `XPENDING` 排查；是否删除或隔离记录须由运维人员评估后决定。恢复消息的 provider attempt 只有在 Redis `XPENDING` 明细中的记录 ID 和 consumer owner 均匹配时才可信；查询失败或不匹配时仍为未知（`None`）。因此每条实际交付的恢复消息会额外执行一次 Redis 命令；新消息仍报告 `Some(1)`。公开发布错误可通过 `PublishFailure.effect()` 判断效果；`XADD` 回复丢失属于未知结果，默认禁止盲目重发。仍支持 wire 版本 1。详见[用户指南](doc/user_guide.zh_CN.md#6-理解投递重试和清理)和[迁移指南](doc/migration.zh_CN.md)。
 
 已有 Redis 消费组的起始位置现在有明确规则：`StartPosition::New` 沿用已保存游标；默认情况下，`Earliest` 和 `At` 返回 `existing_group_start_position_ignored`，不再静默忽略请求的位置。显式设置 `redis.existing_group_start=resume` 可选择继续使用已有游标；该选项不会执行 `XGROUP SETID`。详见[消费组恢复指南](doc/user_guide.zh_CN.md#6-理解投递重试和清理)和[迁移指南](doc/migration.zh_CN.md#已有消费组起始位置变更)。
 
-Core 0.20 分别限制 handler 运行数、全局持有投递数、每订阅持有量和注册订阅数。`RedisSubscriptionProfile` 要求明确指定起始位置，并构造 durable options；Redis 新读取的 stream entry 报告 provider attempt `Some(1)`，pending 和 claim 恢复的历史次数仍未知。结算只对明确可重试的错误执行有限重试，重试性未知时停止订阅。[用户指南](doc/user_guide.zh_CN.md) 说明首个终止原因、投递指标、持久恢复、provider snapshot 采集，以及限制等待时间但不保证强制退出进程的关闭策略。
+Core 0.20 分别限制 handler 运行数、全局持有投递数、每订阅持有量和注册订阅数。`RedisSubscriptionProfile` 要求明确指定起始位置，并构造 durable options；新读取的 stream entry 报告 provider attempt `Some(1)`。恢复 pending 或 claim 记录时，只有 Redis 中的记录 ID 与 consumer owner 校验通过后才报告投递次数；否则仍为未知。结算只对明确可重试的错误执行有限重试，重试性未知时停止订阅。[用户指南](doc/user_guide.zh_CN.md) 说明首个终止原因、投递指标、持久恢复、provider snapshot 采集，以及限制等待时间但不保证强制退出进程的关闭策略。
 
 ## 延伸阅读
 

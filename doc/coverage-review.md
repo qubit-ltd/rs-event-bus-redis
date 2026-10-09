@@ -2,11 +2,17 @@
 
 [简体中文](coverage-review.zh_CN.md)
 
-## Latest CI verification
+## 2026-10-09 implementation checkout
 
-The full CI run on 2026-10-09 (Asia/Shanghai) exited with status 0. The clean package coverage measurement passes the existing gates:
+The current task checkout ran the full instrumented test suite successfully, but its coverage gate did not pass: functions were 516/545 (94.68%) against the 95% minimum; lines were 5,039/5,253 (95.93%) and regions 7,747/8,176 (94.75%), both above their gates. The raw LLVM report is `/tmp/redis-provider-improvements-coverage.json` (SHA256 `0ca405be9fec70b8b6381fbab02e9dc7a85d52e6f080e4737255ec89236e84e6`). This is a separate, current implementation capture and does not replace or revise the historical sealed-run evidence below. It also does not establish a passing coverage gate or release readiness.
 
-| Metric | Latest measured result | Gate |
+## Recorded CI evidence (2026-10-09)
+
+The current manifest version is `0.7.0`. The measurements in this section belong to the sealed, uncommitted implementation snapshot identified below; they do not measure the current HEAD. Root-level coverage artifacts from a different capture (including the 489/512 function summary) likewise describe only their own source snapshot and must not be presented as current HEAD coverage.
+
+The full CI run recorded for 2026-10-09 (Asia/Shanghai) exited with status 0. Its clean package coverage measurement passed the then-current gates:
+
+| Metric | Recorded snapshot result | Gate |
 | --- | ---: | ---: |
 | Functions | 508/534 (95.13%) | at least 95% |
 | Lines | 4,865/5,063 (96.09%) | above 90% |
@@ -14,7 +20,7 @@ The full CI run on 2026-10-09 (Asia/Shanghai) exited with status 0. The clean pa
 
 Coverage runs through `.infra/bin/ci-check.sh` → `project-hook` → `project-ci-check.sh` → `.infra/bin/coverage.sh`, selecting `qubit-event-bus-redis` with `--locked --all-features -- --test-threads=1`. The package-level totals include the source files selected by the coverage configuration; inline private tests and helpers in those files participate in LLVM summaries, so these metrics are not coverage of production declarations alone. Their denominator differs from the manual Rustdoc declaration count. The generated `coverage.json` and `ci-summary.json` agree on function, line and region totals. CI cleanup removed the raw profile report after successful collection.
 
-`.infra/bin/coverage.sh` cleans profile data before building the instrumented examples and measuring coverage. The measurement used the uncommitted implementation on branch `codex/redis-provider-improvements-20261009`, based on baseline HEAD `214cca830b6e3c8ff03d28dd3545387e88057f55`. Its reproducible source seal is SHA256 `6b86ea82115554016bc3601eeff59881fdfb9f6665e01761fc5e8ffe5b95fd4b` over 202 sorted relative paths and file contents: Rust files under `src`, `tests`, `examples`, `benches` and `fuzz/fuzz_targets`; root `Cargo.lock`, `fuzz/Cargo.lock` and all fixture `Cargo.lock` files; root `Cargo.toml`; and `.infra/bin/coverage.sh` and `.infra/bin/ci-check.sh`. The local `qubit-event-bus` and `qubit-task` dependencies were pinned to commits `387f16df9a1b380946dd559ad7632c66b8c19fa1` and `87148632e07ce4136ca1db5eef78db3365f2c27a`. Cargo remains at `0.4.0`, and these changes are unreleased.
+`.infra/bin/coverage.sh` cleans profile data before building the instrumented examples and measuring coverage. The measurement used the uncommitted implementation on branch `codex/redis-provider-improvements-20261009`, based on baseline HEAD `214cca830b6e3c8ff03d28dd3545387e88057f55`. Its reproducible source seal is SHA256 `6b86ea82115554016bc3601eeff59881fdfb9f6665e01761fc5e8ffe5b95fd4b` over 202 sorted relative paths and file contents: Rust files under `src`, `tests`, `examples`, `benches` and `fuzz/fuzz_targets`; root `Cargo.lock`, `fuzz/Cargo.lock` and all fixture `Cargo.lock` files; root `Cargo.toml`; and `.infra/bin/coverage.sh` and `.infra/bin/ci-check.sh`. The local `qubit-event-bus` and `qubit-task` dependencies were pinned to commits `387f16df9a1b380946dd559ad7632c66b8c19fa1` and `87148632e07ce4136ca1db5eef78db3365f2c27a`. The archived manifest contents are unavailable for independent inspection, so the package version used for this historical run is unreviewed; the current manifest is `0.7.0`. These changes were unreleased at measurement time.
 
 The coverage hook and full test suite passed, including the TLS transport, TLS Sentinel failover and downstream outbox TLS regressions. All nine configured feature variants passed: default, no default features, sync, async, sync+discovery, async+discovery, sync+conformance, async+conformance and all features. Full CI also passed style/Clippy/Rustdoc, README checks, release build, package verification and fuzz smoke checks. The dependency audit scanned 180 dependencies using the cached 1,295-advisory database; refreshing that database from GitHub failed due to a network error, so the audit did not use freshly fetched advisory data.
 
@@ -53,12 +59,11 @@ CI3 passed 285 coverage-hook tests with one ignored benchmark, then failed the f
 
 The 306/312, 2,910/3,038 and 4,591/4,812 measurements below were recorded in commit `0dc7a551f0c91d57d612d78644c8258671b0ca56`, using a local patch of the unpublished upstream `qubit-event-bus` 0.15.0 snapshot. The separate 293-function analysis was recorded in commit `1f833e944a53cdbeb7c8ffd571ca6dea6390cf5f`. Their original raw reports were not independently revalidated during this refactor; their denominators describe different source snapshots. The historical Retry-after-failure description cannot establish safety after an unknown XACK.
 
-## Historical coverage: 0.4.0 candidate snapshots
+## Historical coverage: candidate snapshot (package version unreviewed)
 
-The package coverage gate uses the metrics collected by `.infra/bin/coverage.sh` and
-`.infra/bin/ci-check.sh`. The 0.4.0 release-candidate measurement was:
+The current manifest version is `0.7.0`; the original manifest for this historical candidate measurement has not been recovered or verified. Its package version is therefore unreviewed, and the table records only the historical metrics:
 
-| Metric | 0.4.0 candidate | Required |
+| Metric | Historical candidate snapshot | Required |
 | --- | ---: | ---: |
 | Functions | 306/312 (98.08%) | at least 95% |
 | Lines | 2,910/3,038 (95.79%) | above 90% |

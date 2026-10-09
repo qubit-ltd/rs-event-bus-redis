@@ -362,7 +362,7 @@ provider 将一条 JSON wire record 写入 Redis Stream 的 `wire` 字段。内�
 | 关闭或 drop | 不会隐式执行 `XACK` | 未结算消息仍可恢复。 |
 | 取消异步 receive | 不会隐式执行 `XACK` | 已读记录留在 PEL 中，供后续读取或认领。 |
 
-Redis 提供至少一次投递，因此 handler 应具备幂等性。新消息经 `XREADGROUP >` 读取时，`delivery.context().provider_attempt()` 为 `Some(1)`；pending 和 `XAUTOCLAIM` 恢复的消息为 `None`，因为当前 provider 没有传递历史投递次数。facade 本地重试次数请读取 `retry_attempt`。如果 handler 运行时间超过 `redis.claim_min_idle_ms`，另一个 consumer 可能在原 handler 仍执行时认领同一事件。idle threshold 应覆盖常见和最慢的处理时间；重复代价高时，应用还应按业务 ID 去重。
+Redis 提供至少一次投递，因此 handler 应具备幂等性。新消息经 `XREADGROUP >` 读取时，`delivery.context().provider_attempt()` 为 `Some(1)`。每条 pending 或 `XAUTOCLAIM` 恢复消息交付前，provider 会针对该 ID 查询 Redis `XPENDING` 明细；只有返回的 ID 和 consumer owner 都匹配时，才会报告 Redis 投递次数。查询失败、无结果、格式错误或校验不匹配时仍为 `None`。每条恢复消息因此多一次 Redis 命令，新消息不增加查询。facade 本地重试次数请读取 `retry_attempt`。如果 handler 运行时间超过 `redis.claim_min_idle_ms`，另一个 consumer 可能在原 handler 仍执行时认领同一事件。idle threshold 应覆盖常见和最慢的处理时间；重复代价高时，应用还应按业务 ID 去重。
 
 每个订阅的未结算消息达到 `redis.max_unsettled_per_subscription` 后会暂停接收新记录。结算或 retry 后会释放容量。该设置限制进程内的投递压力，不会限制 Redis stream 增长。
 
@@ -402,9 +402,9 @@ let options = SubscribeOptions::<String>::builder()
 
 `redis.max_wire_bytes`、`redis.max_payload_bytes`、`redis.max_headers_bytes` 默认分别为 8,388,608、1,048,576、65,536 字节。值必须为正整数，零、非法数字和溢出都是配置错误。三个限额独立，payload 未超限仍可能因 JSON 膨胀使 wire 超限。facade 的 `PayloadLimits` 另有默认各 1 MiB 的双向限制，需要一起配置。
 
-发布先在复制 payload 前检查大小，再用有界 writer 序列化 headers/wire，成功后才调用 `XADD`。接收先借用 wire 字节检查长度，再复制字符串；先解析版本，随后对版本 1 字段做有界解码，不构造完整 JSON Value 树。payload 每次 push 前检查增长，headers 字符串在二次 JSON 解析前检查，嵌套 JSON 保持深度保护。这不阻止 Redis 客户端首次分配 RESP frame。
+发布先在复制 payload 前检查大小，再用有界 writer 序列化 headers/wire，成功后才调用 `XADD`。接收先借用 wire 字节检查长度，再复制字符串；先解析版本，随后对版本 1 字段做有界解码，不构造完整 JSON Value 树。payload 每次 push 前检查增长，headers 字符串在二次 JSON 解析前检查，嵌套 JSON 保持深度保护。专用 receiver 连接还会在构造响应值前，将 RESP 响应帧限制为 `redis.max_wire_bytes + 65,536` 字节。这是 receiver 帧输入的上限，不代表进程 RSS 上限；解码后的结构、其他连接及 Redis 自身的内存使用另行计算。
 
-`receive_limit_exceeded` 停止订阅，保留 PEL 记录，不执行 `XACK`、`XDEL` 或隔离。合法但不支持的 wire 版本同样保留。修复容量或部署兼容 provider/codec 后，使用同一 group 创建新订阅，并通过 `XPENDING` 验证认领结果。不要删除 pending 记录掩盖问题。限额内格式错误的版本 1 数据仍走隔离；旧版本发布的 wire 版本 1 继续可读。
+`receive_limit_exceeded` 和 `receive_response_too_large` 都会停止订阅并保留 PEL 记录，不执行 `XACK`、`XDEL` 或隔离。后一错误表示 RESP 帧超过配置上限，receiver 连接会关闭。合法但不支持的 wire 版本同样保留。先用 `XPENDING` 检查记录及 owner，再修复限额或部署兼容 provider/codec，并以同一 group 创建新订阅验证恢复。是否删除或隔离保留记录应由运维人员评估决定，不要为掩盖错误而清理。限额内格式错误的版本 1 数据仍走隔离；旧版本发布的 wire 版本 1 继续可读。
 
 codec 接收 `&EncodedPayload`，默认精确验证 content type 和可选 schema；`None` 与具名 schema 不同。需要支持旧 schema 时明确重写验证方法。元数据不兼容或 codec panic 会使 facade 停止接收而不结算；查看 `terminal_failure()`，修复 codec，再创建新持久订阅。普通 `CodecError::Decode` 仍以 `XACK` 拒绝坏消息。
 
