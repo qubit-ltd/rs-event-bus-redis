@@ -48,6 +48,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     RedisSubscriptionProfile::new(StartPosition::Earliest)
                         .consumer_group(ConsumerGroup::new("billing")?)
                         .options()
+                        .provider_option("redis.existing_group_start", "resume")
                         .build(),
                 ),
             )
