@@ -35,7 +35,6 @@ rustls = { version = "^0.23", default-features = false, features = ["ring", "std
 
 [dev-dependencies]
 qubit-retry = "0.26"
-qubit-retry-025 = { package = "qubit-retry", version = "0.25" }
 futures-lite = "^2"
 futures-channel = "^0.3"
 redis = { version = "0.32.7", default-features = false, features = ["tokio-rustls-comp", "streams", "sentinel", "tls-rustls-webpki-roots"] }

@@ -36,7 +36,7 @@ use qubit_event_bus_redis::sync::RedisEventBusProvider;
 use qubit_event_bus_redis::wire::WireFields;
 use qubit_id::Id;
 #[cfg(feature = "async")]
-use qubit_retry_025::RetryPolicy;
+use qubit_retry::RetryPolicy;
 use qubit_spi::ServiceProvider;
 use support::scripted_redis::ScriptedRedis;
 use support::scripted_redis::Step;
@@ -396,7 +396,7 @@ fn applied_xadd_reply_loss(policy: DuplicateRiskPolicy) -> Result<(), Box<dyn st
     use qubit_event_bus::model::PublishRequest;
     use qubit_event_bus::model::Topic;
     use qubit_event_bus_redis::naming::stream_key;
-    use qubit_retry_025::RetryPolicy;
+    use qubit_retry::RetryPolicy;
     use support::controlled_redis::proxy::ControlledRedis;
     use support::redis_server::RedisServer;
     let server = RedisServer::start()?;
@@ -497,7 +497,7 @@ fn async_applied_xadd_reply_loss_covers_both_duplicate_policies() -> Result<(), 
     use qubit_event_bus::model::Topic;
     use qubit_event_bus_redis::r#async::AsyncRedisEventBusProvider;
     use qubit_event_bus_redis::naming::stream_key;
-    use qubit_retry_025::RetryPolicy;
+    use qubit_retry::RetryPolicy;
     use qubit_spi::AsyncServiceProvider;
     use support::controlled_redis::proxy::ControlledRedis;
     use support::redis_server::RedisServer;
@@ -613,7 +613,7 @@ fn applied_dlq_xadd_lost_reply_stops_and_preserves_durable_source() -> Result<()
     use qubit_event_bus::spi::SpiSubscriptionRequest;
     use qubit_event_bus_redis::naming::group_name;
     use qubit_event_bus_redis::naming::stream_key;
-    use qubit_retry_025::RetryPolicy;
+    use qubit_retry::RetryPolicy;
     use support::controlled_redis::proxy::ControlledRedis;
     use support::redis_server::RedisServer;
     let server = RedisServer::start()?;

@@ -111,7 +111,7 @@ mod durable {
     use qubit_event_bus_redis::naming::stream_key;
     use qubit_event_bus_redis::sync::RedisEventBusProvider;
     use qubit_id::Id;
-    use qubit_retry_025::RetryPolicy;
+    use qubit_retry::RetryPolicy;
     use qubit_spi::ServiceProvider;
 
     use super::Arc;
