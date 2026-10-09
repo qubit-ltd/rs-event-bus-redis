@@ -89,3 +89,13 @@ fn test_wire_limits_exact_boundaries() {
         Err(RedisProviderError::WireTooLarge)
     ));
 }
+
+#[test]
+fn test_wire_limits_defaults_match_default_provider_configuration() {
+    let defaults = WireLimits::default();
+    let configured = WireLimits::from_config(&RedisEventBusConfig::default());
+
+    assert_eq!(defaults.wire, configured.wire);
+    assert_eq!(defaults.payload, configured.payload);
+    assert_eq!(defaults.headers, configured.headers);
+}

@@ -92,6 +92,26 @@ fn duplicate_version_and_invalid_bytes_are_malformed() {
         decode(br#"{"version":1,"version":2}"#, limits),
         Err(RedisProviderError::Operation(_))
     ));
+    for (field, duplicate) in [
+        ("event_id", r#""other""#),
+        ("timestamp_ms", "1"),
+        ("headers_json", r#""{}""#),
+        ("ordering_key", r#""other""#),
+        ("content_type", r#""application/octet-stream""#),
+        ("schema_id", r#""other""#),
+        ("payload", "[1]"),
+    ] {
+        let wire = format!(
+            r#"{{"version":1,"event_id":"event","timestamp_ms":0,"headers_json":"{{}}","ordering_key":"key","content_type":"text/plain","schema_id":"schema","payload":[0],"{field}":{duplicate}}}"#
+        );
+        assert!(
+            matches!(
+                decode(wire.as_bytes(), limits),
+                Err(RedisProviderError::Operation(_))
+            ),
+            "duplicate field {field} cannot be accepted"
+        );
+    }
     let invalid = br#"{"version":1,"event_id":"event","timestamp_ms":0,"headers_json":"{}","content_type":"text/plain","payload":[256]}"#;
     assert!(matches!(decode(invalid, limits), Err(RedisProviderError::Operation(_))));
 }

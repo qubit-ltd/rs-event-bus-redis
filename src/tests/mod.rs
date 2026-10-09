@@ -11,8 +11,12 @@
 mod bounded_wire_decoder_tests;
 mod client;
 mod consumer_identity_tests;
+#[cfg(any(feature = "sync", feature = "async"))]
+mod diagnostics_tests;
 mod error_tests;
 mod internal;
+#[cfg(all(feature = "sync", feature = "async"))]
+mod provider_tests;
 mod redis_event_bus_config_tests;
 mod redis_provider_error_tests;
 mod stream_protocol_tests;

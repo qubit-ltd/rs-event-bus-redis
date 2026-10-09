@@ -96,21 +96,17 @@ pub enum RedisProviderError {
 /// wire data.
 #[cfg(any(feature = "sync", feature = "async"))]
 pub(crate) fn from_redis_error(operation: &'static str, error: &RedisError) -> RedisProviderError {
-    let code_class = match error.code().unwrap_or_default() {
-        "NOAUTH" | "WRONGPASS" | "NOPERM" => Some(("authentication", Some(false))),
-        "WRONGTYPE" => Some(("wrong_type", Some(false))),
-        "OOM" => Some(("out_of_memory", Some(false))),
-        "LOADING" | "TRYAGAIN" | "MASTERDOWN" | "READONLY" => Some(("temporarily_unavailable", Some(true))),
-        "MOVED" | "ASK" | "CROSSSLOT" | "CLUSTERDOWN" => Some(("unsupported_topology", Some(false))),
-        _ => None,
-    };
+    let code_class = redis_error_code_class(error.code().unwrap_or_default());
     let (kind, retryable) = code_class.unwrap_or_else(|| match error.kind() {
         ErrorKind::AuthenticationFailed => ("authentication", Some(false)),
         ErrorKind::TypeError => ("wrong_type", Some(false)),
-        ErrorKind::InvalidClientConfig | ErrorKind::EmptySentinelList => ("configuration", Some(false)),
-        ErrorKind::BusyLoadingError | ErrorKind::TryAgain | ErrorKind::MasterDown | ErrorKind::ReadOnly => {
-            ("temporarily_unavailable", Some(true))
+        ErrorKind::InvalidClientConfig | ErrorKind::EmptySentinelList => {
+            ("configuration", Some(false))
         }
+        ErrorKind::BusyLoadingError
+        | ErrorKind::TryAgain
+        | ErrorKind::MasterDown
+        | ErrorKind::ReadOnly => ("temporarily_unavailable", Some(true)),
         ErrorKind::IoError => ("transport", Some(true)),
         ErrorKind::ParseError | ErrorKind::RESP3NotSupported => ("protocol", Some(false)),
         ErrorKind::Moved
@@ -126,3 +122,24 @@ pub(crate) fn from_redis_error(operation: &'static str, error: &RedisError) -> R
         retryable,
     }
 }
+
+/// Maps a server-supplied Redis error code to a stable provider category.
+#[inline]
+fn redis_error_code_class(code: &str) -> Option<(&'static str, Option<bool>)> {
+    match code {
+        "NOAUTH" | "WRONGPASS" | "NOPERM" => Some(("authentication", Some(false))),
+        "WRONGTYPE" => Some(("wrong_type", Some(false))),
+        "OOM" => Some(("out_of_memory", Some(false))),
+        "LOADING" | "TRYAGAIN" | "MASTERDOWN" | "READONLY" => {
+            Some(("temporarily_unavailable", Some(true)))
+        }
+        "MOVED" | "ASK" | "CROSSSLOT" | "CLUSTERDOWN" => {
+            Some(("unsupported_topology", Some(false)))
+        }
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+#[path = "tests/redis_error_code_class_tests.rs"]
+mod redis_error_code_class_tests;

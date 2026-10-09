@@ -197,8 +197,63 @@ mod tests {
     use tempfile::tempdir;
 
     use super::MAX_TLS_FILE_BYTES;
+    use super::build_client;
     use super::load_certificates;
     use super::read_pem;
+
+    /// Rejects an invalid client key after parsing its certificate without exposing file content.
+    #[test]
+    fn test_tls_invalid_client_key_is_rejected_without_details() {
+        let directory = tempdir().expect("temporary directory");
+        let cert_path = directory.path().join("client-cert.pem");
+        let key_path = directory.path().join("client-key.pem");
+        fs::write(
+            &cert_path,
+            b"-----BEGIN CERTIFICATE-----\nAQID\n-----END CERTIFICATE-----\n",
+        )
+        .expect("write parseable certificate PEM");
+        fs::write(&key_path, b"PRIVATE KEY CONTENT").expect("write invalid private key PEM");
+
+        let result = load_certificates(
+            None,
+            Some(cert_path.to_str().expect("UTF-8 temporary path")),
+            Some(key_path.to_str().expect("UTF-8 temporary path")),
+        );
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("invalid private key is rejected"),
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "invalid Redis TLS configuration- InvalidClientConfig"
+        );
+        assert!(!error.to_string().contains("PRIVATE KEY CONTENT"));
+        assert!(!error.to_string().contains(key_path.to_str().expect("key path")));
+    }
+
+    /// Sanitizes redis-rs certificate-construction failures before returning them.
+    #[test]
+    fn test_tls_client_build_failure_is_sanitized() {
+        let connection_info = redis::Client::open("redis://localhost/")
+            .expect("parse plaintext connection info")
+            .get_connection_info()
+            .clone();
+        let certificates = redis::TlsCertificates {
+            client_tls: None,
+            root_cert: None,
+        };
+
+        let error = match build_client(connection_info, Some(&certificates)) {
+            Err(error) => error,
+            Ok(_) => panic!("invalid root certificate is rejected"),
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "invalid Redis TLS configuration- InvalidClientConfig"
+        );
+    }
 
     /// Enforces the exact inclusive per-file size limit before PEM parsing.
     #[test]

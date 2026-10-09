@@ -18,8 +18,20 @@ fn test_redis_error_categories_are_stable_and_secret_safe() {
     for (error_kind, expected_kind, expected_retryable) in [
         (ErrorKind::AuthenticationFailed, "authentication", Some(false)),
         (ErrorKind::TypeError, "wrong_type", Some(false)),
+        (ErrorKind::InvalidClientConfig, "configuration", Some(false)),
+        (ErrorKind::EmptySentinelList, "configuration", Some(false)),
+        (ErrorKind::BusyLoadingError, "temporarily_unavailable", Some(true)),
+        (ErrorKind::TryAgain, "temporarily_unavailable", Some(true)),
+        (ErrorKind::MasterDown, "temporarily_unavailable", Some(true)),
+        (ErrorKind::ReadOnly, "temporarily_unavailable", Some(true)),
         (ErrorKind::IoError, "transport", Some(true)),
+        (ErrorKind::ParseError, "protocol", Some(false)),
+        (ErrorKind::RESP3NotSupported, "protocol", Some(false)),
         (ErrorKind::Moved, "unsupported_topology", Some(false)),
+        (ErrorKind::Ask, "unsupported_topology", Some(false)),
+        (ErrorKind::CrossSlot, "unsupported_topology", Some(false)),
+        (ErrorKind::ClusterDown, "unsupported_topology", Some(false)),
+        (ErrorKind::ClusterConnectionNotFound, "unsupported_topology", Some(false)),
         (ErrorKind::ExtensionError, "redis_error", None),
     ] {
         let error = RedisError::from((error_kind, "password=secret"));
