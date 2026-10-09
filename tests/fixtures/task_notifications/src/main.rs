@@ -212,7 +212,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let url = arguments.next().ok_or("expected Redis URL")?;
     let tls_ca_path = arguments.next();
     let database_dir = tempfile::tempdir()?;
-    let store = Arc::new(SqliteTaskStore::open_next(database_dir.path().join("tasks.sqlite"))?);
+    let store = Arc::new(SqliteTaskStore::open(database_dir.path().join("tasks.sqlite"))?);
     let bus = create_bus(
         &url,
         "task-notification-fixture",
