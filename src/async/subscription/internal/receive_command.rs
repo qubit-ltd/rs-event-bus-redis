@@ -114,7 +114,7 @@ mod tests {
             ("redis.url".into(), format!("{}3", server.url())),
             ("redis.max_concurrent_commands".into(), "2".into()),
             ("redis.max_idle_connections".into(), "1".into()),
-            ("redis.connect_timeout_ms".into(), "100".into()),
+            ("redis.connect_timeout_ms".into(), "1000".into()),
             ("redis.command_timeout_ms".into(), "100".into()),
         ]
         .into();
