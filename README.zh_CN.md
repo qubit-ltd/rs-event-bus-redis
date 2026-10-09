@@ -29,7 +29,7 @@ cargo run --example sync_orders -- redis://127.0.0.1/ local-sync-orders
 cargo run --example async_orders -- redis://127.0.0.1/ local-async-orders
 ```
 
-启动 Redis 后，两个示例会注册 UTF-8 codec、发布订单事件、消费并关闭资源。[用户指南](doc/user_guide.zh_CN.md) 给出使用唯一 namespace、持久 `billing` 消费组和新组起始游标的完整命令，也提供 Docker fixture 与 Sentinel 配置。
+启动 Redis 后，两个示例会注册 UTF-8 codec、发布订单事件、消费并关闭资源。示例使用持久消费组：新组从 `Earliest` 开始，订阅会显式选择沿用已有组保存的游标。这是示例的订阅级选项，不会改变 provider 的默认策略。进程退出后，Redis 仍会保留 stream 数据和消费组。要隔离演示数据，可使用新的 namespace 或干净的 Redis fixture。异步示例打印消费结果后会等待你按 Enter，再关闭资源。[用户指南](doc/user_guide.zh_CN.md) 给出使用唯一 namespace、持久 `billing` 消费组和新组起始游标的完整命令，也提供 Docker fixture 与 Sentinel 配置。
 
 ## 为什么需要这个项目
 
@@ -51,7 +51,7 @@ Redis 使用至少一次投递，业务 handler 应能处理重复事件。`XADD
 
 provider 对单条 wire、payload 和解码后的 headers 字符串设置有限容量，默认分别为 8 MiB、1 MiB 和 64 KiB；facade 另有默认各 1 MiB 的编码发布/接收限制。接收超限会停止订阅，保留 pending 记录，不确认也不隔离。公开发布错误可通过 `PublishFailure.effect()` 判断效果；`XADD` 回复丢失属于未知结果，默认禁止盲目重发。仍支持 wire 版本 1。升级步骤见[迁移指南](doc/migration.zh_CN.md)。
 
-已有 Redis 消费组的起始位置现在有明确规则：`StartPosition::New` 沿用已保存游标；默认情况下，`Earliest` 和 `At` 返回 `existing_group_start_position_ignored`，不再静默忽略请求的位置。显式设置 `redis.existing_group_start=resume` 可选择继续使用已有游标；该选项不会执行 `XGROUP SETID`。详见[消费组恢复指南](doc/user_guide.zh_CN.md#6-理解投递重试和清理)和[迁移指南](doc/migration.zh_CN.md#已有消费组起始位置变更)。
+已有 Redis 消费组的起始位置现在有明确规则：`StartPosition::New` 沿用已保存游标；默认情况下，`Earliest` 和 `At` 返回 `existing_group_start_position_ignored`，不再静默忽略请求的位置。订阅可通过 `redis.existing_group_start=resume` 显式选择继续使用已有游标；该选项不会执行 `XGROUP SETID`。详见[消费组恢复指南](doc/user_guide.zh_CN.md#6-理解投递重试和清理)和[迁移指南](doc/migration.zh_CN.md#已有消费组起始位置变更)。
 
 Core 0.20 分别限制 handler 运行数、全局持有投递数、每订阅持有量和注册订阅数。`RedisSubscriptionProfile` 要求明确指定起始位置，并构造 durable options；Redis 新读取的 stream entry 报告 provider attempt `Some(1)`，pending 和 claim 恢复的历史次数仍未知。结算只对明确可重试的错误执行有限重试，重试性未知时停止订阅。[用户指南](doc/user_guide.zh_CN.md) 说明首个终止原因、投递指标、持久恢复、provider snapshot 采集，以及限制等待时间但不保证强制退出进程的关闭策略。
 
@@ -86,6 +86,8 @@ cargo test --all-features
 ./.infra/bin/coverage.sh
 ```
 
+格式化请运行 `./.infra/bin/align-ci.sh`；它会按项目规则改写文件。`./.infra/bin/ci-check.sh` 用于验证 CI 要求。单独运行 `cargo fmt --check` 不能替代项目的正式格式门禁。
+
 ## 许可证
 
 Copyright (c) 2025 - 2026. Haixing Hu. All rights reserved.
@@ -95,8 +97,8 @@ Copyright (c) 2025 - 2026. Haixing Hu. All rights reserved.
 
 ## 贡献
 
-欢迎贡献。请遵循 Rust API 指南，及时更新公共 API 文档与测试，并在提交
-Pull Request 前运行 `./.infra/bin/align-ci.sh`格式化代码，运行`./.infra/bin/ci-check.sh`对齐CI要求。
+欢迎贡献。请遵循 Rust API 指南，及时更新公共 API 文档与测试。提交
+Pull Request 前，先运行 `./.infra/bin/align-ci.sh` 按项目规则格式化，再运行 `./.infra/bin/ci-check.sh` 验证 CI 要求。单独运行 `cargo fmt --check` 不能替代项目的格式门禁。
 
 ## 作者
 

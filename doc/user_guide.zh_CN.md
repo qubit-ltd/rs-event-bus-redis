@@ -76,7 +76,7 @@ pub(crate) fn facade_config() -> Result<EventBusFacadeConfig, Box<dyn Error>> {
 
 ## 3. 使用同步 SPI 发布和消费
 
-服务配置只需要 Redis URL 和 namespace。显式选择 `redis-streams`，避免 registry fallback 意外使用其他 provider。
+服务配置显式选择 `redis-streams`，避免 registry fallback 意外使用其他 provider。示例还设置了 namespace，并选择沿用已有消费组；此选项用于重复运行演示，不会改变 provider 默认的 `reject` 策略。
 
 <!-- doc-example: sync-discovery -->
 ```rust
@@ -126,6 +126,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             RedisSubscriptionProfile::new(StartPosition::Earliest)
                 .consumer_group(ConsumerGroup::new("billing")?)
                 .options()
+                .provider_option("redis.existing_group_start", "resume")
                 .build(),
         ),
         move |delivery| {
@@ -145,7 +146,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-此入门练习先安装账单 handler，再发布 `order-42`，等待 handler 发出通知，打印 `consumed order event: order-42`，最后取消订阅并关闭总线。生产 handler 应完成并提交应用自己的账单变更后才返回 `Ok(())`；打印和 channel 通知只是练习的验收信号。总线和订阅应由服务的启动、关闭模块持有。新建的 `Earliest` 消费组也能读取已保留的记录。生产服务若使用 `New`，应先注册 consumer，再依赖后续发布的事件。Redis Streams 只接受 `Durable` 订阅；`Ephemeral` 会在执行 Redis I/O 前被拒绝。服务断连或关闭订阅时，group 会保留，未结算记录仍在 pending entries list 中。Redis 只在首次创建 group 时应用起始位置。
+此入门练习先安装账单 handler，再发布 `order-42`，等待 handler 发出通知，打印 `consumed order event: order-42`，最后取消订阅并关闭总线。生产 handler 应完成并提交应用自己的账单变更后才返回 `Ok(())`；打印和 channel 通知只是练习的验收信号。总线和订阅应由服务的启动、关闭模块持有。第一次运行会从 `Earliest` 创建消费组；再次运行时，订阅通过 `redis.existing_group_start=resume` 显式选择沿用 Redis 保存的游标。Redis 只在首次创建 group 时应用起始位置；恢复时不会执行 `XGROUP SETID`，也不会重放已确认的历史记录。更换 namespace 可隔离演示数据；已有 pending 记录仍可能先于本次发布的事件交付。新建的 `Earliest` 消费组也能读取已保留的记录。生产服务若使用 `New`，应先注册 consumer，再依赖后续发布的事件。Redis Streams 只接受 `Durable` 订阅；`Ephemeral` 会在执行 Redis I/O 前被拒绝。服务断连或关闭订阅时，group 会保留，未结算记录仍在 pending entries list 中。
 
 限额内格式错误的版本 1 wire 记录会被原子复制到按 group 隔离的 stream（`qubit:poison:*`），并从源 group 确认。隔离记录包含 `source_stream`、`source_id`、`group`、稳定的 `reason`、原始 `wire` 字节和 `wire_missing`。隔离成功后返回 `Gap`，不会把 payload 放进错误信息。可用 `XRANGE <quarantine-key> - + COUNT 100` 读取一页记录，并用 `XLEN`、`XPENDING` 监控隔离流、源 stream 和 pending 数量；完整检查须继续翻页。provider 不会自动裁剪这些 stream；运维应按保留策略归档或清理隔离数据。
 
@@ -207,6 +208,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 RedisSubscriptionProfile::new(StartPosition::Earliest)
                     .consumer_group(ConsumerGroup::new("billing")?)
                     .options()
+                    .provider_option("redis.existing_group_start", "resume")
                     .build(),
             ),
         ).await?;
@@ -285,7 +287,7 @@ REDIS_SENTINEL_SERVICE_NAME=qeventbus \
   cargo run --example sentinel_orders -- local-sentinel-orders
 ```
 
-异步示例会先消费事件，再等待用户按 Enter 关闭；这样 handler 能先完成，runner 随后取消其下一次接收。每条命令都需要对应的 standalone Redis 或 Sentinel 服务，并启用该示例所需的 features。
+异步示例会先消费事件，再等待用户按 Enter 关闭；这样 handler 能先完成，runner 随后取消其下一次接收。示例使用持久消费组，并在订阅级显式选择沿用已有组保存的游标；新组仍从 `Earliest` 开始。进程退出后 Redis 仍会保留 stream 数据和 group；要重新开始干净的演示，可换一个 namespace。已有 pending 记录可能先于本次运行发布的事件交付。每条命令都需要对应的 standalone Redis 或 Sentinel 服务，并启用该示例所需的 features。
 
 ## 5. 配置 Redis 与 Sentinel
 

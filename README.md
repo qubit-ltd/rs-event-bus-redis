@@ -29,7 +29,7 @@ cargo run --example sync_orders -- redis://127.0.0.1/ local-sync-orders
 cargo run --example async_orders -- redis://127.0.0.1/ local-async-orders
 ```
 
-With a running Redis service, each example registers a UTF-8 codec, publishes an order event, consumes it, and closes its resources. The [user guide](doc/user_guide.md) provides complete commands with a unique namespace, a durable `billing` group, and the new-group start cursor, plus the Docker fixture command and Sentinel setup.
+With a running Redis service, each example registers a UTF-8 codec, publishes an order event, consumes it, and closes its resources. These examples use durable consumer groups: a new group starts at `Earliest`, and their subscriptions explicitly opt in to resuming an existing group's saved cursor. This is an example subscription option; it does not change the provider's default policy. Redis keeps stream data and groups after the process exits. Use a new namespace or a clean Redis fixture for an isolated demonstration. The async example waits for you to press Enter after it prints the consumed event, then closes. The [user guide](doc/user_guide.md) provides complete commands with a unique namespace, a durable `billing` group, and the new-group start cursor, plus the Docker fixture command and Sentinel setup.
 
 ## Why This Project Exists
 
@@ -62,7 +62,7 @@ Redis delivery is at least once. Handlers should tolerate duplicates. A successf
 
 Each wire record, payload, and decoded headers string has a finite provider limit (8 MiB, 1 MiB, and 64 KiB by default), in addition to the facade's 1 MiB encoded publish/receive limits. Receive overflow stops the subscription and retains the pending entry without acknowledgement or quarantine. Public publication errors report `PublishFailure.effect()`; lost `XADD` replies are uncertain and default retry policy forbids blind resubmission. Version 1 wire data remains supported. See the [migration guide](doc/migration.md).
 
-Redis consumer-group startup is explicit when a group already exists: `StartPosition::New` resumes its stored cursor, while `Earliest` and `At` return `existing_group_start_position_ignored` by default instead of silently ignoring the requested position. Set `redis.existing_group_start=resume` to deliberately keep reading from the existing cursor; this does not run `XGROUP SETID`. See the [group recovery guide](doc/user_guide.md#6-understand-delivery-retry-and-cleanup) and [migration guide](doc/migration.md#existing-consumer-group-start-position-change).
+Redis consumer-group startup is explicit when a group already exists: `StartPosition::New` resumes its stored cursor, while `Earliest` and `At` return `existing_group_start_position_ignored` by default instead of silently ignoring the requested position. A subscription can opt in with `redis.existing_group_start=resume` to keep reading from the existing cursor; this does not run `XGROUP SETID`. See the [group recovery guide](doc/user_guide.md#6-understand-delivery-retry-and-cleanup) and [migration guide](doc/migration.md#existing-consumer-group-start-position-change).
 
 Core 0.20 bounds running handlers, owned deliveries, per-subscription ownership, and registered subscriptions separately. `RedisSubscriptionProfile` requires an explicit start position and builds durable options; new stream entries report provider attempt `Some(1)`, while pending and claimed entries remain unknown. Settlement retries are finite and require explicitly retryable errors; unknown retryability stops the subscription. The [user guide](doc/user_guide.md) covers first-cause diagnostics, delivery metrics, durable recovery, provider snapshot sampling, and bounded shutdown waits that do not guarantee forced process exit.
 
@@ -97,6 +97,8 @@ cargo test --all-features
 ./.infra/bin/coverage.sh
 ```
 
+For formatting, `./.infra/bin/align-ci.sh` applies the project's formatting rules and may rewrite files; `./.infra/bin/ci-check.sh` verifies the CI requirements. A standalone `cargo fmt --check` does not replace these project checks.
+
 ## License
 
 Copyright (c) 2025 - 2026. Haixing Hu. All rights reserved.
@@ -107,8 +109,7 @@ full license text.
 ## Contributing
 
 Contributions are welcome. Please follow the Rust API guidelines, keep public
-API documentation and tests current, and run `./.infra/bin/align-ci.sh` to format code and
-`./.infra/bin/ci-check.sh` to satisfy CI requirements before submitting a pull request.
+API documentation and tests current, run `./.infra/bin/align-ci.sh` to apply the project's formatting rules, then run `./.infra/bin/ci-check.sh` to verify CI requirements before submitting a pull request. `cargo fmt --check` alone does not replace the project's formatting gate.
 
 ## Author
 

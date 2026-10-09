@@ -76,7 +76,7 @@ This is a reusable module fragment. Paste it above either `main` below in `src/m
 
 ## 3. Publish and consume synchronously
 
-The service config contains only a Redis URL and a namespace. Select `redis-streams` explicitly so registry fallback cannot silently choose another backend.
+The service config selects `redis-streams` explicitly so registry fallback cannot silently choose another backend. The example also sets a namespace and opts into resuming an existing group; this option is for repeatable demos and does not change the provider's default `reject` policy.
 
 <!-- doc-example: sync-discovery -->
 ```rust
@@ -126,6 +126,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             RedisSubscriptionProfile::new(StartPosition::Earliest)
                 .consumer_group(ConsumerGroup::new("billing")?)
                 .options()
+                .provider_option("redis.existing_group_start", "resume")
                 .build(),
         ),
         move |delivery| {
@@ -145,7 +146,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-This entry exercise installs the billing handler, publishes `order-42`, waits for its notification, and prints `consumed order event: order-42` before cancelling and shutting down. A production handler must commit the application’s billing change before returning `Ok(())`; printing or notifying a channel is only the exercise’s observable result. Keep the bus and subscription in the application startup/shutdown owner. A new `Earliest` group can also read retained events. In production, register the consumer before relying on `New`, which starts after the group is created. Redis Streams accepts only `Durable` subscriptions; `Ephemeral` is rejected before Redis I/O. Groups remain when a service disconnects, and closing a subscription leaves unsettled records pending. Redis applies the start position only when it first creates a group.
+This entry exercise installs the billing handler, publishes `order-42`, waits for its notification, and prints `consumed order event: order-42` before cancelling and shutting down. A production handler must commit the application’s billing change before returning `Ok(())`; printing or notifying a channel is only the exercise’s observable result. Keep the bus and subscription in the application startup/shutdown owner. The first run creates a group at `Earliest`; later runs opt in at the subscription level with `redis.existing_group_start=resume` and continue from Redis's saved cursor. Redis applies the start position only when it first creates a group: resuming never issues `XGROUP SETID` and does not replay already acknowledged history. Change the namespace to isolate demo data. Existing pending entries can still be delivered first. A new `Earliest` group can also read retained events. In production, register the consumer before relying on `New`, which starts after the group is created. Redis Streams accepts only `Durable` subscriptions; `Ephemeral` is rejected before Redis I/O. Groups remain when a service disconnects, and closing a subscription leaves unsettled records pending.
 
 Malformed in-limit version 1 wire records are copied atomically to a group-specific quarantine stream (`qubit:poison:*`) and acknowledged from the source group. The quarantine record stores `source_stream`, `source_id`, `group`, a stable `reason`, the original `wire` bytes, and `wire_missing`. A successful quarantine is returned as a `Gap` without exposing payload bytes. Inspect a page with `XRANGE <quarantine-key> - + COUNT 100`; monitor quarantine length, source stream length, and pending entries with `XLEN` and `XPENDING`. Page through the remaining IDs for a complete inspection. The provider never trims these streams automatically, so operators should archive or remove quarantine records under their retention policy.
 
@@ -209,6 +210,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 RedisSubscriptionProfile::new(StartPosition::Earliest)
                     .consumer_group(ConsumerGroup::new("billing")?)
                     .options()
+                    .provider_option("redis.existing_group_start", "resume")
                     .build(),
             ),
         ).await?;
@@ -287,7 +289,7 @@ REDIS_SENTINEL_SERVICE_NAME=qeventbus \
   cargo run --example sentinel_orders -- local-sentinel-orders
 ```
 
-The async example runs until it consumes the event, then waits for Enter before closing; this lets the handler finish before the runner cancels its next receive. Each command needs the matching standalone Redis or Sentinel service and the features required by that example.
+The async example runs until it consumes the event, then waits for Enter before closing; this lets the handler finish before the runner cancels its next receive. These examples use durable groups and opt in at the subscription level to resume an existing group's saved cursor, while new groups still start at `Earliest`. Redis retains stream data and groups after the process exits; a fresh demonstration can use a new namespace. Existing pending entries may be delivered before the event published by the current run. Each command needs the matching standalone Redis or Sentinel service and the features required by that example.
 
 ## 5. Configure Redis and Sentinel
 
