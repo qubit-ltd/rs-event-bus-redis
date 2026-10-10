@@ -201,7 +201,8 @@ mod tests {
     use super::load_certificates;
     use super::read_pem;
 
-    /// Rejects an invalid client key after parsing its certificate without exposing file content.
+    /// Rejects an invalid client key after parsing its certificate without
+    /// exposing file content.
     #[test]
     fn test_tls_invalid_client_key_is_rejected_without_details() {
         let directory = tempdir().expect("temporary directory");
@@ -232,7 +233,8 @@ mod tests {
         assert!(!error.to_string().contains(key_path.to_str().expect("key path")));
     }
 
-    /// Sanitizes redis-rs certificate-construction failures before returning them.
+    /// Sanitizes redis-rs certificate-construction failures before returning
+    /// them.
     #[test]
     fn test_tls_client_build_failure_is_sanitized() {
         let connection_info = redis::Client::open("redis://localhost/")

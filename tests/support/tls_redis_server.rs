@@ -9,7 +9,6 @@
 
 use std::error::Error;
 use std::fs;
-use std::net::TcpListener;
 use std::process::Command;
 use std::process::Stdio;
 use std::thread::sleep;
@@ -80,17 +79,11 @@ impl TlsRedisServer {
             "/CN=Wrong-Test-CA",
         ])?;
 
-        let port = TcpListener::bind(("127.0.0.1", 0))?.local_addr()?.port();
-        let port_mapping = format!("127.0.0.1:{port}:6379");
         let mount = format!("{}:/tls:ro", directory.path().display());
         let client_auth = if require_client_auth { "yes" } else { "no" };
-        let output = Command::new("docker")
-            .args([
-                "run",
-                "-d",
-                "--rm",
-                "-p",
-                &port_mapping,
+        let (container_id, port) = super::redis_server::start_mapped_container(
+            &["run", "-d", "--rm"],
+            &[
                 "-v",
                 &mount,
                 "redis:7-alpine",
@@ -109,16 +102,9 @@ impl TlsRedisServer {
                 client_auth,
                 "--appendonly",
                 "yes",
-            ])
-            .output()?;
-        if !output.status.success() {
-            return Err(format!(
-                "docker run for TLS Redis failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            )
-            .into());
-        }
-        let container_id = String::from_utf8(output.stdout)?.trim().to_owned();
+            ],
+            6379,
+        )?;
         let ca_path = directory.path().join("ca.crt").to_string_lossy().into_owned();
         let client_cert_path = directory.path().join("client.crt").to_string_lossy().into_owned();
         let client_key_path = directory.path().join("client.key").to_string_lossy().into_owned();

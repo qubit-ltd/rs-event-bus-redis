@@ -1,3 +1,10 @@
+// =============================================================================
+//    Copyright (c) 2025 - 2026 Haixing Hu.
+//
+//    SPDX-License-Identifier: Apache-2.0
+//
+//    Licensed under the Apache License, Version 2.0.
+// =============================================================================
 use super::redis_error_code_class;
 
 #[test]
@@ -18,10 +25,6 @@ fn test_server_error_codes_map_to_stable_categories() {
         ("CLUSTERDOWN", Some(("unsupported_topology", Some(false)))),
         ("ERR", None),
     ] {
-        assert_eq!(
-            redis_error_code_class(code),
-            expected,
-            "unexpected mapping for {code}"
-        );
+        assert_eq!(redis_error_code_class(code), expected, "unexpected mapping for {code}");
     }
 }

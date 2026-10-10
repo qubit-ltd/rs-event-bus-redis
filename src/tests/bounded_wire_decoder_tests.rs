@@ -105,10 +105,7 @@ fn duplicate_version_and_invalid_bytes_are_malformed() {
             r#"{{"version":1,"event_id":"event","timestamp_ms":0,"headers_json":"{{}}","ordering_key":"key","content_type":"text/plain","schema_id":"schema","payload":[0],"{field}":{duplicate}}}"#
         );
         assert!(
-            matches!(
-                decode(wire.as_bytes(), limits),
-                Err(RedisProviderError::Operation(_))
-            ),
+            matches!(decode(wire.as_bytes(), limits), Err(RedisProviderError::Operation(_))),
             "duplicate field {field} cannot be accepted"
         );
     }

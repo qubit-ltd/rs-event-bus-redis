@@ -100,13 +100,10 @@ pub(crate) fn from_redis_error(operation: &'static str, error: &RedisError) -> R
     let (kind, retryable) = code_class.unwrap_or_else(|| match error.kind() {
         ErrorKind::AuthenticationFailed => ("authentication", Some(false)),
         ErrorKind::TypeError => ("wrong_type", Some(false)),
-        ErrorKind::InvalidClientConfig | ErrorKind::EmptySentinelList => {
-            ("configuration", Some(false))
+        ErrorKind::InvalidClientConfig | ErrorKind::EmptySentinelList => ("configuration", Some(false)),
+        ErrorKind::BusyLoadingError | ErrorKind::TryAgain | ErrorKind::MasterDown | ErrorKind::ReadOnly => {
+            ("temporarily_unavailable", Some(true))
         }
-        ErrorKind::BusyLoadingError
-        | ErrorKind::TryAgain
-        | ErrorKind::MasterDown
-        | ErrorKind::ReadOnly => ("temporarily_unavailable", Some(true)),
         ErrorKind::IoError => ("transport", Some(true)),
         ErrorKind::ParseError | ErrorKind::RESP3NotSupported => ("protocol", Some(false)),
         ErrorKind::Moved
@@ -130,12 +127,8 @@ fn redis_error_code_class(code: &str) -> Option<(&'static str, Option<bool>)> {
         "NOAUTH" | "WRONGPASS" | "NOPERM" => Some(("authentication", Some(false))),
         "WRONGTYPE" => Some(("wrong_type", Some(false))),
         "OOM" => Some(("out_of_memory", Some(false))),
-        "LOADING" | "TRYAGAIN" | "MASTERDOWN" | "READONLY" => {
-            Some(("temporarily_unavailable", Some(true)))
-        }
-        "MOVED" | "ASK" | "CROSSSLOT" | "CLUSTERDOWN" => {
-            Some(("unsupported_topology", Some(false)))
-        }
+        "LOADING" | "TRYAGAIN" | "MASTERDOWN" | "READONLY" => Some(("temporarily_unavailable", Some(true))),
+        "MOVED" | "ASK" | "CROSSSLOT" | "CLUSTERDOWN" => Some(("unsupported_topology", Some(false))),
         _ => None,
     }
 }

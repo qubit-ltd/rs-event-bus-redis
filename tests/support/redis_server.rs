@@ -49,24 +49,8 @@ impl RedisServer {
     /// readiness fails.
     pub fn start_version(image_tag: &str) -> Result<Self, Box<dyn Error>> {
         let image = format!("redis:{image_tag}");
-        let port = TcpListener::bind(("127.0.0.1", 0))?.local_addr()?.port();
-        let port_mapping = format!("127.0.0.1:{port}:6379");
-        let output = Command::new("docker")
-            .args([
-                "run",
-                "-d",
-                "-p",
-                port_mapping.as_str(),
-                &image,
-                "redis-server",
-                "--appendonly",
-                "yes",
-            ])
-            .output()?;
-        if !output.status.success() {
-            return Err(format!("docker run failed: {}", String::from_utf8_lossy(&output.stderr)).into());
-        }
-        let container_id = String::from_utf8(output.stdout)?.trim().to_owned();
+        let (container_id, port) =
+            start_mapped_container(&["run", "-d"], &[&image, "redis-server", "--appendonly", "yes"], 6379)?;
         let server = Self {
             container_id,
             url: format!("redis://127.0.0.1:{port}/"),
@@ -119,6 +103,37 @@ impl RedisServer {
     }
 }
 
+/// Starts a Docker container on a free loopback port and retries bind races.
+pub(super) fn start_mapped_container(
+    before_mapping: &[&str],
+    after_mapping: &[&str],
+    container_port: u16,
+) -> Result<(String, u16), Box<dyn Error>> {
+    let mut last_error = String::new();
+    for _ in 0..10 {
+        let port = TcpListener::bind(("127.0.0.1", 0))?.local_addr()?.port();
+        let mapping = format!("127.0.0.1:{port}:{container_port}");
+        let output = Command::new("docker")
+            .args(before_mapping)
+            .args(["-p", mapping.as_str()])
+            .args(after_mapping)
+            .output()?;
+        if output.status.success() {
+            return Ok((String::from_utf8(output.stdout)?.trim().to_owned(), port));
+        }
+        last_error = String::from_utf8_lossy(&output.stderr).into_owned();
+        if !is_port_allocation_conflict(&last_error) {
+            return Err(format!("docker run failed: {last_error}").into());
+        }
+    }
+    Err(format!("docker could not allocate a test port after 10 attempts: {last_error}").into())
+}
+
+/// Returns whether Docker failed because another process claimed the port.
+fn is_port_allocation_conflict(error: &str) -> bool {
+    error.contains("port is already allocated") || error.contains("address already in use")
+}
+
 impl Drop for RedisServer {
     /// Removes the container owned by this test fixture.
     ///
@@ -129,5 +144,22 @@ impl Drop for RedisServer {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_port_allocation_conflict;
+
+    #[test]
+    fn test_port_allocation_conflict_is_retryable() {
+        assert!(is_port_allocation_conflict(
+            "Bind for 127.0.0.1:49153 failed: port is already allocated"
+        ));
+    }
+
+    #[test]
+    fn test_other_docker_failures_are_not_port_allocation_conflicts() {
+        assert!(!is_port_allocation_conflict("Unable to find image redis:latest"));
     }
 }

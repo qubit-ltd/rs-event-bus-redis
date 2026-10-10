@@ -31,7 +31,11 @@ fn test_redis_error_categories_are_stable_and_secret_safe() {
         (ErrorKind::Ask, "unsupported_topology", Some(false)),
         (ErrorKind::CrossSlot, "unsupported_topology", Some(false)),
         (ErrorKind::ClusterDown, "unsupported_topology", Some(false)),
-        (ErrorKind::ClusterConnectionNotFound, "unsupported_topology", Some(false)),
+        (
+            ErrorKind::ClusterConnectionNotFound,
+            "unsupported_topology",
+            Some(false),
+        ),
         (ErrorKind::ExtensionError, "redis_error", None),
     ] {
         let error = RedisError::from((error_kind, "password=secret"));
