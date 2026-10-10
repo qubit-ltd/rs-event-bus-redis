@@ -1,0 +1,2 @@
+# Keep descriptively named regression seeds; ignore hash-named fuzz corpus entries.
+/corpus/bounded_wire/[0-9a-f]*
