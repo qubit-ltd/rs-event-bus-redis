@@ -1,7 +1,27 @@
 # redis-rs
 
+## Qubit-maintained fork
+
+This package is `qubit-redis` version `0.32.7-qubit.1`, based on upstream
+[redis-rs 0.32.7](https://github.com/redis-rs/redis-rs/tree/redis-0.32.7).
+It retains the Rust library name `redis` and adds a configurable maximum
+response frame size through `ConnectionConfig::set_max_response_bytes` and
+`AsyncConnectionConfig::set_max_response_bytes` for synchronous and
+asynchronous connections.
+
+Depend on it as `qubit-redis` while continuing to import the `redis` library:
+
+```toml
+[dependencies]
+redis = { package = "qubit-redis", version = "=0.32.7-qubit.1" }
+```
+
+This fork is maintained by Qubit Ltd. The upstream copyright notices and
+`BSD-3-Clause` license are retained; Qubit Ltd. is responsible for fork-specific
+changes and releases.
+
 [![Rust](https://github.com/redis-rs/redis-rs/actions/workflows/rust.yml/badge.svg)](https://github.com/redis-rs/redis-rs/actions/workflows/rust.yml)
-[![crates.io](https://img.shields.io/crates/v/redis.svg)](https://crates.io/crates/redis)
+[![crates.io](https://img.shields.io/crates/v/qubit-redis.svg)](https://crates.io/crates/qubit-redis)
 [![Chat](https://img.shields.io/discord/976380008299917365?logo=discord)](https://discord.gg/WHKcJK9AKP)
 
 Redis-rs is a high level Rust library for Redis, Valkey and any other RESP 

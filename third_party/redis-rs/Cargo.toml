@@ -12,17 +12,18 @@
 [package]
 edition = "2021"
 rust-version = "1.80"
-name = "redis"
-version = "0.32.7"
+name = "qubit-redis"
+version = "0.32.7-qubit.1"
 build = false
 autolib = false
 autobins = false
 autoexamples = false
 autotests = false
 autobenches = false
-description = "Redis driver for Rust."
+description = "Redis 0.32.7 fork with bounded response frame support"
+exclude = [".cargo_vcs_info.json", "Cargo.toml.orig"]
 homepage = "https://github.com/redis-rs/redis-rs"
-documentation = "https://docs.rs/redis"
+documentation = "https://docs.rs/qubit-redis"
 readme = "README.md"
 keywords = [
     "redis",
@@ -32,7 +33,7 @@ keywords = [
     "pubsub",
 ]
 license = "BSD-3-Clause"
-repository = "https://github.com/redis-rs/redis-rs"
+repository = "https://github.com/qubit-ltd/rs-event-bus-redis"
 
 [package.metadata.docs.rs]
 all-features = true

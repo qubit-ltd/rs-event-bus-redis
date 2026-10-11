@@ -27,7 +27,7 @@ qubit-event-bus = { version = "0.20", path = "../rs-event-bus" }
 qubit-spi = "0.13"
 qubit-id = { version = "0.7", default-features = false, features = ["uuid"] }
 async-lock = { version = "^3", optional = true }
-redis = { version = "^0.32.7", default-features = false, features = ["streams", "sentinel", "tls-rustls-webpki-roots"] }
+redis = { package = "qubit-redis", version = "=0.32.7-qubit.1", default-features = false, features = ["streams", "sentinel", "tls-rustls-webpki-roots"] }
 serde = { version = "^1.0", features = ["derive"] }
 serde_json = "^1.0"
 thiserror = "^2.0"
@@ -37,7 +37,7 @@ rustls = { version = "^0.23", default-features = false, features = ["ring", "std
 qubit-retry = "0.26"
 futures-lite = "^2"
 futures-channel = "^0.3"
-redis = { version = "0.32.7", default-features = false, features = ["tokio-rustls-comp", "streams", "sentinel", "tls-rustls-webpki-roots"] }
+redis = { package = "qubit-redis", version = "=0.32.7-qubit.1", default-features = false, features = ["tokio-rustls-comp", "streams", "sentinel", "tls-rustls-webpki-roots"] }
 tempfile = "^3.27"
 tokio = { version = "^1.53", features = ["rt", "macros"] }
 
@@ -65,6 +65,3 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage)', 'cfg(loom)'] }
 name = "redis_workloads"
 harness = false
 required-features = ["sync", "async"]
-
-[patch.crates-io]
-redis = { path = "third_party/redis-rs" }

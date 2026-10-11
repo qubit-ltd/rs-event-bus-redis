@@ -741,7 +741,7 @@ dependencies = [
 
 [[package]]
 name = "qubit-event-bus"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "qubit-clock",
  "qubit-id",
@@ -759,9 +759,9 @@ dependencies = [
  "futures-lite",
  "qubit-event-bus",
  "qubit-id",
+ "qubit-redis",
  "qubit-retry",
  "qubit-spi",
- "redis",
  "rustls",
  "serde",
  "serde_json",
@@ -781,6 +781,36 @@ dependencies = [
  "qubit-clock",
  "thiserror",
  "uuid",
+]
+
+[[package]]
+name = "qubit-redis"
+version = "0.32.7-qubit.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2cbfbf9c74b634707ef69276e2ed826c45cbec6872b6d70a5542cb83db1f5363"
+dependencies = [
+ "async-io",
+ "bytes",
+ "cfg-if",
+ "combine",
+ "futures-rustls",
+ "futures-util",
+ "itoa",
+ "num-bigint",
+ "percent-encoding",
+ "pin-project-lite",
+ "rand",
+ "rustls",
+ "rustls-native-certs",
+ "ryu",
+ "smol",
+ "smol-timeout",
+ "socket2",
+ "tokio",
+ "tokio-rustls",
+ "tokio-util",
+ "url",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -855,34 +885,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "76afc826de14238e6e8c374ddcc1fa19e374fd8dd986b0d2af0d02377261d83c"
 dependencies = [
  "getrandom 0.3.4",
-]
-
-[[package]]
-name = "redis"
-version = "0.32.7"
-dependencies = [
- "async-io",
- "bytes",
- "cfg-if",
- "combine",
- "futures-rustls",
- "futures-util",
- "itoa",
- "num-bigint",
- "percent-encoding",
- "pin-project-lite",
- "rand",
- "rustls",
- "rustls-native-certs",
- "ryu",
- "smol",
- "smol-timeout",
- "socket2",
- "tokio",
- "tokio-rustls",
- "tokio-util",
- "url",
- "webpki-roots",
 ]
 
 [[package]]
