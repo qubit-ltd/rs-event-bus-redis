@@ -22,6 +22,8 @@ qubit-spi = "0.13"
 
 provider 会通过 registry 依赖解析带响应大小限制的 Redis fork。应用只需添加上面的 provider 依赖，无须配置 Cargo patch 或直接依赖该 fork。
 
+> **TODO：移除 `redis-rs` fork。** provider 目前依赖 fork 提供的 RESP 响应帧大小限制。后续应先将此限制迁移到上游 `redis-rs` 或其他可持续维护的层，再替换 fork 依赖并移除 `third_party/redis-rs`。
+
 ## 快速开始
 
 订单服务可以在启动阶段选择 Redis provider。应用像普通依赖一样链接该 crate；启用 `discovery` 后，provider 会提交到所启用 SPI 对应的 registry inventory，业务代码仍通过 `qubit-event-bus` facade 发布和订阅类型化消息。

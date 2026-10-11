@@ -22,6 +22,8 @@ The default features enable `sync`, `async`, and `discovery`. To keep one SPI wh
 
 The provider resolves its bounded-response Redis client fork as a registry dependency. Applications only need the provider dependency above; no Cargo patch or direct Redis fork dependency is required.
 
+> **TODO:** Remove the `redis-rs` fork. The provider currently relies on its configurable RESP response-frame limit; first move that limit to upstream `redis-rs` or another maintained layer, then replace the fork dependency and remove `third_party/redis-rs`.
+
 ## Quick Start
 
 An order service can select the Redis provider during startup. The provider is linked as an ordinary dependency and, with `discovery`, submitted to each enabled SPI's registry inventory; the application still uses the `qubit-event-bus` facade for typed publish and subscribe calls.
