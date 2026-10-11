@@ -18,10 +18,15 @@ stricter destination requirements fail before publication with
 mean that a handler processed the event or that Redis persisted it to disk.
 Core stops a subscription after a reported gap by default; choose
 `GapPolicy::Continue` only if the application accepts missed events and has a
-recovery policy. New stream entries report provider attempt `Some(1)`; pending
-and claimed entries remain unknown (`None`). Existing wire v1 records, streams,
-groups, and pending entries need no format migration. Retention settings can
-still remove unread or pending history and cause gaps.
+recovery policy. New stream entries report provider attempt `Some(1)`. For each
+pending or claimed recovery delivery, the provider makes one additional
+`XPENDING` detail query. It reports `Some(count)` only when the query returns a
+single row whose ID matches the delivered entry, whose owner is the current
+consumer, and whose count is nonzero and representable. Query failure, missing,
+malformed, or mismatched details report `None`; this count is the Redis pending
+delivery count, not a count reconstructed by the provider. Existing wire v1
+records, streams, groups, and pending entries need no format migration.
+Retention settings can still remove unread or pending history and cause gaps.
 
 ## TLS is opt-in
 
@@ -47,7 +52,7 @@ The original provider 0.7 migration paired `qubit-event-bus-redis` 0.7 with
 `qubit-event-bus` 0.19. For the current provider 0.7 manifest, use core 0.20.
 Replace repeated `durability(Durable)`, `start_position(...)`, and optional `consumer_group(...)` setup with `RedisSubscriptionProfile::new(start_position).consumer_group(group).options()` (omit `consumer_group` when not used). The profile requires an explicit `StartPosition` and always starts with durable options; a later `.durability(Ephemeral)` is rejected by the Redis capability check.
 
-New entries returned from `XREADGROUP >` expose `provider_attempt() == Some(1)`. Pending and `XAUTOCLAIM` recovery entries remain `None` because the historical delivery count is not propagated yet. Existing wire v1 records, Redis groups, and settlement behavior remain compatible. Core 0.19 also changes `CodecRegistry::register` to return an error on duplicate payload registration; see the [core migration guide](https://github.com/qubit-ltd/rs-event-bus/blob/main/doc/migration.md).
+New entries returned from `XREADGROUP >` expose `provider_attempt() == Some(1)`. For every pending or `XAUTOCLAIM` recovery delivery, the provider makes one additional `XPENDING` detail query. It reports `Some(count)` only if the query returns exactly one detail row for that entry ID, owned by the current consumer, with a nonzero count representable by the SPI; failed, missing, malformed, or mismatched details report `None`. This exposes Redis's current pending delivery count and does not reconstruct unavailable history. Existing wire v1 records, Redis groups, and settlement behavior remain compatible. Core 0.19 also changes `CodecRegistry::register` to return an error on duplicate payload registration; see the [core migration guide](https://github.com/qubit-ltd/rs-event-bus/blob/main/doc/migration.md).
 
 Upgrade `qubit-event-bus-redis` from 0.5 to 0.6 together with
 `qubit-event-bus` 0.18. Update direct dependencies, downstream fixtures, and

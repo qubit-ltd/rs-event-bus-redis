@@ -20,6 +20,8 @@ qubit-spi = "0.13"
 
 默认启用 `sync`、`async` 和 `discovery`。如需只保留一种 SPI 并继续使用 registry 自动发现，在 `qubit-event-bus-redis` 上设置 `default-features = false`，选择 `features = ["sync", "discovery"]` 或 `features = ["async", "discovery"]`。只在 `qubit-event-bus` 上启用 discovery 不会注册 Redis provider。`XAUTOCLAIM` 恢复需要 Redis 6.2 或更高版本。
 
+provider 会通过 registry 依赖解析带响应大小限制的 Redis fork。应用只需添加上面的 provider 依赖，无须配置 Cargo patch 或直接依赖该 fork。
+
 ## 快速开始
 
 订单服务可以在启动阶段选择 Redis provider。应用像普通依赖一样链接该 crate；启用 `discovery` 后，provider 会提交到所启用 SPI 对应的 registry inventory，业务代码仍通过 `qubit-event-bus` facade 发布和订阅类型化消息。
@@ -53,7 +55,7 @@ provider 对单条 wire、payload 和解码后的 headers 字符串设置有限�
 
 已有 Redis 消费组的起始位置现在有明确规则：`StartPosition::New` 沿用已保存游标；默认情况下，`Earliest` 和 `At` 返回 `existing_group_start_position_ignored`，不再静默忽略请求的位置。订阅可通过 `redis.existing_group_start=resume` 显式选择继续使用已有游标；该选项不会执行 `XGROUP SETID`。详见[消费组恢复指南](doc/user_guide.zh_CN.md#6-理解投递重试和清理)和[迁移指南](doc/migration.zh_CN.md#已有消费组起始位置变更)。
 
-Core 0.20 分别限制 handler 运行数、全局持有投递数、每订阅持有量和注册订阅数。`RedisSubscriptionProfile` 要求明确指定起始位置，并构造 durable options；新读取的 stream entry 报告 provider attempt `Some(1)`。恢复 pending 或 claim 记录时，只有 Redis 中的记录 ID 与 consumer owner 校验通过后才报告投递次数；否则仍为未知。结算只对明确可重试的错误执行有限重试，重试性未知时停止订阅。[用户指南](doc/user_guide.zh_CN.md) 说明首个终止原因、投递指标、持久恢复、provider snapshot 采集，以及限制等待时间但不保证强制退出进程的关闭策略。
+Core 0.20 分别限制 handler 运行数、全局持有投递数、每订阅持有量和注册订阅数。`RedisSubscriptionProfile` 要求明确指定起始位置，并构造 durable options；新读取的 stream entry 报告 provider attempt `Some(1)`。恢复 pending 或 claim 记录时，只有 Redis 中的记录 ID、当前 consumer owner 匹配，且非零次数可由 SPI 的 `u32` 表示时，才报告投递次数；否则仍为未知。结算只对明确可重试的错误执行有限重试，重试性未知时停止订阅。[用户指南](doc/user_guide.zh_CN.md) 说明首个终止原因、投递指标、持久恢复、provider snapshot 采集，以及限制等待时间但不保证强制退出进程的关闭策略。
 
 ## 延伸阅读
 

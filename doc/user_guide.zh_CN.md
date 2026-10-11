@@ -17,6 +17,8 @@ qubit-spi = "0.13"
 
 core 和 provider 应使用对应的 minor 版本，并一起更新 lockfile。仓库 examples 基于当前 checkout；升级已有服务前，先按迁移指南检查版本变化和恢复步骤。
 
+provider 会从 registry 解析带响应大小限制的 Redis client fork。应用无须配置 Cargo patch，也无须直接依赖该 fork。
+
 采用自动发现时，provider 关闭默认 feature 后应选择 `["sync", "discovery"]` 或 `["async", "discovery"]`，facade 也须启用 `discovery`。采用手动注册时，provider 只需 `["sync"]` 或 `["async"]`，facade 无须启用发现功能。`async` 可以使用 Redis client 的 Smol adapter，也能在 Tokio host 中运行。crate 不会启动 Tokio runtime 或生成订阅 worker；异步 facade 的 runner 由应用现有 executor 驱动。
 
 Redis 需要 6.2 或更高版本。集成测试使用 Docker 启动隔离的 Redis 6.2、Redis 7 和 Sentinel 进程。
@@ -364,7 +366,7 @@ provider 将一条 JSON wire record 写入 Redis Stream 的 `wire` 字段。内�
 | 关闭或 drop | 不会隐式执行 `XACK` | 未结算消息仍可恢复。 |
 | 取消异步 receive | 不会隐式执行 `XACK` | 已读记录留在 PEL 中，供后续读取或认领。 |
 
-Redis 提供至少一次投递，因此 handler 应具备幂等性。新消息经 `XREADGROUP >` 读取时，`delivery.context().provider_attempt()` 为 `Some(1)`。每条 pending 或 `XAUTOCLAIM` 恢复消息交付前，provider 会针对该 ID 查询 Redis `XPENDING` 明细；只有返回的 ID 和 consumer owner 都匹配时，才会报告 Redis 投递次数。查询失败、无结果、格式错误或校验不匹配时仍为 `None`。每条恢复消息因此多一次 Redis 命令，新消息不增加查询。facade 本地重试次数请读取 `retry_attempt`。如果 handler 运行时间超过 `redis.claim_min_idle_ms`，另一个 consumer 可能在原 handler 仍执行时认领同一事件。idle threshold 应覆盖常见和最慢的处理时间；重复代价高时，应用还应按业务 ID 去重。
+Redis 提供至少一次投递，因此 handler 应具备幂等性。新消息经 `XREADGROUP >` 读取时，`delivery.context().provider_attempt()` 为 `Some(1)`。每条 pending 或 `XAUTOCLAIM` 恢复消息交付前，provider 会针对该 ID 查询 Redis `XPENDING` 明细；只有恰好一条明细的 ID 和当前 consumer owner 都匹配，且非零次数可由 SPI 的 `u32` 表示时，才报告 Redis 投递次数。查询失败、无结果、格式错误、次数为零或不可表示、以及校验不匹配时均为 `None`。每条恢复消息因此多一次 Redis 命令，新消息不增加查询。facade 本地重试次数请读取 `retry_attempt`。如果 handler 运行时间超过 `redis.claim_min_idle_ms`，另一个 consumer 可能在原 handler 仍执行时认领同一事件。idle threshold 应覆盖常见和最慢的处理时间；重复代价高时，应用还应按业务 ID 去重。
 
 每个订阅的未结算消息达到 `redis.max_unsettled_per_subscription` 后会暂停接收新记录。结算或 retry 后会释放容量。该设置限制进程内的投递压力，不会限制 Redis stream 增长。
 

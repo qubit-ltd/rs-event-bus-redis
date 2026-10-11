@@ -15,9 +15,13 @@ Redis 不提供逐目标接纳信息。调用 `publish_checked` 时应使用
 条件会在发布前返回 `CheckedPublishError::UnsupportedVisibility`。provider 接纳
 不表示 handler 已处理事件，也不代表 Redis 已将数据持久化到磁盘。Core 默认在
 检测到投递缺口后停止订阅；只有应用能接受消息遗漏且已有恢复策略时，才选择
-`GapPolicy::Continue`。新读取的 stream entry 报告 provider attempt `Some(1)`；
-pending 和 claim 恢复消息的次数未知（`None`）。现有 wire v1 记录、stream、消费组和
-pending entry 无需格式迁移。保留策略仍可能删除未读取或 pending 历史并造成缺口。
+`GapPolicy::Continue`。新读取的 stream entry 报告 provider attempt `Some(1)`。每条
+pending 或 claim 恢复消息都会额外查询一次 `XPENDING` 明细。只有查询恰好返回一条
+明细，且其 ID 与交付记录匹配、owner 是当前 consumer、次数非零并可由 SPI 表示时，才
+报告 `Some(count)`。查询失败、明细缺失、格式错误或不匹配时报告 `None`；该次数是
+Redis 当前记录的 pending 投递次数，不是 provider 重建的历史值。现有 wire v1 记录、
+stream、消费组和 pending entry 无需格式迁移。保留策略仍可能删除未读取或 pending
+历史并造成缺口。
 
 ## TLS 为可选配置
 
@@ -38,7 +42,13 @@ pending entry 无需格式迁移。保留策略仍可能删除未读取或 pendi
 provider 0.7 最初迁移时与 `qubit-event-bus` 0.19 配套。当前 provider 0.7
 manifest 使用 core 0.20。把重复设置 `durability(Durable)`、`start_position(...)` 和可选 `consumer_group(...)` 的代码改为 `RedisSubscriptionProfile::new(start_position).consumer_group(group).options()`；不使用消费组时省略 `consumer_group`。profile 要求明确指定 `StartPosition`，并始终生成 durable options；后续 `.durability(Ephemeral)` 会被 Redis capability 检查拒绝。
 
-由 `XREADGROUP >` 返回的新消息会通过 `provider_attempt()` 报告 `Some(1)`。pending 和 `XAUTOCLAIM` 恢复消息仍为 `None`，因为 provider 尚未传递历史投递次数。既有 wire v1 记录、Redis group 和结算行为保持可用。Core 0.19 的 `CodecRegistry::register` 遇到重复载荷类型也会返回错误，详见[核心迁移指南](https://github.com/qubit-ltd/rs-event-bus/blob/main/doc/migration.zh_CN.md)。
+由 `XREADGROUP >` 返回的新消息会通过 `provider_attempt()` 报告 `Some(1)`。每条 pending
+或 `XAUTOCLAIM` 恢复消息都会额外查询一次 `XPENDING` 明细。只有查询恰好返回一条该
+entry ID 的明细、owner 是当前 consumer，且次数非零并可由 SPI 表示时，才报告
+`Some(count)`；查询失败、明细缺失、格式错误或不匹配时报告 `None`。这是 Redis 当前
+记录的 pending 投递次数，不会重建缺失的历史。既有 wire v1 记录、Redis group 和结算
+行为保持可用。Core 0.19 的 `CodecRegistry::register` 遇到重复载荷类型也会返回错误，
+详见[核心迁移指南](https://github.com/qubit-ltd/rs-event-bus/blob/main/doc/migration.zh_CN.md)。
 
 将 `qubit-event-bus-redis` 从 0.5 升级到 0.6 时，须同时采用
 `qubit-event-bus` 0.18。一起更新直接依赖、下游 fixture 和 lockfile，不能混用

@@ -100,7 +100,9 @@ wire 限额优先：超限历史记录作为 poison，即使其版本本来未�
 
 ## 持久化、下游集成与迁移
 
-Accept/Reject 确认 Redis PEL，Retry 只释放本地占用并保留 PEL。`XREADGROUP >` 返回的新消息携带 `provider_attempt = Some(1)`。每条准备交付的恢复记录会先额外执行一次精确 ID 的 `XPENDING` 明细查询；只有 Redis 返回的记录 ID 与本 consumer owner 均匹配时才报告投递次数。查询失败、空结果、格式错误或 owner/ID 不匹配时，次数保持未知（`None`）。因此每条恢复消息多一次 Redis 命令，新消息路径不增加查询。关闭不 ACK，不删除消费组或 stream。可选 `XADD MAXLEN ~` 会丢失未读/pending 历史；未读记录被裁剪不一定返回 Gap。至少一次投递要求业务幂等，claim idle 阈值应匹配 handler 时长。
+Accept/Reject 确认 Redis PEL，Retry 只释放本地占用并保留 PEL。`XREADGROUP >` 返回的新消息携带 `provider_attempt = Some(1)`。每条准备交付的恢复记录会先额外执行一次精确 ID 的 `XPENDING` 明细查询；只有恰好一条明细的 ID 与预期记录匹配、owner 为当前 consumer，且非零次数可由 SPI 的 `u32` 表示时，才报告投递次数。查询失败、空结果、格式错误、次数为零或不可表示、以及 owner/ID 不匹配时，次数保持未知（`None`）。因此每条恢复消息多一次 Redis 命令，新消息路径不增加查询。关闭不 ACK，不删除消费组或 stream。可选 `XADD MAXLEN ~` 会丢失未读/pending 历史；未读记录被裁剪不一定返回 Gap。至少一次投递要求业务幂等，claim idle 阈值应匹配 handler 时长。
+
+provider 依赖 Qubit 维护的 registry 包 `qubit-redis`，该包保留 Rust 库名 `redis` 并提供响应帧大小限制 API。应用只需依赖 `qubit-event-bus-redis`，无须添加本地 Cargo patch 或直接依赖 fork。provider 发布前先发布该 fork。
 
 XADD Accepted 不证明 fsync、副本持久化或业务完成。新 observer 连接上的 WAIT 无法为 provider 连接写入提供 fencing；Sentinel 验收应观察实际复制的消费组游标、PEL ID 和 owner。旧 consumer 清理须先停实例、确认 PEL 清空并满足业务保留要求，不引入自动 DELCONSUMER。
 

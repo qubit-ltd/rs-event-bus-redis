@@ -17,6 +17,8 @@ qubit-spi = "0.13"
 
 Use matching core and provider minor versions, and update the lockfile with both packages together. The repository examples use the current checkout; consult the migration guide before upgrading an existing deployment.
 
+The provider resolves its bounded-response Redis client fork from the registry. Applications do not need a Cargo patch or a direct dependency on the fork.
+
 For discovery, disable defaults and select `features = ["sync", "discovery"]` or `["async", "discovery"]` on the provider, and enable facade `discovery`. For manual registration, provider `features = ["sync"]` or `["async"]` suffice; facade discovery is unnecessary. `async` enables the Redis client's Smol adapter; its futures can be polled by a Smol or Tokio host. The crate does not start a Tokio runtime or spawn a subscription worker; the facade's async runner is polled by the application's executor.
 
 Redis 6.2 or newer is required. The integration tests use Docker to start isolated Redis 6.2, Redis 7, and Sentinel processes.
@@ -356,7 +358,7 @@ Credentials belong in the service environment. Provider options contain environm
 
 ## 6. Understand delivery, retry, and cleanup
 
-The provider stores one JSON wire record under the `wire` stream field. It contains a protocol version, event ID, timestamp, headers, optional ordering key, content type, optional schema ID, and payload bytes. Unknown versions fail with a provider error. A newly read `XREADGROUP >` message reports `delivery.context().provider_attempt() == Some(1)`. Before delivering each recovered pending or `XAUTOCLAIM` entry, the provider queries Redis `XPENDING` details for that exact ID. It reports the Redis delivery count only when the returned ID and consumer owner match; a failed, empty, malformed, or mismatched lookup reports `None`. This adds one Redis command for each recovered message, not for new messages. Use `retry_attempt` for facade-local retries. `XADD` success returns an `Accepted` acknowledgement; if the connection drops before the reply arrives, the caller cannot know whether Redis stored the record. Retrying a publish can create a duplicate.
+The provider stores one JSON wire record under the `wire` stream field. It contains a protocol version, event ID, timestamp, headers, optional ordering key, content type, optional schema ID, and payload bytes. Unknown versions fail with a provider error. A newly read `XREADGROUP >` message reports `delivery.context().provider_attempt() == Some(1)`. Before delivering each recovered pending or `XAUTOCLAIM` entry, the provider queries Redis `XPENDING` details for that exact ID. It reports the Redis delivery count only when exactly one returned row has the matching ID and current consumer owner and the nonzero count fits the SPI's `u32` range; a failed, empty, malformed, zero, unrepresentable, or mismatched lookup reports `None`. This adds one Redis command for each recovered message, not for new messages. Use `retry_attempt` for facade-local retries. `XADD` success returns an `Accepted` acknowledgement; if the connection drops before the reply arrives, the caller cannot know whether Redis stored the record. Retrying a publish can create a duplicate.
 
 | Action | Redis behavior | Application consequence |
 | --- | --- | --- |
