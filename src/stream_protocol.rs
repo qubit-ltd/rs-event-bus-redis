@@ -250,7 +250,7 @@ pub(crate) fn trusted_attempt(entry: &PendingEntry, expected_id: &str, consumer:
     if entry.id != expected_id || entry.owner != consumer || entry.times_delivered == 0 {
         return None;
     }
-    NonZeroU32::new(entry.times_delivered.min(u64::from(u32::MAX)) as u32)
+    u32::try_from(entry.times_delivered).ok().and_then(NonZeroU32::new)
 }
 
 /// Creates a stable type-error category for an invalid internal stream

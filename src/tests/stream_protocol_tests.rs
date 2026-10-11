@@ -167,10 +167,7 @@ fn test_trusted_attempt_requires_matching_id_owner_and_positive_count() {
     let zero = entry_with_count("1-0", "worker-a", 501, 0);
     assert_eq!(trusted_attempt(&zero, "1-0", "worker-a"), None);
     let overflow = entry_with_count("1-0", "worker-a", 501, u64::from(u32::MAX) + 1);
-    assert_eq!(
-        trusted_attempt(&overflow, "1-0", "worker-a").map(|value| value.get()),
-        Some(u32::MAX)
-    );
+    assert_eq!(trusted_attempt(&overflow, "1-0", "worker-a"), None);
 }
 
 fn entry_with_count(id: &str, owner: &str, idle_ms: u64, times_delivered: u64) -> crate::stream_protocol::PendingEntry {
