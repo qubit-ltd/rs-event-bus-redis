@@ -161,3 +161,17 @@ implementations:
 These mappings remain as defensive error handling. They account for 4/293
 functions, while the unchanged 95% function gate passed for that historical snapshot. No production injection
 interface is needed to exercise the Redis transport and protocol failures.
+
+## 2026-10-13 implementation plan run
+
+The full `.infra/bin/ci-check.sh` run exited 0 on the implementation candidate. It included style, Clippy, lockfile checks, build, all nine configured feature variants, Markdown documentation examples against Redis, package verification, fuzz smoke, coverage, and the dependency audit. Coverage passed all configured gates:
+
+| Metric | Result | Gate |
+| --- | ---: | ---: |
+| Functions | 522/548 (95.26%) | at least 95% |
+| Lines | 5,087/5,291 (96.14%) | above 90% |
+| Regions | 7,827/8,240 (94.99%) | above 85% |
+
+The full run used the local `qubit-redis` source patch solely to build the unpublished dependency. It proves the local candidate and its tests, not a clean registry install. The crates.io index did not resolve `qubit-redis` or `qubit-event-bus-redis` during this task. No package was published. The README therefore continues to disclose that the registry path has not been verified. The audit refreshed its advisory database from GitHub and scanned 164 locked dependencies.
+
+The first full CI attempt exposed an intermittent scheduling assertion in a sync transport test under concurrent builds. Increasing that test's gate wait from one to three seconds fixed the test's scheduling budget; the isolated test and complete no-default sync workspace suite passed, followed by the successful full CI run. No production behavior was changed for this adjustment.
