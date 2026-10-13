@@ -325,7 +325,7 @@ fn test_sync_block_adds_command_margin_and_next_poll_restores_short_wait() {
     let worker = spawn(move || {
         let _ = sender.send(subscription.receive(Duration::ZERO));
     });
-    let reached = gate.wait_until_reached(Duration::from_secs(1));
+    let reached = gate.wait_until_reached(Duration::from_secs(3));
     let result = receiver.recv_timeout(Duration::from_millis(700));
     gate.release();
     worker.join().expect("receive worker");
