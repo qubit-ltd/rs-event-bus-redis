@@ -6,10 +6,7 @@ fixture="$project_root/tests/fixtures/registry_consumer"
 consumer_dir=$(mktemp -d "${TMPDIR:-/tmp}/redis-bus-registry-consumer.XXXXXX")
 trap 'rm -rf "$consumer_dir"' EXIT
 
-if grep -En '(^|[[:space:]])path[[:space:]]*=|\[patch([.][^]]+)?\]' "$fixture/Cargo.toml"; then
-    echo "error: registry consumer fixture must not use path dependencies or patches" >&2
-    exit 1
-fi
+python3 "$project_root/ci/check_registry_consumer_manifest.py" "$fixture/Cargo.toml"
 
 cp -R "$fixture/." "$consumer_dir/"
 cd "$consumer_dir"
