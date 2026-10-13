@@ -1,7 +1,31 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+check_local_redis_patch() {
+    local config_file=$1
+    local project_root=$2
+    local package_name
+
+    [ -f "$config_file" ] || return 0
+    package_name=$(awk -F '"' '/^[[:space:]]*name[[:space:]]*=/ { print $2; exit }' \
+        "$project_root/third_party/redis-rs/Cargo.toml")
+    [ "$package_name" = "qubit-redis" ] || return 0
+
+    if awk '
+        /^[[:space:]]*\[patch\.crates-io\][[:space:]]*([#].*)?$/ { in_patch=1; next }
+        /^[[:space:]]*\[/ { in_patch=0 }
+        in_patch && /^[[:space:]]*redis[[:space:]]*=/ && /path[[:space:]]*=[[:space:]]*"third_party\/redis-rs"/ { found=1 }
+        END { exit !found }
+    ' "$config_file"; then
+        echo "error: $config_file has [patch.crates-io] key 'redis' pointing to third_party/redis-rs, whose package name is 'qubit-redis'; use key 'qubit-redis' or remove this patch" >&2
+        return 1
+    fi
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+main() {
 project_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
+check_local_redis_patch "$project_root/.cargo/config.toml" "$project_root"
 "$project_root/.infra/bin/prepare-local-path-dependencies.sh"
 # A local developer checkout is never reset. Only an explicitly enabled CI
 # checkout may change HEAD, and dirty work is protected even in that mode.
@@ -56,3 +80,7 @@ for index in "${!dependencies[@]}"; do
         exit 1
     }
 done
+}
+
+main "$@"
+fi
