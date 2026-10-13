@@ -6,6 +6,12 @@ on:
       - main
   pull_request:
   workflow_dispatch:
+    inputs:
+      registry_consumer:
+        description: Run the post-publication registry consumer checks
+        required: false
+        type: boolean
+        default: false
 
 env:
   RS_EVENT_BUS_PIN: "1"
@@ -51,3 +57,14 @@ jobs:
           cargo +1.94.0 test --test async_standalone_tests test_async_receive_cancellation_leaves_pending_message_recoverable --all-features --locked -- --exact
           cargo +1.94.0 test --test async_standalone_tests test_async_claim_cancellation_after_owner_transfer_recovers_message --all-features --locked -- --exact
           cargo +1.94.0 test --test async_standalone_tests test_async_settlement_cancellation_after_xack_is_idempotent --all-features --locked -- --exact
+
+  registry-consumer:
+    if: github.event_name == 'workflow_dispatch' && inputs.registry_consumer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: 1.94
+      - name: Check published registry packages from an isolated consumer
+        run: bash ./ci/check-registry-consumer.sh

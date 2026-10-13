@@ -1,0 +1,18 @@
+[package]
+name = "registry-consumer"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[features]
+default = ["sync", "async", "discovery"]
+sync = ["qubit-event-bus-redis/sync"]
+async = ["qubit-event-bus-redis/async"]
+discovery = ["qubit-event-bus/discovery", "qubit-event-bus-redis/discovery"]
+
+[dependencies]
+qubit-event-bus = { version = "=0.20.1", default-features = false }
+qubit-event-bus-redis = { version = "=0.7.0", default-features = false }
+qubit-spi = "=0.13.0"
+
+[workspace]
