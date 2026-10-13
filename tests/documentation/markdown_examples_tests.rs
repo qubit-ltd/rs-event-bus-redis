@@ -99,6 +99,9 @@ fn code<'a>(blocks: &'a [MarkdownBlock], tag: &str) -> &'a str {
 /// ambiguous replacement instructions panic before building a consumer. No I/O
 /// occurs, and production code is never duplicated or loaded as test source.
 fn assemble(blocks: &[MarkdownBlock], tag: &str) -> String {
+    if tag == "readme-sync-discovery" {
+        return code(blocks, tag).to_owned();
+    }
     let codec = code(blocks, "codec");
     match tag {
         "codec" | "sync-discovery" => format!("{codec}\n{}", code(blocks, "sync-discovery")),
@@ -217,11 +220,28 @@ fn manifest(root: &Path, tag: &str) -> String {
 #[test]
 fn test_markdown_fragments_and_programs_publish_settle_and_close() -> Result<(), Box<dyn Error>> {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let evidence = root.join("target/markdown-documentation/evidence");
+    let target_root = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root.join("target"));
+    let evidence = target_root.join("markdown-documentation/evidence");
     fs::create_dir_all(&evidence)?;
+    let english_readme = rust_blocks(&root.join("README.md"))?;
+    let chinese_readme = rust_blocks(&root.join("README.zh_CN.md"))?;
+    assert_eq!(english_readme.len(), 1, "English README needs one marked Rust quick start");
+    assert_eq!(chinese_readme.len(), 1, "Chinese README needs one marked Rust quick start");
+    assert_eq!(
+        english_readme[0].tag, "readme-sync-discovery",
+        "README Rust quick start must have its dedicated marker"
+    );
+    assert_eq!(
+        chinese_readme[0].tag, "readme-sync-discovery",
+        "README Rust quick start must have its dedicated marker"
+    );
+    assert_eq!(
+        english_readme[0].code, chinese_readme[0].code,
+        "bilingual README quick starts must use the same compilable program"
+    );
     for document in [
-        "README.md",
-        "README.zh_CN.md",
         "doc/design.md",
         "doc/design.zh_CN.md",
         "doc/coverage-review.md",
@@ -236,21 +256,30 @@ fn test_markdown_fragments_and_programs_publish_settle_and_close() -> Result<(),
     let mut observer = Client::open(redis.url())?.get_connection()?;
     observer.set_read_timeout(Some(Duration::from_secs(2)))?;
     observer.set_write_timeout(Some(Duration::from_secs(2)))?;
-    for (language, guide) in [("en", "doc/user_guide.md"), ("zh", "doc/user_guide.zh_CN.md")] {
+    for (language, guide) in [
+        ("en", "README.md"),
+        ("zh", "README.zh_CN.md"),
+        ("en", "doc/user_guide.md"),
+        ("zh", "doc/user_guide.zh_CN.md"),
+    ] {
         let blocks = rust_blocks(&root.join(guide))?;
         let tags: Vec<_> = blocks.iter().map(|block| block.tag.as_str()).collect();
-        assert_eq!(
-            tags,
-            [
-                "codec",
-                "sync-discovery",
-                "async-discovery",
-                "sync-manual",
-                "async-manual",
-                "existing-group-resume"
-            ],
-            "every actual Markdown Rust block must be executed"
-        );
+        if guide.starts_with("README") {
+            assert_eq!(tags, ["readme-sync-discovery"], "README must expose one marked Rust quick start");
+        } else {
+            assert_eq!(
+                tags,
+                [
+                    "codec",
+                    "sync-discovery",
+                    "async-discovery",
+                    "sync-manual",
+                    "async-manual",
+                    "existing-group-resume"
+                ],
+                "every actual Markdown Rust block must be executed"
+            );
+        }
         for tag in tags {
             let id = format!("{language}-{tag}");
             let project = TempDir::new()?;
@@ -262,7 +291,7 @@ fn test_markdown_fragments_and_programs_publish_settle_and_close() -> Result<(),
             fs::write(evidence.join(format!("{id}.rs")), source)?;
             fs::write(evidence.join(format!("{id}.toml")), cargo)?;
             let cargo_manifest = project.path().join("Cargo.toml");
-            let target = root.join("target/markdown-documentation/consumer-target");
+            let target = target_root.join("markdown-documentation/consumer-target");
             run_command(
                 Command::new("cargo")
                     .args(["generate-lockfile", "--manifest-path"])

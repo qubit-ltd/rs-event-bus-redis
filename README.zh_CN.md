@@ -20,21 +20,119 @@ qubit-spi = "0.13"
 
 默认启用 `sync`、`async` 和 `discovery`。如需只保留一种 SPI 并继续使用 registry 自动发现，在 `qubit-event-bus-redis` 上设置 `default-features = false`，选择 `features = ["sync", "discovery"]` 或 `features = ["async", "discovery"]`。只在 `qubit-event-bus` 上启用 discovery 不会注册 Redis provider。`XAUTOCLAIM` 恢复需要 Redis 6.2 或更高版本。
 
-provider 会通过 registry 依赖解析带响应大小限制的 Redis fork。应用只需添加上面的 provider 依赖，无须配置 Cargo patch 或直接依赖该 fork。
+**Registry 状态：** 此 `0.7` 安装版本尚未通过纯 registry 消费者验收。README 中的依赖版本描述预期的 registry 配置；目前仍未验证在不使用本地 patch 的情况下独立安装。
 
 > **TODO：移除 `redis-rs` fork。** provider 目前依赖 fork 提供的 RESP 响应帧大小限制。后续应先将此限制迁移到上游 `redis-rs` 或其他可持续维护的层，再替换 fork 依赖并移除 `third_party/redis-rs`。
 
 ## 快速开始
 
-订单服务可以在启动阶段选择 Redis provider。应用像普通依赖一样链接该 crate；启用 `discovery` 后，provider 会提交到所启用 SPI 对应的 registry inventory，业务代码仍通过 `qubit-event-bus` facade 发布和订阅类型化消息。
+订单服务可在启动时选择 `redis-streams` provider，注册 payload codec，再通过类型化 facade 发布和消费。下面的完整同步程序展示了整条路径：handler 收到订单后报告结果，服务随后取消订阅并优雅关闭总线。
 
-```bash
-cargo run --example sync_orders -- redis://127.0.0.1/ local-sync-orders
-cargo run --example async_orders -- redis://127.0.0.1/ local-async-orders
+**运行条件：** 使用 Redis 6.2 或更高版本；若 Redis 不在 `redis://127.0.0.1/`，请设置 `REDIS_URL`。程序默认使用唯一 namespace `orders-readme-sync`；如需隔离演示数据，可将 `REDIS_NAMESPACE` 设为一个新值。`billing` 是持久消费组：首次创建时，`Earliest` 会从保留数据的开头读取；后续运行通过显式设置 `redis.existing_group_start=resume` 沿用 Redis 保存的游标，不会回退或重放已确认的记录。此前尚未结算的记录仍可能先于本次新事件送达。
+
+<!-- doc-example: readme-sync-discovery -->
+```rust
+use std::sync::Arc;
+use std::time::Duration;
+
+use qubit_event_bus::codec::CodecRegistry;
+use qubit_event_bus::codec::EventCodec;
+use qubit_event_bus::error::CodecError;
+use qubit_event_bus::facade::EventBusFacadeConfig;
+use qubit_event_bus::model::ConsumerGroup;
+use qubit_event_bus::model::ContentType;
+use qubit_event_bus::model::ProviderOptions;
+use qubit_event_bus::model::PublishRequest;
+use qubit_event_bus::model::SchemaId;
+use qubit_event_bus::model::StartPosition;
+use qubit_event_bus::model::SubscribeRequest;
+use qubit_event_bus::model::Topic;
+use qubit_event_bus::registry::EventBusConfig;
+use qubit_event_bus::spi::EncodedPayload;
+use qubit_event_bus::spi::ShutdownMode;
+use qubit_event_bus::spi::ShutdownOutcome;
+use qubit_event_bus::EventBusRegistry;
+use qubit_event_bus_redis as _;
+use qubit_event_bus_redis::RedisSubscriptionProfile;
+use qubit_spi::ProviderSelection;
+
+struct Utf8Codec(ContentType);
+
+impl EventCodec<String> for Utf8Codec {
+    fn content_type(&self) -> &ContentType {
+        &self.0
+    }
+
+    fn schema_id(&self) -> Option<&SchemaId> {
+        None
+    }
+
+    fn encode(&self, value: &String) -> Result<Arc<[u8]>, CodecError> {
+        Ok(Arc::from(value.as_bytes()))
+    }
+
+    fn decode(&self, payload: &EncodedPayload) -> Result<String, CodecError> {
+        String::from_utf8(payload.bytes().to_vec()).map_err(|source| CodecError::Decode {
+            source: Box::new(source),
+        })
+    }
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut codecs = CodecRegistry::new();
+    codecs.register::<String>(Arc::new(Utf8Codec(ContentType::new("text/plain")?)))?;
+    let facade = EventBusFacadeConfig::new().with_codec_registry(Arc::new(codecs));
+
+    let namespace = std::env::var("REDIS_NAMESPACE")
+        .unwrap_or_else(|_| "orders-readme-sync".into());
+    let options: ProviderOptions = [
+        (
+            "redis.url".into(),
+            std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1/".into()),
+        ),
+        ("redis.namespace".into(), namespace),
+    ]
+    .into();
+    let config = EventBusConfig::default()
+        .with_selection(ProviderSelection::named("redis-streams")?)
+        .with_provider_options(options)
+        .with_facade_config(facade);
+    let bus = EventBusRegistry::discover()?.create(&config)?;
+    let topic = Topic::<String>::new("orders.created")?;
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let subscription = bus.subscribe(
+        SubscribeRequest::new("billing-worker", topic.clone())?.with_options(
+            RedisSubscriptionProfile::new(StartPosition::Earliest)
+                .consumer_group(ConsumerGroup::new("billing")?)
+                .options()
+                .provider_option("redis.existing_group_start", "resume")
+                .build(),
+        ),
+        move |delivery| {
+            sender.send(delivery.payload().clone()).map_err(|source| {
+                qubit_event_bus::DeliveryError::Handler {
+                    source: Box::new(source),
+                }
+            })
+        },
+    )?;
+    bus.publish(PublishRequest::new(topic, "order-42".to_owned())?)?;
+    let received = receiver.recv_timeout(Duration::from_secs(5))?;
+    println!("consumed order event: {received}");
+
+    subscription.cancel()?;
+    let report = bus.shutdown(ShutdownMode::Graceful {
+        timeout: Duration::from_secs(5),
+    })?;
+    if report.outcome != ShutdownOutcome::Complete {
+        return Err("graceful shutdown did not complete".into());
+    }
+    Ok(())
+}
 ```
+<!-- END DOC EXAMPLE -->
 
-启动 Redis 后，两个示例会注册 UTF-8 codec、发布订单事件、消费并关闭资源。示例使用持久消费组：新组从 `Earliest` 开始，订阅会显式选择沿用已有组保存的游标。这是示例的订阅级选项，不会改变 provider 的默认策略。进程退出后，Redis 仍会保留 stream 数据和消费组。要隔离演示数据，可使用新的 namespace 或干净的 Redis fixture。异步示例打印消费结果后会等待你按 Enter，再关闭资源。[用户指南](doc/user_guide.zh_CN.md) 给出使用唯一 namespace、持久 `billing` 消费组和新组起始游标的完整命令，也提供 Docker fixture 与 Sentinel 配置。
-
+程序成功时会打印 `consumed order event: order-42`，并在优雅关闭完成后退出。生产环境的 handler 应先提交应用自己的账单变更，再返回成功；这里的打印仅用于入门验证，不代表数据库事务已提交。进程退出后，Redis 仍会保留 stream 数据和消费组。[用户指南](doc/user_guide.zh_CN.md) 介绍异步执行、Sentinel、恢复及运维检查。仓库中的完整示例也可通过 `cargo run --example sync_orders -- redis://127.0.0.1/ local-sync-orders` 和 `cargo run --example async_orders -- redis://127.0.0.1/ local-async-orders` 运行。
 ## 为什么需要这个项目
 
 event-bus SPI 允许应用更换传输实现，而不改业务 handler。Redis Streams 保留消息记录和消费组确认状态，帮助服务实例断连后继续消费。自动发现也省去了启动阶段手动注册 provider 的代码。

@@ -20,20 +20,119 @@ qubit-spi = "0.13"
 
 The default features enable `sync`, `async`, and `discovery`. To keep one SPI while using registry discovery, set `default-features = false` on `qubit-event-bus-redis` and select `features = ["sync", "discovery"]` or `features = ["async", "discovery"]`. Enabling discovery only on `qubit-event-bus` does not register the Redis provider. Redis 6.2 or later is required for `XAUTOCLAIM` recovery.
 
-The provider resolves its bounded-response Redis client fork as a registry dependency. Applications only need the provider dependency above; no Cargo patch or direct Redis fork dependency is required.
+**Registry status:** this `0.7` installation has not yet passed a pure registry consumer check. The README dependency versions describe the intended registry setup, but independent installation without a local patch remains unverified.
 
 > **TODO:** Remove the `redis-rs` fork. The provider currently relies on its configurable RESP response-frame limit; first move that limit to upstream `redis-rs` or another maintained layer, then replace the fork dependency and remove `third_party/redis-rs`.
 
 ## Quick Start
 
-An order service can select the Redis provider during startup. The provider is linked as an ordinary dependency and, with `discovery`, submitted to each enabled SPI's registry inventory; the application still uses the `qubit-event-bus` facade for typed publish and subscribe calls.
+An order service can select the `redis-streams` provider during startup, register the payload codec, and use the typed facade to publish and consume. The program below is the complete synchronous path: its handler reports the consumed order, then the service cancels the subscription and gracefully shuts down the bus.
 
-```bash
-cargo run --example sync_orders -- redis://127.0.0.1/ local-sync-orders
-cargo run --example async_orders -- redis://127.0.0.1/ local-async-orders
+**Prerequisites:** run Redis 6.2 or newer and set `REDIS_URL` if it is not at `redis://127.0.0.1/`. Each run uses the single namespace `orders-readme-sync` by default; set `REDIS_NAMESPACE` to a fresh value for an isolated run. `billing` is a durable consumer group. On its first creation, `Earliest` reads retained stream entries from the beginning. On later runs, the explicit `redis.existing_group_start=resume` option keeps the group's saved cursor; it does not rewind or replay acknowledged entries. Existing pending entries may be delivered before this run's new event.
+
+<!-- doc-example: readme-sync-discovery -->
+```rust
+use std::sync::Arc;
+use std::time::Duration;
+
+use qubit_event_bus::codec::CodecRegistry;
+use qubit_event_bus::codec::EventCodec;
+use qubit_event_bus::error::CodecError;
+use qubit_event_bus::facade::EventBusFacadeConfig;
+use qubit_event_bus::model::ConsumerGroup;
+use qubit_event_bus::model::ContentType;
+use qubit_event_bus::model::ProviderOptions;
+use qubit_event_bus::model::PublishRequest;
+use qubit_event_bus::model::SchemaId;
+use qubit_event_bus::model::StartPosition;
+use qubit_event_bus::model::SubscribeRequest;
+use qubit_event_bus::model::Topic;
+use qubit_event_bus::registry::EventBusConfig;
+use qubit_event_bus::spi::EncodedPayload;
+use qubit_event_bus::spi::ShutdownMode;
+use qubit_event_bus::spi::ShutdownOutcome;
+use qubit_event_bus::EventBusRegistry;
+use qubit_event_bus_redis as _;
+use qubit_event_bus_redis::RedisSubscriptionProfile;
+use qubit_spi::ProviderSelection;
+
+struct Utf8Codec(ContentType);
+
+impl EventCodec<String> for Utf8Codec {
+    fn content_type(&self) -> &ContentType {
+        &self.0
+    }
+
+    fn schema_id(&self) -> Option<&SchemaId> {
+        None
+    }
+
+    fn encode(&self, value: &String) -> Result<Arc<[u8]>, CodecError> {
+        Ok(Arc::from(value.as_bytes()))
+    }
+
+    fn decode(&self, payload: &EncodedPayload) -> Result<String, CodecError> {
+        String::from_utf8(payload.bytes().to_vec()).map_err(|source| CodecError::Decode {
+            source: Box::new(source),
+        })
+    }
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut codecs = CodecRegistry::new();
+    codecs.register::<String>(Arc::new(Utf8Codec(ContentType::new("text/plain")?)))?;
+    let facade = EventBusFacadeConfig::new().with_codec_registry(Arc::new(codecs));
+
+    let namespace = std::env::var("REDIS_NAMESPACE")
+        .unwrap_or_else(|_| "orders-readme-sync".into());
+    let options: ProviderOptions = [
+        (
+            "redis.url".into(),
+            std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1/".into()),
+        ),
+        ("redis.namespace".into(), namespace),
+    ]
+    .into();
+    let config = EventBusConfig::default()
+        .with_selection(ProviderSelection::named("redis-streams")?)
+        .with_provider_options(options)
+        .with_facade_config(facade);
+    let bus = EventBusRegistry::discover()?.create(&config)?;
+    let topic = Topic::<String>::new("orders.created")?;
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let subscription = bus.subscribe(
+        SubscribeRequest::new("billing-worker", topic.clone())?.with_options(
+            RedisSubscriptionProfile::new(StartPosition::Earliest)
+                .consumer_group(ConsumerGroup::new("billing")?)
+                .options()
+                .provider_option("redis.existing_group_start", "resume")
+                .build(),
+        ),
+        move |delivery| {
+            sender.send(delivery.payload().clone()).map_err(|source| {
+                qubit_event_bus::DeliveryError::Handler {
+                    source: Box::new(source),
+                }
+            })
+        },
+    )?;
+    bus.publish(PublishRequest::new(topic, "order-42".to_owned())?)?;
+    let received = receiver.recv_timeout(Duration::from_secs(5))?;
+    println!("consumed order event: {received}");
+
+    subscription.cancel()?;
+    let report = bus.shutdown(ShutdownMode::Graceful {
+        timeout: Duration::from_secs(5),
+    })?;
+    if report.outcome != ShutdownOutcome::Complete {
+        return Err("graceful shutdown did not complete".into());
+    }
+    Ok(())
+}
 ```
+<!-- END DOC EXAMPLE -->
 
-With a running Redis service, each example registers a UTF-8 codec, publishes an order event, consumes it, and closes its resources. These examples use durable consumer groups: a new group starts at `Earliest`, and their subscriptions explicitly opt in to resuming an existing group's saved cursor. This is an example subscription option; it does not change the provider's default policy. Redis keeps stream data and groups after the process exits. Use a new namespace or a clean Redis fixture for an isolated demonstration. The async example waits for you to press Enter after it prints the consumed event, then closes. The [user guide](doc/user_guide.md) provides complete commands with a unique namespace, a durable `billing` group, and the new-group start cursor, plus the Docker fixture command and Sentinel setup.
+A successful run prints `consumed order event: order-42` and exits only after graceful shutdown completes. Production handlers should commit the application's billing change before returning success; the printed line is an exercise signal, not proof of a database transaction. Redis retains stream data and groups after exit. The [user guide](doc/user_guide.md) covers async execution, Sentinel, recovery, and operational checks. The repository's complete examples are also available with `cargo run --example sync_orders -- redis://127.0.0.1/ local-sync-orders` and `cargo run --example async_orders -- redis://127.0.0.1/ local-async-orders`.
 
 ## Why This Project Exists
 
