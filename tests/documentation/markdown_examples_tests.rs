@@ -227,8 +227,16 @@ fn test_markdown_fragments_and_programs_publish_settle_and_close() -> Result<(),
     fs::create_dir_all(&evidence)?;
     let english_readme = rust_blocks(&root.join("README.md"))?;
     let chinese_readme = rust_blocks(&root.join("README.zh_CN.md"))?;
-    assert_eq!(english_readme.len(), 1, "English README needs one marked Rust quick start");
-    assert_eq!(chinese_readme.len(), 1, "Chinese README needs one marked Rust quick start");
+    assert_eq!(
+        english_readme.len(),
+        1,
+        "English README needs one marked Rust quick start"
+    );
+    assert_eq!(
+        chinese_readme.len(),
+        1,
+        "Chinese README needs one marked Rust quick start"
+    );
     assert_eq!(
         english_readme[0].tag, "readme-sync-discovery",
         "README Rust quick start must have its dedicated marker"
@@ -265,7 +273,11 @@ fn test_markdown_fragments_and_programs_publish_settle_and_close() -> Result<(),
         let blocks = rust_blocks(&root.join(guide))?;
         let tags: Vec<_> = blocks.iter().map(|block| block.tag.as_str()).collect();
         if guide.starts_with("README") {
-            assert_eq!(tags, ["readme-sync-discovery"], "README must expose one marked Rust quick start");
+            assert_eq!(
+                tags,
+                ["readme-sync-discovery"],
+                "README must expose one marked Rust quick start"
+            );
         } else {
             assert_eq!(
                 tags,
