@@ -10,7 +10,17 @@ description = "Synchronous and asynchronous Redis Streams providers for Qubit Ev
 homepage = "https://github.com/qubit-ltd/rs-event-bus-redis"
 documentation = "https://docs.rs/qubit-event-bus-redis"
 readme = "README.md"
-include = ["/Cargo.toml", "/LICENSE", "/README*", "/CHANGELOG*", "/doc/**/*.md", "/src/**", "/tests/**", "/examples/**", "/benches/**"]
+include = [
+  "/Cargo.toml",
+  "/LICENSE",
+  "/README*",
+  "/CHANGELOG*",
+  "/doc/**/*.md",
+  "/src/**",
+  "/tests/**",
+  "/examples/**",
+  "/benches/**",
+]
 
 [workspace]
 resolver = "3"
@@ -23,23 +33,36 @@ discovery = ["qubit-event-bus/discovery", "qubit-spi/inventory"]
 conformance = ["qubit-event-bus/conformance"]
 
 [dependencies]
-qubit-event-bus = { version = "0.20", path = "../rs-event-bus" }
-qubit-spi = "0.13"
-qubit-id = { version = "0.7", default-features = false, features = ["uuid"] }
-async-lock = { version = "^3", optional = true }
-redis = { version = "=0.32.7", git = "https://github.com/qubit-ltd/redis-rs.git", rev = "96decceb4bd9fc12ddda19f4c2457621cf3c598e", default-features = false, features = ["streams", "sentinel", "tls-rustls-webpki-roots"] }
 serde = { version = "^1.0", features = ["derive"] }
 serde_json = "^1.0"
 thiserror = "^2.0"
 rustls = { version = "^0.23", default-features = false, features = ["ring", "std", "tls12"] }
+async-lock = { version = "^3", optional = true }
+redis = {
+  version = "=0.32.7",
+  git = "https://github.com/qubit-ltd/redis-rs.git",
+  branch = "qubit/redis-0327-response-limit",
+  default-features = false,
+  features = ["streams", "sentinel", "tls-rustls-webpki-roots"]
+}
+
+qubit-event-bus = "0.20"
+qubit-spi = "0.13"
+qubit-id = { version = "0.7", default-features = false, features = ["uuid"] }
 
 [dev-dependencies]
-qubit-retry = "0.26"
 futures-lite = "^2"
 futures-channel = "^0.3"
-redis = { version = "=0.32.7", git = "https://github.com/qubit-ltd/redis-rs.git", rev = "96decceb4bd9fc12ddda19f4c2457621cf3c598e", default-features = false, features = ["tokio-rustls-comp", "streams", "sentinel", "tls-rustls-webpki-roots"] }
 tempfile = "^3.27"
 tokio = { version = "^1.53", features = ["rt", "macros"] }
+redis = {
+  version = "=0.32.7",
+  git = "https://github.com/qubit-ltd/redis-rs.git",
+  branch = "qubit/redis-0327-response-limit",
+  default-features = false,
+  features = ["tokio-rustls-comp", "streams", "sentinel", "tls-rustls-webpki-roots"]
+}
+qubit-retry = "0.26"
 
 [[example]]
 name = "sync_orders"

@@ -860,7 +860,7 @@ dependencies = [
 [[package]]
 name = "redis"
 version = "0.32.7"
-source = "git+https://github.com/qubit-ltd/redis-rs.git?rev=96decceb4bd9fc12ddda19f4c2457621cf3c598e#96decceb4bd9fc12ddda19f4c2457621cf3c598e"
+source = "git+https://github.com/qubit-ltd/redis-rs.git?branch=qubit%2Fredis-0327-response-limit#a09b2bfaf77a4444ef177f000e9649b3ff3f9613"
 dependencies = [
  "async-io",
  "bytes",

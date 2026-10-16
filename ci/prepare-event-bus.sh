@@ -4,12 +4,7 @@ set -euo pipefail
 check_local_redis_patch() {
     local config_file=$1
     local project_root=$2
-    local package_name
-
     [ -f "$config_file" ] || return 0
-    package_name=$(awk -F '"' '/^[[:space:]]*name[[:space:]]*=/ { print $2; exit }' \
-        "$project_root/third_party/redis-rs/Cargo.toml")
-    [ "$package_name" = "qubit-redis" ] || return 0
 
     if awk '
         /^[[:space:]]*\[patch\.crates-io\][[:space:]]*([#].*)?$/ { in_patch=1; next }
@@ -17,7 +12,7 @@ check_local_redis_patch() {
         in_patch && /^[[:space:]]*redis[[:space:]]*=/ && /path[[:space:]]*=[[:space:]]*"third_party\/redis-rs"/ { found=1 }
         END { exit !found }
     ' "$config_file"; then
-        echo "error: $config_file has [patch.crates-io] key 'redis' pointing to third_party/redis-rs, whose package name is 'qubit-redis'; use key 'qubit-redis' or remove this patch" >&2
+        echo "error: $config_file has [patch.crates-io] key 'redis' pointing to the removed local qubit-redis fork at third_party/redis-rs; remove or update this stale patch" >&2
         return 1
     fi
 }

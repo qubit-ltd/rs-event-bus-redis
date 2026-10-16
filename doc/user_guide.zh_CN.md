@@ -17,7 +17,7 @@ qubit-spi = "0.13"
 
 core 和 provider 应使用对应的 minor 版本，并一起更新 lockfile。仓库 examples 基于当前 checkout；升级已有服务前，先按迁移指南检查版本变化和恢复步骤。
 
-provider 会从 registry 解析带响应大小限制的 Redis client fork。应用无须配置 Cargo patch，也无须直接依赖该 fork。
+provider 会从 GitHub fork `qubit-ltd/redis-rs` 的 `qubit/redis-0327-response-limit` 分支解析带响应大小限制的 Redis client。应用只需依赖 provider，无须配置本地 Cargo patch，也无须直接依赖 Redis client。
 
 采用自动发现时，provider 关闭默认 feature 后应选择 `["sync", "discovery"]` 或 `["async", "discovery"]`，facade 也须启用 `discovery`。采用手动注册时，provider 只需 `["sync"]` 或 `["async"]`，facade 无须启用发现功能。`async` 可以使用 Redis client 的 Smol adapter，也能在 Tokio host 中运行。crate 不会启动 Tokio runtime 或生成订阅 worker；异步 facade 的 runner 由应用现有 executor 驱动。
 

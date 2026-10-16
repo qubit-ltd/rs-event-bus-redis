@@ -22,7 +22,6 @@ The default features enable `sync`, `async`, and `discovery`. To keep one SPI wh
 
 **Registry status:** this `0.7` installation has not yet passed a pure registry consumer check. The README dependency versions describe the intended registry setup, but independent installation without a local patch remains unverified.
 
-> **TODO:** Remove the `redis-rs` fork. The provider currently relies on its configurable RESP response-frame limit; first move that limit to upstream `redis-rs` or another maintained layer, then replace the fork dependency and remove `third_party/redis-rs`.
 
 ## Quick Start
 

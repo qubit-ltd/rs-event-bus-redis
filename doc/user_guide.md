@@ -17,7 +17,7 @@ qubit-spi = "0.13"
 
 Use matching core and provider minor versions, and update the lockfile with both packages together. The repository examples use the current checkout; consult the migration guide before upgrading an existing deployment.
 
-The provider resolves its bounded-response Redis client fork from the registry. Applications do not need a Cargo patch or a direct dependency on the fork.
+The provider resolves its bounded-response Redis client from the `qubit-ltd/redis-rs` GitHub fork branch `qubit/redis-0327-response-limit`. Applications depend on the provider and do not need a local Cargo patch or a direct Redis client dependency.
 
 For discovery, disable defaults and select `features = ["sync", "discovery"]` or `["async", "discovery"]` on the provider, and enable facade `discovery`. For manual registration, provider `features = ["sync"]` or `["async"]` suffice; facade discovery is unnecessary. `async` enables the Redis client's Smol adapter; its futures can be polled by a Smol or Tokio host. The crate does not start a Tokio runtime or spawn a subscription worker; the facade's async runner is polled by the application's executor.
 

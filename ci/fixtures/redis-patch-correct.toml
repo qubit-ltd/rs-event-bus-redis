@@ -1,2 +1,2 @@
 [patch.crates-io]
-qubit-redis = { path = "third_party/redis-rs" }
+redis = { git = "https://github.com/qubit-ltd/redis-rs.git", branch = "qubit/redis-0327-response-limit" }

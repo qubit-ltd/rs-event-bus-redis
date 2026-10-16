@@ -22,7 +22,6 @@ qubit-spi = "0.13"
 
 **Registry 状态：** 此 `0.7` 安装版本尚未通过纯 registry 消费者验收。README 中的依赖版本描述预期的 registry 配置；目前仍未验证在不使用本地 patch 的情况下独立安装。
 
-> **TODO：移除 `redis-rs` fork。** provider 目前依赖 fork 提供的 RESP 响应帧大小限制。后续应先将此限制迁移到上游 `redis-rs` 或其他可持续维护的层，再替换 fork 依赖并移除 `third_party/redis-rs`。
 
 ## 快速开始
 
