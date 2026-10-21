@@ -82,9 +82,8 @@
         "conformance"
       ],
       "dependency": {
-        "name": "qubit-redis",
-        "resolution": "precise",
-        "version": "0.32.7-qubit.1"
+        "name": "redis",
+        "resolution": "latest"
       }
     },
     {
@@ -98,9 +97,8 @@
         "conformance"
       ],
       "dependency": {
-        "name": "qubit-redis",
-        "resolution": "precise",
-        "version": "0.32.7-qubit.1"
+        "name": "redis",
+        "resolution": "latest"
       }
     },
     {
@@ -110,9 +108,8 @@
       ],
       "allFeatures": true,
       "dependency": {
-        "name": "qubit-redis",
-        "resolution": "precise",
-        "version": "0.32.7-qubit.1"
+        "name": "redis",
+        "resolution": "latest"
       }
     }
   ]

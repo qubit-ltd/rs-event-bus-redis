@@ -12,3 +12,4 @@ qubit-event-bus-redis = { path = "../../..", default-features = false, features 
 qubit-spi = "0.13"
 
 [patch.crates-io]
+qubit-event-bus = { path = "../../../../rs-event-bus" }

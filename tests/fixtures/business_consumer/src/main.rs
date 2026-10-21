@@ -70,7 +70,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             let _ = sender.send(delivery.payload().clone());
         },
     )?;
-    bus.publish(PublishRequest::new(topic, "business facade works".to_owned())?)?;
+    let _ = bus.publish(PublishRequest::new(topic, "business facade works".to_owned())?)?;
     assert_eq!(receiver.recv_timeout(Duration::from_secs(3))?, "business facade works");
     subscription.cancel()?;
     let shutdown = bus.shutdown(ShutdownMode::Graceful {

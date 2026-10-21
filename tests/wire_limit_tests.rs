@@ -179,12 +179,15 @@ mod durable {
     }
 
     fn oversized_stream_response(stream: &str) -> Vec<u8> {
-        format!(
-            "*1\r\n*2\r\n${}\r\n{}\r\n*1\r\n*2\r\n$3\r\n1-0\r\n*2\r\n$4\r\nwire\r\n$999999999\r\n",
+        let mut response = format!(
+            "*1\r\n*2\r\n${}\r\n{}\r\n*1\r\n*2\r\n$3\r\n1-0\r\n*2\r\n$4\r\nwire\r\n$70000\r\n",
             stream.len(),
             stream
         )
-        .into_bytes()
+        .into_bytes();
+        response.extend(std::iter::repeat_n(b'x', 70_000));
+        response.extend_from_slice(b"\r\n");
+        response
     }
 
     #[test]
@@ -680,12 +683,15 @@ mod async_response_limit {
     }
 
     fn oversized_stream_response(stream: &str) -> Vec<u8> {
-        format!(
-            "*1\r\n*2\r\n${}\r\n{}\r\n*1\r\n*2\r\n$3\r\n1-0\r\n*2\r\n$4\r\nwire\r\n$999999999\r\n",
+        let mut response = format!(
+            "*1\r\n*2\r\n${}\r\n{}\r\n*1\r\n*2\r\n$3\r\n1-0\r\n*2\r\n$4\r\nwire\r\n$70000\r\n",
             stream.len(),
             stream
         )
-        .into_bytes()
+        .into_bytes();
+        response.extend(std::iter::repeat_n(b'x', 70_000));
+        response.extend_from_slice(b"\r\n");
+        response
     }
 
     #[test]
