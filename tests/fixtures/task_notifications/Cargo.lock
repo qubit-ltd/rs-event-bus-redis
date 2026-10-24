@@ -843,7 +843,9 @@ dependencies = [
 
 [[package]]
 name = "qubit-codec"
-version = "0.16.0"
+version = "0.16.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4b85095606a088f262b4d2bc8b74d356e7cc919f2847e2718cf97f9cb8895fbf"
 dependencies = [
  "inventory",
  "qubit-utils",
@@ -932,9 +934,7 @@ dependencies = [
 
 [[package]]
 name = "qubit-metadata"
-version = "0.6.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fa5e7b31e0dcaeccce69cc491db7b53e04febbef587fba70203b47d4e3709978"
+version = "0.7.0"
 dependencies = [
  "qubit-budget",
  "qubit-datatype",
@@ -996,7 +996,7 @@ dependencies = [
 
 [[package]]
 name = "qubit-task"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "fs2",
  "futures",
