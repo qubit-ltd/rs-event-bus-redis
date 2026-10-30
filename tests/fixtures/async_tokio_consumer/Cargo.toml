@@ -9,7 +9,7 @@ publish = false
 [dependencies]
 qubit-event-bus-redis = { version = "0.7", path = "../../..", default-features = false, features = ["async"] }
 qubit-event-bus = { version = "0.20", path = "../../../../rs-event-bus", default-features = false }
-qubit-spi = "0.13"
+qubit-spi = "0.14"
 qubit-id = { version = "0.7", default-features = false, features = ["uuid"] }
 tokio = { version = "1.53", features = ["rt", "macros"] }
 

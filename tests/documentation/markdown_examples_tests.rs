@@ -202,7 +202,7 @@ fn manifest(root: &Path, tag: &str) -> String {
         .unwrap_or_else(|| root.parent().expect("sibling facade parent").join("rs-event-bus"));
     let facade_path = to_string(&facade_root.to_string_lossy()).expect("path string serializes");
     format!(
-        "[package]\nname = \"markdown-consumer\"\nversion = \"0.0.0\"\nedition = \"2024\"\npublish = false\n\n[workspace]\n\n[dependencies]\nqubit-event-bus-redis = {{ path = {provider_path}, default-features = false, features = {provider_features} }}\nqubit-event-bus = {{ path = {facade_path}, default-features = false, features = {facade_features} }}\nqubit-spi = \"0.13\"\nfutures-lite = \"2\"\nfutures-channel = \"0.3\"\n\n[patch.crates-io]\nqubit-event-bus = {{ path = {facade_path} }}\n"
+        "[package]\nname = \"markdown-consumer\"\nversion = \"0.0.0\"\nedition = \"2024\"\npublish = false\n\n[workspace]\n\n[dependencies]\nqubit-event-bus-redis = {{ path = {provider_path}, default-features = false, features = {provider_features} }}\nqubit-event-bus = {{ path = {facade_path}, default-features = false, features = {facade_features} }}\nqubit-spi = \"0.14\"\nfutures-lite = \"2\"\nfutures-channel = \"0.3\"\n\n[patch.crates-io]\nqubit-event-bus = {{ path = {facade_path} }}\n"
     )
 }
 

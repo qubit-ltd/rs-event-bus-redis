@@ -12,7 +12,7 @@
 [dependencies]
 qubit-event-bus = { version = "0.20", features = ["discovery"] }
 qubit-event-bus-redis = "0.7"
-qubit-spi = "0.13"
+qubit-spi = "0.14"
 ```
 
 core 和 provider 应使用对应的 minor 版本，并一起更新 lockfile。仓库 examples 基于当前 checkout；升级已有服务前，先按迁移指南检查版本变化和恢复步骤。

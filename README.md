@@ -15,7 +15,7 @@
 [dependencies]
 qubit-event-bus = { version = "0.20", features = ["discovery"] }
 qubit-event-bus-redis = "0.7"
-qubit-spi = "0.13"
+qubit-spi = "0.14"
 ```
 
 The default features enable `sync`, `async`, and `discovery`. To keep one SPI while using registry discovery, set `default-features = false` on `qubit-event-bus-redis` and select `features = ["sync", "discovery"]` or `features = ["async", "discovery"]`. Enabling discovery only on `qubit-event-bus` does not register the Redis provider. Redis 6.2 or later is required for `XAUTOCLAIM` recovery.

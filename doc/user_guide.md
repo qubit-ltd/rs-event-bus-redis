@@ -12,7 +12,7 @@ Add both the facade and provider as direct dependencies. `discovery` is on by de
 [dependencies]
 qubit-event-bus = { version = "0.20", features = ["discovery"] }
 qubit-event-bus-redis = "0.7"
-qubit-spi = "0.13"
+qubit-spi = "0.14"
 ```
 
 Use matching core and provider minor versions, and update the lockfile with both packages together. The repository examples use the current checkout; consult the migration guide before upgrading an existing deployment.

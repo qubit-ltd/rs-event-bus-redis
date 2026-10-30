@@ -15,7 +15,7 @@
 [dependencies]
 qubit-event-bus = { version = "0.20", features = ["discovery"] }
 qubit-event-bus-redis = "0.7"
-qubit-spi = "0.13"
+qubit-spi = "0.14"
 ```
 
 默认启用 `sync`、`async` 和 `discovery`。如需只保留一种 SPI 并继续使用 registry 自动发现，在 `qubit-event-bus-redis` 上设置 `default-features = false`，选择 `features = ["sync", "discovery"]` 或 `features = ["async", "discovery"]`。只在 `qubit-event-bus` 上启用 discovery 不会注册 Redis provider。`XAUTOCLAIM` 恢复需要 Redis 6.2 或更高版本。

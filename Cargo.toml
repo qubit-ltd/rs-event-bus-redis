@@ -47,7 +47,7 @@ redis = {
 }
 
 qubit-event-bus = "0.20"
-qubit-spi = "0.13"
+qubit-spi = "0.14"
 qubit-id = { version = "0.7", default-features = false, features = ["uuid"] }
 
 [dev-dependencies]
