@@ -480,7 +480,7 @@ dependencies = [
  "qubit-clock",
  "qubit-id",
  "qubit-retry",
- "qubit-spi",
+ "qubit-spi 0.13.0",
  "thiserror",
 ]
 
@@ -490,7 +490,7 @@ version = "0.7.0"
 dependencies = [
  "qubit-event-bus",
  "qubit-id",
- "qubit-spi",
+ "qubit-spi 0.14.1",
  "redis",
  "rustls",
  "serde",
@@ -538,6 +538,17 @@ name = "qubit-spi"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "705f883acee6205ffe6edcee7b73450c0137de014b6b8b80253c07111b8e54e5"
+dependencies = [
+ "parking_lot",
+ "qubit-collections",
+ "thiserror",
+]
+
+[[package]]
+name = "qubit-spi"
+version = "0.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "402c5dfb62b10e854d0345e56db75abac1e970eb3383cc8467760e310952303d"
 dependencies = [
  "parking_lot",
  "qubit-collections",
