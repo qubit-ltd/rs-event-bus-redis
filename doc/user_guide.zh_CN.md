@@ -1,21 +1,21 @@
 # Redis Streams 用户指南
 
-**读者：** 使用 `qubit-event-bus` 0.21 和 `qubit-event-bus-redis` 0.7 的 Rust 服务开发者。本指南以订单发布服务和账单消费服务为例，说明如何通过 Redis 共享事件，同时让应用代码继续使用 event-bus facade。
+**读者：** 使用当前 sibling source checkout 的 Rust 服务开发者：该源码组合使用 core 0.21 和 Redis provider 源码（包版本 0.7）。已发布的 Redis 0.7 包仍依赖 core 0.20。
 
 [English](user_guide.md) · [README](../README.zh_CN.md) · [API 文档](https://docs.rs/qubit-event-bus-redis)
 
 ## 1. 添加并选择 provider
 
-将 facade 和 provider 都作为直接依赖。provider crate 默认启用 `discovery`，会把 `redis-streams` 提交到同步和异步 provider inventory。应用在启动时调用 `EventBusRegistry::discover()` 或 `AsyncEventBusRegistry::discover()`，再按 ID 选择 Redis。
+在 Qubit 源码 workspace 中，将两个 sibling checkout 都作为直接依赖。provider crate 默认启用 `discovery`，会把 `redis-streams` 提交到同步和异步 provider inventory。应用在启动时调用 `EventBusRegistry::discover()` 或 `AsyncEventBusRegistry::discover()`，再按 ID 选择 Redis。
 
 ```toml
 [dependencies]
-qubit-event-bus = { version = "0.21", features = ["discovery"] }
-qubit-event-bus-redis = "0.7"
+qubit-event-bus = { version = "0.21", path = "../rs-event-bus", features = ["discovery"] }
+qubit-event-bus-redis = { version = "0.7", path = "../rs-event-bus-redis" }
 qubit-spi = "0.14"
 ```
 
-core 和 provider 应使用对应的 minor 版本，并一起更新 lockfile。仓库 examples 基于当前 checkout；升级已有服务前，先按迁移指南检查版本变化和恢复步骤。
+这些路径适用于 sibling checkout；应按 consumer manifest 所在位置调整。已发布的 Redis 0.7 使用 core 0.20，registry 依赖应继续配套。当前源码的 locked metadata 图解析到 core 0.21，但不能据此证明已发布的 Redis 0.7 包兼容 core 0.21。registry consumer 应等到兼容的 Redis provider 发布并完成集成验证后，再迁移到 core 0.21。升级现有服务前，请先按迁移指南检查版本变化和恢复步骤。
 
 provider 会从 GitHub fork `qubit-ltd/redis-rs` 的 `qubit/redis-0327-response-limit` 分支解析带响应大小限制的 Redis client。应用只需依赖 provider，无须配置本地 Cargo patch，也无须直接依赖 Redis client。
 
@@ -538,7 +538,7 @@ Redis 持久化和复制由部署负责。`Accepted` 只证明 XADD 被接受，
 
 ## 12. 从 provider 0.6 升级
 
-provider 0.7 最初迁移时与 core 0.19 配套；当前源码清单已迁移到 core 0.21；已发布的 provider 0.7 仍按其发布时的 core 0.20 依赖解析。新版 `RedisSubscriptionProfile` 根据明确的 `StartPosition` 构造 durable 订阅选项；创建新订阅时使用它，并保留预期的消费组。核心 codec 注册现在会拒绝重复载荷类型并返回 `Result`；要传播错误，使用 `?`，确需替换时才调用 `replace`。`InboundMessage` 增加可选 provider attempt 元数据，但 `into_parts` tuple 保持原样。保留 wire 版本 1 数据和现有消费组；发布前应验证 pending 记录，并按上文分别采集 provider 快照与 Redis PEL/内存。当前源码工作树通过 workspace path dependency 对 core 0.21 做验证；这不代表已发布的 provider 0.7 包支持 core 0.21。[迁移指南](migration.zh_CN.md)列出完整变更。
+已发布的 `qubit-event-bus-redis` 0.7 仍使用 core 0.20。当前源码工作树通过 sibling path 验证 core 0.21，但这不是已发布的依赖组合。registry consumer 应先等待基于 core 0.21 构建的 Redis provider 发布，再迁移到该 core minor。新版 `RedisSubscriptionProfile` 根据明确的 `StartPosition` 构造 durable 订阅选项；创建新订阅时使用它，并保留预期的消费组。核心 codec 注册现在会拒绝重复载荷类型并返回 `Result`；要传播错误，使用 `?`，确需替换时才调用 `replace`。`InboundMessage` 增加可选 provider attempt 元数据，但 `into_parts` tuple 保持原样。保留 wire 版本 1 数据和现有消费组；发布前应验证 pending 记录，并按上文分别采集 provider 快照与 Redis PEL/内存。[迁移指南](migration.zh_CN.md)列出完整变更。
 
 
 参阅[设计说明](design.zh_CN.md)、[覆盖率证据](coverage-review.zh_CN.md)和[工作负载基准](connection-reuse-benchmark.zh_CN.md)。性能、覆盖率须以各自测量为证；本指南没有宣称新的吞吐量或最终覆盖率结果。

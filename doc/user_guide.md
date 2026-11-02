@@ -1,21 +1,21 @@
 # Redis Streams User Guide
 
-**For:** Rust service developers using `qubit-event-bus` 0.21 and `qubit-event-bus-redis` 0.7. This guide shows how an order publisher and billing consumer share events through Redis while keeping application code on the event-bus facade.
+**For:** Rust service developers following the current sibling-source checkout, which uses core 0.21 with this Redis provider source (package version 0.7). The already published Redis 0.7 package still depends on core 0.20.
 
 [简体中文](user_guide.zh_CN.md) · [README](../README.md) · [API docs](https://docs.rs/qubit-event-bus-redis)
 
 ## 1. Add the provider and select it
 
-Add both the facade and provider as direct dependencies. `discovery` is on by default in the provider crate; it submits `redis-streams` to the synchronous and asynchronous provider inventories. Your application calls `EventBusRegistry::discover()` or `AsyncEventBusRegistry::discover()` and selects the provider by ID.
+For a consumer in the Qubit source workspace, add both sibling checkouts as direct dependencies. `discovery` is on by default in the provider crate; it submits `redis-streams` to the synchronous and asynchronous provider inventories. Your application calls `EventBusRegistry::discover()` or `AsyncEventBusRegistry::discover()` and selects the provider by ID.
 
 ```toml
 [dependencies]
-qubit-event-bus = { version = "0.21", features = ["discovery"] }
-qubit-event-bus-redis = "0.7"
+qubit-event-bus = { version = "0.21", path = "../rs-event-bus", features = ["discovery"] }
+qubit-event-bus-redis = { version = "0.7", path = "../rs-event-bus-redis" }
 qubit-spi = "0.14"
 ```
 
-Use matching core and provider minor versions, and update the lockfile with both packages together. The repository examples use the current checkout; consult the migration guide before upgrading an existing deployment.
+These paths are for sibling checkouts; adjust them to the consumer manifest's location. Published Redis 0.7 uses core 0.20, so keep that released registry pair together. The current source checkout's local locked metadata graph uses core 0.21 but does not establish compatibility for the published Redis 0.7 package. A registry consumer should move to core 0.21 only after a compatible Redis provider release and its integration evidence are available. Consult the migration guide before upgrading an existing deployment.
 
 The provider resolves its bounded-response Redis client from the `qubit-ltd/redis-rs` GitHub fork branch `qubit/redis-0327-response-limit`. Applications depend on the provider and do not need a local Cargo patch or a direct Redis client dependency.
 
@@ -538,7 +538,7 @@ With typed `qubit-task` notifications, consumers should deduplicate by `TaskId` 
 
 ## 12. Upgrade from provider 0.6
 
-Upgrade `qubit-event-bus-redis` to 0.7 together with `qubit-event-bus` 0.21. `RedisSubscriptionProfile` builds durable subscription options from an explicit `StartPosition`; use it for new subscriptions and preserve the intended consumer group. Core codec registration now rejects duplicate payload types and returns `Result`; handle it with `?` or use `replace` deliberately. `InboundMessage` carries optional provider-attempt metadata without changing its existing `into_parts` tuple. Keep stored wire version 1 data and consumer groups; test retained pending entries before rollout. Start collecting provider snapshots and Redis PEL/memory separately as described above. The current source checkout is being validated against core 0.21 through the workspace path dependency; this is not evidence that the already published provider 0.7 package supports core 0.21. The [migration guide](migration.md) covers the complete version-specific changes.
+The released `qubit-event-bus-redis` 0.7 package remains on core 0.20. The current source checkout is being validated against core 0.21 through sibling paths, but that is not a released dependency combination. A registry consumer needs a Redis provider release built against core 0.21 before migrating to that core minor. `RedisSubscriptionProfile` builds durable subscription options from an explicit `StartPosition`; use it for new subscriptions and preserve the intended consumer group. Core codec registration now rejects duplicate payload types and returns `Result`; handle it with `?` or use `replace` deliberately. `InboundMessage` carries optional provider-attempt metadata without changing its existing `into_parts` tuple. Keep stored wire version 1 data and consumer groups; test retained pending entries before rollout. Start collecting provider snapshots and Redis PEL/memory separately as described above. The [migration guide](migration.md) covers the complete version-specific changes.
 
 
 See [design](design.md), [coverage evidence](coverage-review.md), and [workload benchmark](connection-reuse-benchmark.md). Performance/coverage results require their own measured evidence; this guide makes no new throughput or final coverage claim.
