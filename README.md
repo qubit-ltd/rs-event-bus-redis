@@ -13,14 +13,14 @@
 
 ```toml
 [dependencies]
-qubit-event-bus = { version = "0.20", features = ["discovery"] }
+qubit-event-bus = { version = "0.21", features = ["discovery"] }
 qubit-event-bus-redis = "0.7"
 qubit-spi = "0.14"
 ```
 
 The default features enable `sync`, `async`, and `discovery`. To keep one SPI while using registry discovery, set `default-features = false` on `qubit-event-bus-redis` and select `features = ["sync", "discovery"]` or `features = ["async", "discovery"]`. Enabling discovery only on `qubit-event-bus` does not register the Redis provider. Redis 6.2 or later is required for `XAUTOCLAIM` recovery.
 
-**Registry status:** this `0.7` installation has not yet passed a pure registry consumer check. The README dependency versions describe the intended registry setup, but independent installation without a local patch remains unverified.
+**Registry status:** this `0.7` installation has not yet passed a pure registry consumer check. The README dependency versions describe the intended registry setup, but independent installation without a local patch remains unverified. The current source checkout is being checked against core 0.21 through the workspace path; this does not establish core 0.21 support for the already published `0.7` package.
 
 
 ## Quick Start
@@ -166,7 +166,7 @@ Each wire record, payload, and decoded headers string has a finite provider limi
 
 Redis consumer-group startup is explicit when a group already exists: `StartPosition::New` resumes its stored cursor, while `Earliest` and `At` return `existing_group_start_position_ignored` by default instead of silently ignoring the requested position. A subscription can opt in with `redis.existing_group_start=resume` to keep reading from the existing cursor; this does not run `XGROUP SETID`. See the [group recovery guide](doc/user_guide.md#6-understand-delivery-retry-and-cleanup) and [migration guide](doc/migration.md#existing-consumer-group-start-position-change).
 
-Core 0.20 bounds running handlers, owned deliveries, per-subscription ownership, and registered subscriptions separately. `RedisSubscriptionProfile` requires an explicit start position and builds durable options; new stream entries report provider attempt `Some(1)`, while recovered pending and claimed entries use a verified Redis delivery count only when ID, current owner, and nonzero `u32` representability match, otherwise remaining unknown. Settlement retries are finite and require explicitly retryable errors; unknown retryability stops the subscription. The [user guide](doc/user_guide.md) covers first-cause diagnostics, delivery metrics, durable recovery, provider snapshot sampling, and bounded shutdown waits that do not guarantee forced process exit.
+Core 0.21 bounds running handlers, owned deliveries, per-subscription ownership, and registered subscriptions separately. `RedisSubscriptionProfile` requires an explicit start position and builds durable options; new stream entries report provider attempt `Some(1)`, while recovered pending and claimed entries use a verified Redis delivery count only when ID, current owner, and nonzero `u32` representability match, otherwise remaining unknown. Settlement retries are finite and require explicitly retryable errors; unknown retryability stops the subscription. The [user guide](doc/user_guide.md) covers first-cause diagnostics, delivery metrics, durable recovery, provider snapshot sampling, and bounded shutdown waits that do not guarantee forced process exit.
 
 ## Learn More
 
