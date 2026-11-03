@@ -438,7 +438,7 @@ fn applied_xadd_reply_loss(policy: DuplicateRiskPolicy) -> Result<(), Box<dyn st
     let wires: Vec<String> = records
         .ids
         .iter()
-        .map(|entry| redis::from_redis_value(entry.map.get("wire").unwrap()).unwrap())
+        .map(|entry| redis::from_redis_value(entry.map.get("wire").unwrap().clone()).unwrap())
         .collect();
     for wire in &wires {
         let fields: WireFields = serde_json::from_str(wire)?;
@@ -555,7 +555,7 @@ fn async_applied_xadd_reply_loss_covers_both_duplicate_policies() -> Result<(), 
         let wires: Vec<String> = records
             .ids
             .iter()
-            .map(|entry| redis::from_redis_value(entry.map.get("wire").unwrap()).unwrap())
+            .map(|entry| redis::from_redis_value(entry.map.get("wire").unwrap().clone()).unwrap())
             .collect();
         for wire in &wires {
             let fields: WireFields = serde_json::from_str(wire)?;

@@ -12,7 +12,6 @@ use std::num::NonZeroU32;
 use redis::ErrorKind;
 use redis::RedisError;
 use redis::Value;
-use redis::from_owned_redis_value;
 use redis::from_redis_value;
 use redis::streams::StreamAutoClaimReply;
 use redis::streams::StreamId;
@@ -43,7 +42,7 @@ pub(crate) fn parse_auto_claim(value: Value) -> Result<(StreamAutoClaimReply, bo
         return Err(invalid_reply());
     }
     let mut parts = parts.into_iter();
-    let next_stream_id = from_owned_redis_value(parts.next().ok_or_else(invalid_reply)?)?;
+    let next_stream_id = from_redis_value(parts.next().ok_or_else(invalid_reply)?)?;
     let Value::Array(rows) = parts.next().ok_or_else(invalid_reply)? else {
         return Err(invalid_reply());
     };
@@ -59,24 +58,20 @@ pub(crate) fn parse_auto_claim(value: Value) -> Result<(StreamAutoClaimReply, bo
             has_missing_entries = true;
         } else {
             claimed.push(match row {
-                Value::BulkString(_) => StreamId {
-                    id: from_owned_redis_value(row)?,
-                    ..StreamId::default()
-                },
+                Value::BulkString(_) => {
+                    let mut entry = StreamId::default();
+                    entry.id = from_redis_value(row)?;
+                    entry
+                }
                 row => parse_stream_id(row)?,
             });
         }
     }
-    let deleted_ids = parts
-        .next()
-        .map(from_owned_redis_value)
-        .transpose()?
-        .unwrap_or_default();
-    let reply = StreamAutoClaimReply {
-        next_stream_id,
-        claimed,
-        deleted_ids,
-    };
+    let deleted_ids = parts.next().map(from_redis_value).transpose()?.unwrap_or_default();
+    let mut reply = StreamAutoClaimReply::default();
+    reply.next_stream_id = next_stream_id;
+    reply.claimed = claimed;
+    reply.deleted_ids = deleted_ids;
     Ok((reply, has_missing_entries))
 }
 
@@ -105,13 +100,15 @@ pub(crate) fn parse_read_group(value: Value) -> Result<Option<StreamReadReply>, 
     let keys = pairs
         .into_iter()
         .map(|(key, rows)| {
-            Ok(StreamKey {
-                key: from_owned_redis_value(key)?,
-                ids: parse_range(rows)?.ids,
-            })
+            let mut stream_key = StreamKey::default();
+            stream_key.key = from_redis_value(key)?;
+            stream_key.ids = parse_range(rows)?.ids;
+            Ok(stream_key)
         })
         .collect::<Result<Vec<_>, RedisError>>()?;
-    Ok(Some(StreamReadReply { keys }))
+    let mut reply = StreamReadReply::default();
+    reply.keys = keys;
+    Ok(Some(reply))
 }
 
 /// Normalizes an owned XRANGE reply while retaining each field value
@@ -135,9 +132,9 @@ pub(crate) fn parse_range(value: Value) -> Result<StreamRangeReply, RedisError> 
         Value::Array(rows) => rows,
         _ => return Err(invalid_reply()),
     };
-    Ok(StreamRangeReply {
-        ids: rows.into_iter().map(parse_stream_id).collect::<Result<Vec<_>, _>>()?,
-    })
+    let mut reply = StreamRangeReply::default();
+    reply.ids = rows.into_iter().map(parse_stream_id).collect::<Result<Vec<_>, _>>()?;
+    Ok(reply)
 }
 
 /// Moves one Redis entry's ID and field map out of its two-element row.
@@ -156,10 +153,10 @@ pub(crate) fn parse_range(value: Value) -> Result<StreamRangeReply, RedisError> 
 /// unsupported field map. Nil fields represent a deleted pending entry.
 fn parse_stream_id(value: Value) -> Result<StreamId, RedisError> {
     let (id, fields) = parse_pair(value)?;
-    Ok(StreamId {
-        id: from_owned_redis_value(id)?,
-        map: from_owned_redis_value(fields)?,
-    })
+    let mut entry = StreamId::default();
+    entry.id = from_redis_value(id)?;
+    entry.map = from_redis_value(fields)?;
+    Ok(entry)
 }
 
 /// Consumes an owned protocol row containing exactly two fields.
@@ -228,11 +225,11 @@ pub(crate) fn parse_pending_entries(value: Value) -> Result<Vec<PendingEntry>, R
             if fields.len() != 4 {
                 return Err(invalid_reply());
             }
-            let id = from_redis_value(&fields[0])?;
-            let consumer = from_redis_value(&fields[1])?;
-            let idle_ms: i64 = from_redis_value(&fields[2])?;
+            let id = from_redis_value(fields[0].clone())?;
+            let consumer = from_redis_value(fields[1].clone())?;
+            let idle_ms: i64 = from_redis_value(fields[2].clone())?;
             let idle_ms = u64::try_from(idle_ms).map_err(|_| invalid_reply())?;
-            let times_delivered: i64 = from_redis_value(&fields[3])?;
+            let times_delivered: i64 = from_redis_value(fields[3].clone())?;
             let times_delivered = u64::try_from(times_delivered).map_err(|_| invalid_reply())?;
             Ok(PendingEntry {
                 id,
@@ -261,5 +258,5 @@ pub(crate) fn trusted_attempt(entry: &PendingEntry, expected_id: &str, consumer:
 /// A static diagnostic without source keys, wire bytes, or raw server details.
 #[must_use]
 fn invalid_reply() -> RedisError {
-    RedisError::from((ErrorKind::TypeError, "invalid Redis Streams response"))
+    RedisError::from((ErrorKind::UnexpectedReturnType, "invalid Redis Streams response"))
 }

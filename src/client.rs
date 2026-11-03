@@ -102,12 +102,18 @@ impl Client {
         let (standalone, sentinel) = if config.sentinel_nodes().is_some() {
             (None, Some(SentinelResolver::new(config)?))
         } else {
-            let mut info = RedisConnectionClient::open(config.connection_url())?
+            let info = RedisConnectionClient::open(config.connection_url())?
                 .get_connection_info()
                 .clone();
             let (username, password) = config.credentials();
-            info.redis.username.clone_from(username);
-            info.redis.password.clone_from(password);
+            let mut redis_settings = info.redis_settings().clone();
+            if let Some(username) = username {
+                redis_settings = redis_settings.set_username(username);
+            }
+            if let Some(password) = password {
+                redis_settings = redis_settings.set_password(password);
+            }
+            let info = info.set_redis_settings(redis_settings);
             let certificates = load_certificates(
                 config.tls_ca_cert_path(),
                 config.tls_client_cert_path(),

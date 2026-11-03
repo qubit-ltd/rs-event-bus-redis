@@ -73,7 +73,7 @@ impl ReceiveCommand for Cmd {
             let error: RedisError = error.into();
             return Err(from_redis_error("receive", &error));
         }
-        T::from_owned_redis_value(raw).map_err(|_| {
+        T::from_redis_value(raw).map_err(|_| {
             connection.discard();
             RedisProviderError::OutcomeUnknown { operation: "receive" }
         })

@@ -45,6 +45,8 @@ pub(crate) struct SentinelResolver {
     service: String,
     /// Master ACL and database settings preserved for discovered addresses.
     master_info: RedisConnectionInfo,
+    /// Parsed master connection template, preserving TCP transport settings.
+    master_connection_template: ConnectionInfo,
     /// Whether the discovered master address must use verified TLS.
     master_tls_enabled: bool,
     /// Master-specific CA and mTLS identity, independent from Sentinel TLS.
@@ -91,32 +93,43 @@ impl SentinelResolver {
             } else {
                 "redis"
             };
-            let mut info = Client::open(format!("{scheme}://{node}/"))?
+            let info = Client::open(format!("{scheme}://{node}/"))?
                 .get_connection_info()
                 .clone();
-            info.redis.username.clone_from(username);
-            info.redis.password.clone_from(password);
+            let mut redis_settings = info.redis_settings().clone();
+            if let Some(username) = username {
+                redis_settings = redis_settings.set_username(username);
+            }
+            if let Some(password) = password {
+                redis_settings = redis_settings.set_password(password);
+            }
+            let info = info.set_redis_settings(redis_settings);
             endpoints.push(build_client(info, sentinel_certificates.as_ref())?);
         }
         let master_connection_info = Client::open(config.connection_url())?.get_connection_info().clone();
-        let master_tls_enabled = matches!(&master_connection_info.addr, ConnectionAddr::TcpTls { .. });
-        let mut master_connection_info = master_connection_info;
+        let master_tls_enabled = matches!(master_connection_info.addr(), ConnectionAddr::TcpTls { .. });
         let (username, password) = config.credentials();
-        master_connection_info.redis.username.clone_from(username);
-        master_connection_info.redis.password.clone_from(password);
-        let master_info = master_connection_info.redis.clone();
+        let mut master_info = master_connection_info.redis_settings().clone();
+        if let Some(username) = username {
+            master_info = master_info.set_username(username);
+        }
+        if let Some(password) = password {
+            master_info = master_info.set_password(password);
+        }
+        let master_connection_info = master_connection_info.set_redis_settings(master_info.clone());
         let master_certificates = load_certificates(
             config.tls_ca_cert_path(),
             config.tls_client_cert_path(),
             config.tls_client_key_path(),
         )?;
         if let Some(certificates) = &master_certificates {
-            build_client(master_connection_info, Some(certificates))?;
+            build_client(master_connection_info.clone(), Some(certificates))?;
         }
         Ok(Self {
             endpoints,
             service: config.sentinel_service().unwrap_or_default().into(),
             master_info,
+            master_connection_template: master_connection_info,
             master_tls_enabled,
             master_certificates,
             preferred: AtomicUsize::new(0),
@@ -265,10 +278,10 @@ impl SentinelResolver {
             ConnectionAddr::Tcp(host.into(), port)
         };
         build_client(
-            ConnectionInfo {
-                addr,
-                redis: self.master_info.clone(),
-            },
+            self.master_connection_template
+                .clone()
+                .set_addr(addr)
+                .set_redis_settings(self.master_info.clone()),
             self.master_certificates.as_ref(),
         )
     }
@@ -294,7 +307,10 @@ fn is_master(value: &Value) -> bool {
 ///
 /// A fresh Redis error category used when discovery cannot identify a master.
 fn discovery_error() -> RedisError {
-    RedisError::from((ErrorKind::MasterDown, "Sentinel master discovery failed"))
+    RedisError::from((
+        ErrorKind::Server(redis::ServerErrorKind::MasterDown),
+        "Sentinel master discovery failed",
+    ))
 }
 /// Bounds TCP/setup first, then reapplies short-command read/write socket
 /// waits.
@@ -368,8 +384,8 @@ pub(crate) async fn open_async(
     max_response_bytes: Option<usize>,
 ) -> Result<MultiplexedConnection, RedisError> {
     let config = AsyncConnectionConfig::new()
-        .set_connection_timeout(policy.connect_timeout)
-        .set_response_timeout(policy.command_timeout)
+        .set_connection_timeout(Some(policy.connect_timeout))
+        .set_response_timeout(Some(policy.command_timeout))
         .set_max_response_bytes(max_response_bytes);
     client.get_multiplexed_async_connection_with_config(&config).await
 }
@@ -407,7 +423,7 @@ mod tests {
             Err(error) => error,
             Ok(_) => panic!("invalid host cannot become a target"),
         };
-        assert_eq!(error.kind(), ErrorKind::MasterDown);
+        assert_eq!(error.kind(), ErrorKind::Server(redis::ServerErrorKind::MasterDown));
         assert!(error.to_string().contains("Sentinel master discovery failed"));
         assert!(
             !error.to_string().contains(node),

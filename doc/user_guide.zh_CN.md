@@ -17,7 +17,7 @@ qubit-spi = "0.14"
 
 这些路径适用于 sibling checkout；应按 consumer manifest 所在位置调整。已发布的 Redis 0.7 使用 core 0.20，registry 依赖应继续配套。当前源码的 locked metadata 图解析到 core 0.21，但不能据此证明已发布的 Redis 0.7 包兼容 core 0.21。registry consumer 应等到兼容的 Redis provider 发布并完成集成验证后，再迁移到 core 0.21。升级现有服务前，请先按迁移指南检查版本变化和恢复步骤。
 
-provider 会从 GitHub fork `qubit-ltd/redis-rs` 的 `qubit/redis-0327-response-limit` 分支解析带响应大小限制的 Redis client。应用只需依赖 provider，无须配置本地 Cargo patch，也无须直接依赖 Redis client。
+provider 会从 GitHub fork `qubit-ltd/redis-rs` 的 `qubit/redis-2-0-0-rc1-response-limit` 分支解析带响应大小限制的 Redis client，该分支基于 redis-rs 2.0.0-rc.1。应用只需依赖 provider，无须配置本地 Cargo patch，也无须直接依赖 Redis client。
 
 采用自动发现时，provider 关闭默认 feature 后应选择 `["sync", "discovery"]` 或 `["async", "discovery"]`，facade 也须启用 `discovery`。采用手动注册时，provider 只需 `["sync"]` 或 `["async"]`，facade 无须启用发现功能。`async` 可以使用 Redis client 的 Smol adapter，也能在 Tokio host 中运行。crate 不会启动 Tokio runtime 或生成订阅 worker；异步 facade 的 runner 由应用现有 executor 驱动。
 
@@ -230,7 +230,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
         let stop = async {
             received.await?;
-            // Keep polling the runner while shutdown drains the handler and settlement.
+            // The callback signals before it returns; wait for settlement while
+            // the runner remains polled, then shut down with no owned delivery.
+            while subscription.delivery_metrics().metrics.completed == 0 {
+                future::yield_now().await;
+            }
             let report = bus.shutdown(ShutdownMode::Graceful { timeout: Duration::from_secs(5) }).await?;
             if report.outcome != ShutdownOutcome::Complete {
                 return Err("graceful shutdown did not complete".into());
@@ -240,13 +244,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let (run_result, stop_result) = future::zip(run, stop).await;
         run_result?;
         stop_result?;
-        subscription.close().await?;
         Ok(())
     })
 }
 ```
 
-将 codec 片段放在此 `main` 之前，并添加依赖 `futures-lite = "2"` 和 `futures-channel = "0.3"`。程序打印 `consumed order event: order-43`；handler 完成后发出关闭通知，继续并行轮询 runner 与优雅关闭，直到两者结束。异步 facade 同样通过 codec registry 编解码 payload。`AsyncSubscription::run` 由调用方驱动，future 应由应用 executor 轮询。丢弃尚未完成的 `receive` future 不会确认消息。Redis 会把记录留在消费组的 pending entries list；当前 consumer 后续可以再次读取，其他 consumer 则可在 idle threshold 到期后通过 `XAUTOCLAIM` 接管。
+将 codec 片段放在此 `main` 之前，并添加依赖 `futures-lite = "2"` 和 `futures-channel = "0.3"`。程序打印 `consumed order event: order-43`，在持续轮询 runner 的同时等待投递完成结算，然后执行优雅关闭。异步 facade 同样通过 codec registry 编解码 payload。`AsyncSubscription::run` 由调用方驱动，future 应由应用 executor 轮询。丢弃尚未完成的 `receive` future 不会确认消息。Redis 会把记录留在消费组的 pending entries list；当前 consumer 后续可以再次读取，其他 consumer 则可在 idle threshold 到期后通过 `XAUTOCLAIM` 接管。
 
 
 ## 关闭自动发现后手动注册
@@ -434,7 +437,7 @@ provider 和 Redis Streams 都不按 EventId 自动去重，消费者应保证�
 
 ## 8. 正常关闭
 
-同步总线由关闭模块调用 `subscription.cancel()` 等待 worker 结束，再关闭总线。异步总线可以像上方程序一样，继续轮询 runner，并同时执行优雅关闭以等待已准入 handler 及结算完成，最后关闭句柄。关闭 receiver 或选择立即关闭时，未结算消息可能留在 Redis；关闭本身不代表消息已接受。
+同步总线由关闭模块调用 `subscription.cancel()` 等待 worker 结束，再关闭总线。异步总线可以像上方程序一样，继续轮询 runner，并同时执行优雅关闭以等待已准入 handler 及结算完成；总线关闭时会一并关闭订阅句柄。关闭 receiver 或选择立即关闭时，未结算消息可能留在 Redis；关闭本身不代表消息已接受。
 
 ## 9. 失败后怎样决定是否重试
 
@@ -466,7 +469,7 @@ SPI 的结算状态只约束当前 receiver/token：
 
 同一个已创建 SPI 实例及其共享 Arc clone 共用预算。每次新的 `create_configured` 调用都会建立独立 client 预算；不同 registry 选出的实例不会共用整个进程或 Redis server 的全局准入限制。`max_concurrent_commands` 约束已准入的短操作，默认总额度为 64；其中 `reserved_settlement_commands`（默认 8）在普通命令额度耗尽时仍留给结算。专用 receiver 连接使用独立的 `max_active_receivers` 限制（默认 256），不占短命令名额。总命令数至少为 2；旧值 1 属于不兼容配置，会被拒绝。降低总额度时，未显式配置的结算保留数会自动调整为 `min(8, 总额 - 1)`；只有要自定义保留数时才需显式配置。失败、取消会释放本地命令名额；close/drop 释放 receiver 名额，token 继续存活也不会占用该名额。取消**不保证**multiplexed driver 停止请求，也不保证 Redis server 上已无在途命令。provider 不维护无界准入等待队列；专用阻塞读取与共享短命令通道分开。
 
-活跃 receiver 上限不保证并发 poll 的每轮恢复工作都能准入；claim 等短恢复命令共用普通命令通道。高并发 poll 应处理可重试的 `resource_limit`，可限制 poll 并发或调整预算；提高预算不保证消除拒绝，也不是服务端连接硬总上限。准入按 provider 实例隔离，observer、Sentinel 和其他服务连接不一定计入这些限制。
+claim、pending、attempt 明细和 tombstone 维护命令通过 receiver 专用连接执行，不占普通短命令名额。恢复工作受 receiver 租约、每轮命令预算和有限 I/O 等待约束；单轮预算耗尽后，剩余工作会推迟到后续 receive。`max_concurrent_commands` 限制已准入的短操作，不代表全部 Redis 命令或服务端连接上限。receiver 准入按 provider 实例隔离，observer、Sentinel 和其他服务连接不计入这些限制。
 
 `max_idle_connections` 默认为 8，且不得超过 `max_concurrent_commands`。短操作上限设为 8 以下时，应同时降低空闲保留数，例如同时设置 `redis.max_concurrent_commands=4` 和 `redis.max_idle_connections=4`；只降低前者会被配置校验拒绝。新增字节、时间、数量配置均为有限范围内的正十进制数，不能用 0 关闭限制。
 

@@ -307,6 +307,11 @@ fn test_async_spi_conformance() -> Result<(), Box<dyn Error>> {
         let server = Arc::clone(&cancellation_server);
         Box::pin(async move { check_async_receive_cancellation(&server).await })
     });
+    let subscribe_cancellation_server = Arc::clone(&server);
+    let subscribe_cancellation: AsyncConformanceCheck = Arc::new(move || {
+        let server = Arc::clone(&subscribe_cancellation_server);
+        Box::pin(async move { check_async_subscribe_cancellation(&server).await })
+    });
     let recovery_server = Arc::clone(&server);
     let durable_recovery: AsyncConformanceCheck = Arc::new(move || {
         let server = Arc::clone(&recovery_server);
@@ -330,6 +335,7 @@ fn test_async_spi_conformance() -> Result<(), Box<dyn Error>> {
     let hooks = AsyncConformanceHooks {
         settlement: Some(settlement),
         receive_cancellation: Some(receive_cancellation),
+        subscribe_cancellation: Some(subscribe_cancellation),
         settlement_cancellation: Some(settlement_cancellation),
         close_cancellation: Some(close_cancellation),
         shutdown_cancellation: Some(shutdown_cancellation),
@@ -358,6 +364,68 @@ fn test_async_spi_conformance() -> Result<(), Box<dyn Error>> {
     ));
     report.assert_all_passed();
     Ok(())
+}
+
+/// Checks that cancelling subscription creation releases the receiver slot
+/// after Redis has applied the consumer-group creation command.
+#[cfg(feature = "conformance")]
+async fn check_async_subscribe_cancellation(server: &RedisServer) -> Result<(), String> {
+    let proxy = ControlledRedis::start(server.url()).map_err(|error| error.to_string())?;
+    let options = ProviderOptions::from([
+        ("redis.url".into(), proxy.url()),
+        ("redis.namespace".into(), "async-conformance-subscribe-cancel".into()),
+        ("redis.max_active_receivers".into(), "1".into()),
+    ]);
+    let bus = block_on(
+        AsyncRedisEventBusProvider.create_configured(&EventBusConfig::default().with_provider_options(options)),
+    )
+    .map_err(|failure| failure.into_error().to_string())?;
+    let gate = proxy.pause_after_reply("XGROUP");
+    let cancel = Arc::new(CancelReceive::default());
+    let (result_tx, result_rx) = channel();
+    let reached = scope(|scope| {
+        let worker_bus = Arc::clone(&bus);
+        let worker_cancel = Arc::clone(&cancel);
+        scope.spawn(move || {
+            let result = block_on(race(
+                async {
+                    Some(
+                        worker_bus
+                            .subscribe(group_request("subscribe-cancellation", "worker-a", "workers"))
+                            .await,
+                    )
+                },
+                async {
+                    WaitForCancel(worker_cancel).await;
+                    None
+                },
+            ));
+            let _ = result_tx.send(result.is_none());
+        });
+        let reached = gate.wait_until_reached(Duration::from_secs(3));
+        cancel.cancel();
+        let cancelled = result_rx.recv_timeout(Duration::from_secs(2)).unwrap_or(false);
+        gate.release();
+        (reached, cancelled)
+    });
+    if !reached.0 {
+        return Err("XGROUP reply gate was not reached".into());
+    }
+    if !reached.1 {
+        return Err("subscribe future was not cancelled".into());
+    }
+    gate.release();
+
+    let mut resumed = bus
+        .subscribe(group_request_at(
+            "subscribe-cancellation",
+            "worker-b",
+            "workers",
+            StartPosition::New,
+        ))
+        .await
+        .map_err(|error| error.to_string())?;
+    resumed.close().await.map_err(|error| error.to_string())
 }
 
 /// Checks repeated Accept and conflicting disposition rejection on `server`
@@ -842,7 +910,7 @@ fn test_async_claim_cancellation_after_owner_transfer_recovers_message() -> Resu
             .arg("+")
             .arg(10)
             .query(&mut observer)?;
-        let old_owner = from_redis_value::<String>(&before_claim[0][1])?;
+        let old_owner = from_redis_value::<String>(before_claim[0][1].clone())?;
 
         let proxy = ControlledRedis::start(server.url())?;
         let gate = proxy.pause_after_reply("XAUTOCLAIM");
@@ -886,7 +954,7 @@ fn test_async_claim_cancellation_after_owner_transfer_recovers_message() -> Resu
                 .arg(10)
                 .query(&mut observer)?;
             assert_eq!(pending.len(), 1);
-            let owner = from_redis_value::<String>(&pending[0][1])?;
+            let owner = from_redis_value::<String>(pending[0][1].clone())?;
             assert_ne!(owner, old_owner, "Redis applied ownership transfer before cancellation");
             Ok::<_, Box<dyn Error>>((result, receiver))
         })?;

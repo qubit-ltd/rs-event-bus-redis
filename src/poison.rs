@@ -11,6 +11,7 @@
 use redis::ConnectionLike;
 use redis::ErrorKind;
 use redis::RedisError;
+use redis::ServerErrorKind;
 #[cfg(feature = "async")]
 use redis::aio::MultiplexedConnection;
 use redis::cmd;
@@ -110,7 +111,7 @@ pub(crate) fn quarantine<C: ConnectionLike>(
         2 => Ok(PoisonOutcome::TombstoneCleared),
         -1 => Ok(PoisonOutcome::OwnershipChanged),
         _ => Err(RedisError::from((
-            ErrorKind::ResponseError,
+            ErrorKind::Server(ServerErrorKind::ResponseError),
             "invalid quarantine result",
         ))),
     }
@@ -165,7 +166,7 @@ pub(crate) async fn quarantine_async(
         2 => Ok(PoisonOutcome::TombstoneCleared),
         -1 => Ok(PoisonOutcome::OwnershipChanged),
         _ => Err(RedisError::from((
-            ErrorKind::ResponseError,
+            ErrorKind::Server(ServerErrorKind::ResponseError),
             "invalid quarantine result",
         ))),
     }

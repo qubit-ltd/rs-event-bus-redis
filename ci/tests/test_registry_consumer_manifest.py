@@ -32,6 +32,22 @@ example={git="https://example.invalid/repo"}
         parsed = tomllib.loads(manifest)
         self.assertTrue(any("patch" in issue for issue in CHECKER.manifest_issues(parsed)))
 
+    def test_rejects_git_dependency(self):
+        manifest = '''
+[dependencies]
+example = { version = "1.2.3", git = "https://example.invalid/repo" }
+'''
+        parsed = tomllib.loads(manifest)
+        self.assertTrue(any("git dependency" in issue for issue in CHECKER.manifest_issues(parsed)))
+
+    def test_rejects_nested_target_git_dependency(self):
+        manifest = '''
+[target.'cfg(unix)'.dependencies]
+example = { git = "https://example.invalid/repo" }
+'''
+        parsed = tomllib.loads(manifest)
+        self.assertTrue(any("git dependency" in issue for issue in CHECKER.manifest_issues(parsed)))
+
 
 if __name__ == "__main__":
     unittest.main()

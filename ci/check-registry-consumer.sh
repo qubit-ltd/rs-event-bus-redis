@@ -1,37 +1,67 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+usage() {
+    echo "usage: $0 --provider-version X.Y.Z --core-version X.Y.Z --spi-version X.Y.Z" >&2
+}
+
+provider_version=
+core_version=
+spi_version=
+while (($#)); do
+    case "$1" in
+        --provider-version|--core-version|--spi-version)
+            option=$1
+            if (($# < 2)); then usage; exit 2; fi
+            case "$option" in
+                --provider-version) provider_version=$2 ;;
+                --core-version) core_version=$2 ;;
+                --spi-version) spi_version=$2 ;;
+            esac
+            shift 2
+            ;;
+        *) usage; echo "error: unknown argument: $1" >&2; exit 2 ;;
+    esac
+done
+if [[ -z "$provider_version" || -z "$core_version" || -z "$spi_version" ]]; then
+    usage
+    echo "error: all three candidate versions are required" >&2
+    exit 2
+fi
+
 project_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 fixture="$project_root/tests/fixtures/registry_consumer"
 consumer_dir=$(mktemp -d "${TMPDIR:-/tmp}/redis-bus-registry-consumer.XXXXXX")
-trap 'rm -rf "$consumer_dir"' EXIT
+stage=argument-validation
+on_exit() {
+    status=$?
+    if ((status != 0)); then
+        echo "registry consumer failed during $stage (exit $status)" >&2
+    fi
+    rm -rf "$consumer_dir"
+}
+trap on_exit EXIT
+echo "registry consumer candidate: provider=$provider_version core=$core_version spi=$spi_version"
 
-python3 "$project_root/ci/check_registry_consumer_manifest.py" "$fixture/Cargo.toml"
-
-cp -R "$fixture/." "$consumer_dir/"
+stage=prepare
+python3 "$project_root/ci/registry_consumer_target.py" prepare \
+    --source-manifest "$project_root/Cargo.toml" --fixture "$fixture" --output "$consumer_dir" \
+    --provider-version "$provider_version" --core-version "$core_version" --spi-version "$spi_version"
+stage=manifest-check
+python3 "$project_root/ci/check_registry_consumer_manifest.py" "$consumer_dir/Cargo.toml"
 cd "$consumer_dir"
-
+stage=generate-lockfile
 cargo +1.94.0 generate-lockfile
 for features in 'sync,discovery' 'async,discovery'; do
+    stage="check-$features"
     cargo +1.94.0 check --locked --no-default-features --features "$features"
 done
+stage=check-default-features
 cargo +1.94.0 check --locked
-
+stage=metadata
 metadata=$(cargo +1.94.0 metadata --format-version 1 --locked)
-python3 -c '
-import json, sys
-metadata = json.load(sys.stdin)
-required = {"qubit-event-bus", "qubit-event-bus-redis", "qubit-spi"}
-packages = {package["name"]: package for package in metadata["packages"] if package["name"] in required}
-missing = required - packages.keys()
-if missing:
-    raise SystemExit(f"missing registry packages: {sorted(missing)}")
-for name, package in packages.items():
-    source = package["source"]
-    if name == "registry-consumer" and source is None:
-        continue
-    if source != "registry+https://github.com/rust-lang/crates.io-index":
-        raise SystemExit(f"{name} did not resolve from crates.io: {source}")
-' <<<"$metadata"
-
-echo "published registry consumer checks passed"
+stage=metadata-verify
+printf '%s' "$metadata" | python3 "$project_root/ci/registry_consumer_target.py" verify \
+    --provider-version "$provider_version" --core-version "$core_version" --spi-version "$spi_version"
+echo "registry consumer checks passed for provider=$provider_version core=$core_version spi=$spi_version"
+stage=complete

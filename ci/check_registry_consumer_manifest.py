@@ -16,6 +16,8 @@ def manifest_issues(manifest: dict) -> list[str]:
             return
         if "path" in value:
             issues.append(f"{location} uses a path dependency")
+        if "git" in value:
+            issues.append(f"{location} uses a git dependency")
         for name, nested in value.items():
             if isinstance(nested, dict):
                 check_dependency_tables(nested, f"{location}.{name}")

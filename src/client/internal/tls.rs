@@ -60,15 +60,19 @@ pub(in crate::client) fn load_certificates(
             let client_key = read_pem(key_path)?;
             validate_certificate_pem(&client_cert)?;
             validate_private_key_pem(&client_key)?;
-            Some(ClientTlsConfig {
-                client_cert,
-                client_key,
-            })
+            Some(ClientTlsConfig::new(client_cert, client_key))
         }
         (None, None) => None,
         _ => return Err(tls_configuration_error()),
     };
-    let certificates = TlsCertificates { client_tls, root_cert };
+    let certificates = match (client_tls, root_cert) {
+        (Some(client_tls), Some(root_cert)) => TlsCertificates::new()
+            .client_tls_config(client_tls)
+            .root_cert(root_cert),
+        (Some(client_tls), None) => TlsCertificates::new().client_tls_config(client_tls),
+        (None, Some(root_cert)) => TlsCertificates::new().root_cert(root_cert),
+        (None, None) => TlsCertificates::new(),
+    };
 
     // redis-rs performs PEM and key parsing while constructing the client.
     // Use a harmless TLS endpoint to validate without opening a socket.
@@ -96,7 +100,7 @@ pub(in crate::client) fn build_client(
     connection_info: ConnectionInfo,
     certificates: Option<&TlsCertificates>,
 ) -> Result<Client, RedisError> {
-    if matches!(&connection_info.addr, ConnectionAddr::TcpTls { .. }) {
+    if matches!(connection_info.addr(), ConnectionAddr::TcpTls { .. }) {
         // redis-rs deliberately leaves rustls' crypto provider to the host.
         // Select ring only when no process provider is already installed.
         let _ = rustls::crypto::ring::default_provider().install_default();
@@ -227,7 +231,7 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "invalid Redis TLS configuration- InvalidClientConfig"
+            "invalid Redis TLS configuration - InvalidClientConfig"
         );
         assert!(!error.to_string().contains("PRIVATE KEY CONTENT"));
         assert!(!error.to_string().contains(key_path.to_str().expect("key path")));
@@ -241,10 +245,7 @@ mod tests {
             .expect("parse plaintext connection info")
             .get_connection_info()
             .clone();
-        let certificates = redis::TlsCertificates {
-            client_tls: None,
-            root_cert: None,
-        };
+        let certificates = redis::TlsCertificates::new();
 
         let error = match build_client(connection_info, Some(&certificates)) {
             Err(error) => error,
@@ -253,7 +254,7 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "invalid Redis TLS configuration- InvalidClientConfig"
+            "invalid Redis TLS configuration - InvalidClientConfig"
         );
     }
 
@@ -275,7 +276,7 @@ mod tests {
         assert!(!error.to_string().contains(path.to_str().expect("path")));
         assert_eq!(
             error.to_string(),
-            "invalid Redis TLS configuration- InvalidClientConfig"
+            "invalid Redis TLS configuration - InvalidClientConfig"
         );
     }
 
@@ -285,24 +286,22 @@ mod tests {
         let directory = tempdir().expect("temporary directory");
         let missing_path = directory.path().join("private-ca.pem");
         let error = load_certificates(Some(missing_path.to_str().expect("UTF-8 temporary path")), None, None)
-            .err()
-            .expect("missing CA is rejected");
+            .expect_err("missing CA is rejected");
         assert!(!error.to_string().contains(missing_path.to_str().expect("path")));
         assert_eq!(
             error.to_string(),
-            "invalid Redis TLS configuration- InvalidClientConfig"
+            "invalid Redis TLS configuration - InvalidClientConfig"
         );
 
         let invalid_path = directory.path().join("invalid-ca.pem");
         fs::write(&invalid_path, b"PRIVATE PEM CONTENT").expect("write invalid PEM");
         let error = load_certificates(Some(invalid_path.to_str().expect("UTF-8 temporary path")), None, None)
-            .err()
-            .expect("invalid CA PEM is rejected");
+            .expect_err("invalid CA PEM is rejected");
         assert!(!error.to_string().contains(invalid_path.to_str().expect("path")));
         assert!(!error.to_string().contains("PRIVATE PEM CONTENT"));
         assert_eq!(
             error.to_string(),
-            "invalid Redis TLS configuration- InvalidClientConfig"
+            "invalid Redis TLS configuration - InvalidClientConfig"
         );
     }
 

@@ -4,10 +4,11 @@
 
 ## Current compatibility
 
-The current provider manifest is version 0.7 and depends on core 0.20. Keep
-those versions together when using this checkout. The provider 0.6 to 0.7
-migration below records the API transition; its original release pairing was
-core 0.19, before core 0.20 was prepared.
+The current source checkout is provider 0.7 and depends on core 0.21. The
+README documents a provider 0.7/core 0.20 release pairing, but this combination
+could not be verified on crates.io on 2026-11-03. It does not describe this
+source checkout. The provider 0.6 to 0.7 migration below records the API
+transition, whose original release pairing was core 0.19.
 
 ### Core 0.20 compatibility
 
@@ -49,7 +50,9 @@ reconstructing the provider instance to rotate its identity.
 ## Upgrade from provider 0.6 to 0.7
 
 The original provider 0.7 migration paired `qubit-event-bus-redis` 0.7 with
-`qubit-event-bus` 0.19. For the current provider 0.7 manifest, use core 0.20.
+`qubit-event-bus` 0.19. The current source checkout instead uses core 0.21;
+the README documents provider 0.7 paired with core 0.20, which could not be
+verified on crates.io on 2026-11-03.
 Replace repeated `durability(Durable)`, `start_position(...)`, and optional `consumer_group(...)` setup with `RedisSubscriptionProfile::new(start_position).consumer_group(group).options()` (omit `consumer_group` when not used). The profile requires an explicit `StartPosition` and always starts with durable options; a later `.durability(Ephemeral)` is rejected by the Redis capability check.
 
 New entries returned from `XREADGROUP >` expose `provider_attempt() == Some(1)`. For every pending or `XAUTOCLAIM` recovery delivery, the provider makes one additional `XPENDING` detail query. It reports `Some(count)` only if the query returns exactly one detail row for that entry ID, owned by the current consumer, with a nonzero count representable by the SPI; failed, missing, malformed, or mismatched details report `None`. This exposes Redis's current pending delivery count and does not reconstruct unavailable history. Existing wire v1 records, Redis groups, and settlement behavior remain compatible. Core 0.19 also changes `CodecRegistry::register` to return an error on duplicate payload registration; see the [core migration guide](https://github.com/qubit-ltd/rs-event-bus/blob/main/doc/migration.md).

@@ -289,7 +289,7 @@ fn test_sync_short_connection_setup_failure_releases_subscribe_resources() {
         .create_configured(&EventBusConfig::default().with_provider_options(settings))
         .expect("provider");
     match bus.subscribe(request(1)) {
-        // redis 0.32.7 SELECT setup keeps rejection details but loses its
+        // redis 2.0.0-rc.1 SELECT setup keeps rejection details but loses its
         // server error code; classification cannot infer NOPERM from text.
         Err(SpiError::Operation {
             operation,
@@ -341,7 +341,7 @@ fn test_async_short_connection_setup_failure_releases_subscribe_resources() {
             .await
             .expect("provider");
         match bus.subscribe(request(1)).await {
-            // redis 0.32.7 SELECT setup keeps rejection details but loses its
+            // redis 2.0.0-rc.1 SELECT setup keeps rejection details but loses its
             // server error code; classification cannot infer NOPERM from text.
             Err(SpiError::Operation {
                 operation,

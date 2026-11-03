@@ -50,8 +50,9 @@ use crate::sync::redis_event_bus::spi_error;
 ///
 /// # Errors
 ///
-/// Returns classified admission or socket errors, or an outcome-unknown error
-/// when a Redis reply or quarantine result cannot be trusted.
+/// Returns classified receiver-operation or socket errors, or an
+/// outcome-unknown error when a Redis reply or quarantine result cannot be
+/// trusted.
 pub(super) fn scan(
     subscription: &Subscription,
     connection: &mut PooledConnection,

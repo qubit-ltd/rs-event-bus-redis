@@ -228,10 +228,7 @@ fn query_master_port(port: u16, tls: bool, ca_path: &str) -> Result<u16, Box<dyn
         let _ = rustls::crypto::ring::default_provider().install_default();
         Client::build_with_tls(
             format!("rediss://localhost:{port}/"),
-            TlsCertificates {
-                client_tls: None,
-                root_cert: Some(fs::read(ca_path)?),
-            },
+            TlsCertificates::new().root_cert(fs::read(ca_path)?),
         )?
     } else {
         Client::open(format!("redis://localhost:{port}/"))?

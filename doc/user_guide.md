@@ -17,7 +17,7 @@ qubit-spi = "0.14"
 
 These paths are for sibling checkouts; adjust them to the consumer manifest's location. Published Redis 0.7 uses core 0.20, so keep that released registry pair together. The current source checkout's local locked metadata graph uses core 0.21 but does not establish compatibility for the published Redis 0.7 package. A registry consumer should move to core 0.21 only after a compatible Redis provider release and its integration evidence are available. Consult the migration guide before upgrading an existing deployment.
 
-The provider resolves its bounded-response Redis client from the `qubit-ltd/redis-rs` GitHub fork branch `qubit/redis-0327-response-limit`. Applications depend on the provider and do not need a local Cargo patch or a direct Redis client dependency.
+The provider resolves its bounded-response Redis client from the `qubit-ltd/redis-rs` GitHub fork branch `qubit/redis-2-0-0-rc1-response-limit`, based on redis-rs 2.0.0-rc.1. Applications depend on the provider and do not need a local Cargo patch or a direct Redis client dependency.
 
 For discovery, disable defaults and select `features = ["sync", "discovery"]` or `["async", "discovery"]` on the provider, and enable facade `discovery`. For manual registration, provider `features = ["sync"]` or `["async"]` suffice; facade discovery is unnecessary. `async` enables the Redis client's Smol adapter; its futures can be polled by a Smol or Tokio host. The crate does not start a Tokio runtime or spawn a subscription worker; the facade's async runner is polled by the application's executor.
 
@@ -232,7 +232,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
         let stop = async {
             received.await?;
-            // Keep polling the runner while shutdown drains the handler and settlement.
+            // The callback signals before it returns; wait for settlement while
+            // the runner remains polled, then shut down with no owned delivery.
+            while subscription.delivery_metrics().metrics.completed == 0 {
+                future::yield_now().await;
+            }
             let report = bus.shutdown(ShutdownMode::Graceful { timeout: Duration::from_secs(5) }).await?;
             if report.outcome != ShutdownOutcome::Complete {
                 return Err("graceful shutdown did not complete".into());
@@ -242,13 +246,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let (run_result, stop_result) = future::zip(run, stop).await;
         run_result?;
         stop_result?;
-        subscription.close().await?;
         Ok(())
     })
 }
 ```
 
-Paste the codec fragment above this `main`; add `futures-lite = "2"` and `futures-channel = "0.3"` to the dependencies. This program prints `consumed order event: order-43`, signals shutdown after the handler finishes, and polls the runner alongside graceful shutdown until both complete. The async facade uses the same codec registry as the sync example. `AsyncSubscription::run` is caller driven; its future belongs on the application's executor. Dropping a pending `receive` future does not acknowledge the record. Redis keeps it in the consumer group's pending entries list, and a later receive by that consumer or `XAUTOCLAIM` by another consumer can recover it.
+Paste the codec fragment above this `main`; add `futures-lite = "2"` and `futures-channel = "0.3"` to the dependencies. This program prints `consumed order event: order-43`, waits until the delivery is settled while continuing to poll the runner, and then performs graceful shutdown. The async facade uses the same codec registry as the sync example. `AsyncSubscription::run` is caller driven; its future belongs on the application's executor. Dropping a pending `receive` future does not acknowledge the record. Redis keeps it in the consumer group's pending entries list, and a later receive by that consumer or `XAUTOCLAIM` by another consumer can recover it.
 
 
 ## Manual registration without discovery
@@ -466,7 +469,7 @@ An unpolled settle future or failed/cancelled connection acquisition leaves Open
 
 Limits apply to the same created SPI instance and its shared Arc clones. Each new `create_configured` call creates an independent client budget; instances selected through different registries do not share a Redis-global or process-global budget. `max_concurrent_commands` bounds admitted short operations; its default is 64. Of these, `reserved_settlement_commands` (default 8) stays available to settlement when general admission is full. Dedicated receiver connections use their separate `max_active_receivers` cap (default 256), not short-command slots. Total command concurrency must be at least 2; the old value 1 is rejected as a breaking configuration change. When lowering the total, the omitted reservation adapts to `min(8, total - 1)`; set it explicitly only if a different reserve is needed. Failure/cancellation releases local command admission; close/drop releases receiver admission even if tokens remain alive. Cancellation does **not** guarantee that a Redis multiplexed driver stops or that the server command is no longer in flight. There is no unbounded provider admission queue. Dedicated blocking reads remain separate from the shared short-command channel.
 
-The active-receiver cap does not guarantee that every concurrent recovery poll is admitted: claim and other short recovery commands share the general command lane. Handle retryable `resource_limit` during concurrent polling by limiting poll concurrency or tuning the budgets; larger budgets do not guarantee admission or impose a hard server connection cap. Admission is per provider instance, and Redis/server-side clients from observers, Sentinel, and other services are not all counted by these limits.
+Claim, pending, attempt-detail, and tombstone-maintenance commands run on the receiver's dedicated connection and do not consume general short-command permits. Recovery work is bounded by the receiver lease, per-round command budget, and finite I/O waits; exhausting the round budget defers remaining work to a later receive. `max_concurrent_commands` limits admitted short operations, not all Redis commands or server connections. Receiver admission is per provider instance, and Redis/server-side clients from observers, Sentinel, and other services are not counted by these limits.
 
 `max_idle_connections` defaults to 8 and cannot exceed `max_concurrent_commands`. When configuring fewer than eight short operations, lower idle retention too, for example `redis.max_concurrent_commands=4` with `redis.max_idle_connections=4`; setting only the former rejects configuration. New byte/time/count options are positive decimal values with finite ranges; zero does not disable their limits.
 

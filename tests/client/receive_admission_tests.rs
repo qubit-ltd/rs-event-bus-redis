@@ -143,14 +143,14 @@ fn pending_count(connection: &mut Connection, key: &str) -> usize {
         .query(connection)
         .expect("group details");
     assert_eq!(groups.len(), 1);
-    let fields: Vec<Value> = from_redis_value(&groups[0]).expect("group fields");
-    let group: String = from_redis_value(&fields[1]).expect("group name");
+    let fields: Vec<Value> = from_redis_value(groups[0].clone()).expect("group fields");
+    let group: String = from_redis_value(fields[1].clone()).expect("group name");
     let summary: Vec<Value> = cmd("XPENDING")
         .arg(key)
         .arg(group)
         .query(connection)
         .expect("pending summary");
-    from_redis_value(&summary[0]).expect("pending count")
+    from_redis_value(summary[0].clone()).expect("pending count")
 }
 
 #[cfg(feature = "sync")]

@@ -560,15 +560,17 @@ fn decode_entry(subscription: &Subscription, entry: StreamId) -> Result<InboundM
 ///
 /// `Some` contains a message, gap, or TimedOut after maintenance quota
 /// exhaustion; `None` means another consumer owns the poison record and the
-/// caller should continue scanning. Isolation can copy wire data and ACK the
-/// PEL entry; Redis Lua does not roll back partial writes.
+/// caller should continue scanning. An entry exceeding configured wire limits
+/// returns `receive_limit_exceeded` instead of a message. Isolation can copy
+/// wire data and ACK the PEL entry; Redis Lua does not roll back partial
+/// writes.
 ///
 /// # Errors
 ///
-/// Returns unsupported-version without ACK, active-state/lock failure,
-/// admission exhaustion, or uncertain quarantine execution. The caller must
-/// inspect PEL state on a later receive rather than transparently replaying an
-/// uncertain script.
+/// Returns unsupported-version without ACK, `receive_limit_exceeded`, the
+/// local active-delivery limit, receiver-state/lock or socket-setup errors, or
+/// uncertain quarantine execution. The caller must inspect PEL state on a
+/// later receive rather than transparently replaying an uncertain script.
 fn read_entry(
     subscription: &Subscription,
     connection: &mut PooledConnection,
@@ -785,7 +787,10 @@ mod tests {
         if let Some(wire) = wire {
             map.insert("wire".into(), wire);
         }
-        StreamId { id: "1-0".into(), map }
+        let mut entry = StreamId::default();
+        entry.id = "1-0".into();
+        entry.map = map;
+        entry
     }
 
     #[test]

@@ -128,7 +128,7 @@ pub(crate) fn query_publish_error(topic: &TopicAddress, error: &RedisError) -> S
     } else {
         PublishEffect::MayHaveBeenAccepted
     };
-    let source = if error.kind() == ErrorKind::TypeError && error.code().is_none() {
+    let source = if error.kind() == ErrorKind::UnexpectedReturnType && error.code().is_none() {
         RedisProviderError::Transport {
             operation: "publish",
             kind: "protocol",

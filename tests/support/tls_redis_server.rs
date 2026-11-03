@@ -381,13 +381,9 @@ fn responds_to_ping(url: &str, ca_path: &str, client_cert_path: &str, client_key
     };
     let Ok(client) = Client::build_with_tls(
         url,
-        redis::TlsCertificates {
-            client_tls: Some(redis::ClientTlsConfig {
-                client_cert,
-                client_key,
-            }),
-            root_cert: Some(root_cert),
-        },
+        redis::TlsCertificates::new()
+            .client_tls_config(redis::ClientTlsConfig::new(client_cert, client_key))
+            .root_cert(root_cert),
     ) else {
         return false;
     };

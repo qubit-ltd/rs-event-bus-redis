@@ -892,7 +892,7 @@ fn validate_url(connection_url: &str) -> Result<bool, RedisProviderError> {
     let client =
         RedisClient::open(connection_url).map_err(|_| RedisProviderError::Configuration("invalid redis.url"))?;
     let parsed = client.get_connection_info();
-    let tls_enabled = match &parsed.addr {
+    let tls_enabled = match parsed.addr() {
         redis::ConnectionAddr::Tcp(_, _) => false,
         redis::ConnectionAddr::TcpTls { insecure, .. } if !insecure => true,
         redis::ConnectionAddr::TcpTls { .. } => {
@@ -903,6 +903,11 @@ fn validate_url(connection_url: &str) -> Result<bool, RedisProviderError> {
         redis::ConnectionAddr::Unix(_) => {
             return Err(RedisProviderError::Configuration(
                 "redis.url must use redis:// or rediss://",
+            ));
+        }
+        _ => {
+            return Err(RedisProviderError::Configuration(
+                "unsupported Redis connection address",
             ));
         }
     };
@@ -924,7 +929,7 @@ fn validate_url(connection_url: &str) -> Result<bool, RedisProviderError> {
             "redis.url must use redis:// or rediss://",
         ));
     }
-    if parsed.redis.password.is_some() || parsed.redis.username.is_some() {
+    if parsed.redis_settings().password().is_some() || parsed.redis_settings().username().is_some() {
         return Err(RedisProviderError::Configuration(
             "credentials must be supplied using environment variables",
         ));

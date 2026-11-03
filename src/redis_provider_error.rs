@@ -11,6 +11,8 @@
 use redis::ErrorKind;
 #[cfg(any(feature = "sync", feature = "async"))]
 use redis::RedisError;
+#[cfg(any(feature = "sync", feature = "async"))]
+use redis::ServerErrorKind;
 use thiserror::Error;
 
 /// Redis provider errors with secret-safe formatting.
@@ -99,17 +101,21 @@ pub(crate) fn from_redis_error(operation: &'static str, error: &RedisError) -> R
     let code_class = redis_error_code_class(error.code().unwrap_or_default());
     let (kind, retryable) = code_class.unwrap_or_else(|| match error.kind() {
         ErrorKind::AuthenticationFailed => ("authentication", Some(false)),
-        ErrorKind::TypeError => ("wrong_type", Some(false)),
-        ErrorKind::InvalidClientConfig | ErrorKind::EmptySentinelList => ("configuration", Some(false)),
-        ErrorKind::BusyLoadingError | ErrorKind::TryAgain | ErrorKind::MasterDown | ErrorKind::ReadOnly => {
-            ("temporarily_unavailable", Some(true))
-        }
-        ErrorKind::IoError => ("transport", Some(true)),
-        ErrorKind::ParseError | ErrorKind::RESP3NotSupported => ("protocol", Some(false)),
-        ErrorKind::Moved
-        | ErrorKind::Ask
-        | ErrorKind::CrossSlot
-        | ErrorKind::ClusterDown
+        ErrorKind::UnexpectedReturnType => ("wrong_type", Some(false)),
+        ErrorKind::InvalidClientConfig
+        | ErrorKind::EmptySentinelList
+        | ErrorKind::MasterNameNotFoundBySentinel
+        | ErrorKind::NoValidReplicasFoundBySentinel => ("configuration", Some(false)),
+        ErrorKind::Server(ServerErrorKind::BusyLoading)
+        | ErrorKind::Server(ServerErrorKind::TryAgain)
+        | ErrorKind::Server(ServerErrorKind::MasterDown)
+        | ErrorKind::Server(ServerErrorKind::ReadOnly) => ("temporarily_unavailable", Some(true)),
+        ErrorKind::Io => ("transport", Some(true)),
+        ErrorKind::Parse | ErrorKind::RESP3NotSupported | ErrorKind::ResponseTooLarge => ("protocol", Some(false)),
+        ErrorKind::Server(ServerErrorKind::Moved)
+        | ErrorKind::Server(ServerErrorKind::Ask)
+        | ErrorKind::Server(ServerErrorKind::CrossSlot)
+        | ErrorKind::Server(ServerErrorKind::ClusterDown)
         | ErrorKind::ClusterConnectionNotFound => ("unsupported_topology", Some(false)),
         _ => ("redis_error", None),
     });

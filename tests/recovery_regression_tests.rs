@@ -770,7 +770,13 @@ fn test_sync_poison_does_not_block_next() -> Result<(), Box<dyn Error>> {
         .arg("+")
         .query(&mut connection)?;
     assert_eq!(records.ids.len(), 4);
-    let raw_wire = String::from_redis_value(records.ids[1].map.get("wire").ok_or("quarantine record omitted wire")?)?;
+    let raw_wire = String::from_redis_value(
+        records.ids[1]
+            .map
+            .get("wire")
+            .ok_or("quarantine record omitted wire")?
+            .clone(),
+    )?;
     assert_eq!(raw_wire, "not-json");
     let pending: Vec<Value> = cmd("XPENDING")
         .arg(&stream)
@@ -1004,8 +1010,13 @@ fn test_async_poison_does_not_block_next() -> Result<(), Box<dyn Error>> {
             .arg("+")
             .query(&mut verify)?;
         assert_eq!(records.ids.len(), 4);
-        let raw_wire =
-            String::from_redis_value(records.ids[1].map.get("wire").ok_or("quarantine record omitted wire")?)?;
+        let raw_wire = String::from_redis_value(
+            records.ids[1]
+                .map
+                .get("wire")
+                .ok_or("quarantine record omitted wire")?
+                .clone(),
+        )?;
         assert_eq!(raw_wire, "not-json");
         let pending: Vec<Value> = cmd("XPENDING")
             .arg(&stream)

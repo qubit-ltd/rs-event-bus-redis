@@ -534,8 +534,8 @@ impl AsyncEventSubscriptionSpi for Subscription {
 ///
 /// # Parameters
 ///
-/// - `subscription`: Receiver supplying Redis keys, recovery cursors, and
-///   command admission.
+/// - `subscription`: Receiver supplying Redis keys, recovery cursors, and the
+///   receiver lease for its dedicated transport.
 /// - `connection`: Dedicated socket used for the bounded pending/range queries.
 /// - `driver`: Receive budget controlling whether this probe and its commands
 ///   may run.
@@ -547,8 +547,8 @@ impl AsyncEventSubscriptionSpi for Subscription {
 ///
 /// # Errors
 ///
-/// Returns an operation error for exhausted command admission and an uncertain
-/// receive/quarantine outcome for malformed or failed Redis replies.
+/// Returns an operation error for receiver state or lock failures, or an
+/// uncertain receive/quarantine outcome for malformed or failed Redis replies.
 async fn scan_missing_tombstones(
     subscription: &Subscription,
     connection: &mut MultiplexedConnection,
@@ -667,16 +667,17 @@ async fn scan_missing_tombstones(
 ///
 /// `Some` contains a decoded message, a quarantine/removal gap, or TimedOut
 /// when maintenance allowance is exhausted. `None` means another consumer owns
-/// the poison entry and scanning should continue. Successful poison isolation
-/// can copy the wire and XACK its PEL entry; Redis Lua does not roll back
-/// partial writes.
+/// the poison entry and scanning should continue. An entry exceeding configured
+/// wire limits returns `receive_limit_exceeded` instead of a message.
+/// Successful poison isolation can copy the wire and XACK its PEL entry; Redis
+/// Lua does not roll back partial writes.
 ///
 /// # Errors
 ///
-/// Returns unsupported-version without ACK, active-state/lock failure,
-/// admission exhaustion, or an uncertain quarantine outcome. Cancellation can
-/// conceal completed Redis script writes; no transparent quarantine replay is
-/// attempted.
+/// Returns unsupported-version without ACK, `receive_limit_exceeded`, the
+/// local active-delivery limit, receiver-state/lock failure, or an uncertain
+/// quarantine outcome. Cancellation can conceal completed Redis script writes;
+/// no transparent quarantine replay is attempted.
 async fn read_entry(
     subscription: &Subscription,
     connection: &mut MultiplexedConnection,
@@ -934,7 +935,10 @@ mod tests {
         if let Some(wire) = wire {
             map.insert("wire".into(), wire);
         }
-        StreamId { id: "1-0".into(), map }
+        let mut entry = StreamId::default();
+        entry.id = "1-0".into();
+        entry.map = map;
+        entry
     }
 
     #[test]

@@ -163,10 +163,8 @@ fn test_recovery_cursors_advance_and_retry_restarts_pending_scan() {
 #[test]
 fn test_gap_preserves_one_claimed_entry_for_the_next_receive() {
     let mut state = RecoveryState::new();
-    let entry = StreamId {
-        id: "4-0".into(),
-        map: Default::default(),
-    };
+    let mut entry = StreamId::default();
+    entry.id = "4-0".into();
     state.defer_claim(entry);
     assert_eq!(
         state.take_deferred_claim().map(|entry| entry.id.as_str().to_owned()),
@@ -184,10 +182,10 @@ fn test_tombstone_scan_progress_and_reset_preserve_gap_debt_and_delivery_capacit
     state.set_tombstone_cursor("4-0".into());
     let wire = b"claimed-wire".to_vec();
     let wire_pointer = wire.as_ptr();
-    state.defer_claim(StreamId {
-        id: "6-0".into(),
-        map: [("wire".into(), Value::BulkString(wire))].into(),
-    });
+    let mut entry = StreamId::default();
+    entry.id = "6-0".into();
+    entry.map = [("wire".into(), Value::BulkString(wire))].into();
+    state.defer_claim(entry);
 
     // A bounded tombstone page retains its position while a claim waits behind a
     // Gap.

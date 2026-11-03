@@ -8,10 +8,22 @@ on:
   workflow_dispatch:
     inputs:
       registry_consumer:
-        description: Run the post-publication registry consumer checks
+        description: Run compatibility checks for a specified published version combination
         required: false
         type: boolean
         default: false
+      provider_version:
+        description: Published qubit-event-bus-redis version (X.Y.Z)
+        required: false
+        type: string
+      core_version:
+        description: Published qubit-event-bus version (X.Y.Z)
+        required: false
+        type: string
+      spi_version:
+        description: Published qubit-spi version (X.Y.Z)
+        required: false
+        type: string
 
 env:
   RS_EVENT_BUS_PIN: "1"
@@ -67,4 +79,8 @@ jobs:
         with:
           toolchain: 1.94
       - name: Check published registry packages from an isolated consumer
-        run: bash ./ci/check-registry-consumer.sh
+        env:
+          PROVIDER_VERSION: ${{ inputs.provider_version }}
+          CORE_VERSION: ${{ inputs.core_version }}
+          SPI_VERSION: ${{ inputs.spi_version }}
+        run: bash ./ci/check-registry-consumer.sh --provider-version "$PROVIDER_VERSION" --core-version "$CORE_VERSION" --spi-version "$SPI_VERSION"
