@@ -41,7 +41,7 @@ async-lock = { version = "^3", optional = true }
 redis = {
   version = "=2.0.0-rc.1",
   git = "https://github.com/qubit-ltd/redis-rs.git",
-  branch = "qubit/redis-2-0-0-rc1-response-limit",
+  rev = "a668891e9fcfed32f8905c2fd729fa05c1732aa5",
   default-features = false,
   features = ["streams", "sentinel", "tls-rustls-webpki-roots"]
 }
@@ -58,11 +58,14 @@ tokio = { version = "^1.53", features = ["rt", "macros"] }
 redis = {
   version = "=2.0.0-rc.1",
   git = "https://github.com/qubit-ltd/redis-rs.git",
-  branch = "qubit/redis-2-0-0-rc1-response-limit",
+  rev = "a668891e9fcfed32f8905c2fd729fa05c1732aa5",
   default-features = false,
   features = ["tokio-rustls-comp", "streams", "sentinel", "tls-rustls-webpki-roots"]
 }
 qubit-retry = "0.26"
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+nix = { version = "0.31", default-features = false, features = ["process", "signal"] }
 
 [[example]]
 name = "sync_orders"
