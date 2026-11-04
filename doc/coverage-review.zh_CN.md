@@ -2,9 +2,23 @@
 
 [English](coverage-review.md)
 
-## 2026-10-09 实施 checkout
+## 2026-10-09 记录的历史覆盖率采集
 
-当前任务 checkout 的插桩测试套件全部通过，但覆盖率门禁未通过：函数为 516/545（94.68%），低于 95% 下限；行覆盖为 5,039/5,253（95.93%），区域为 7,747/8,176（94.75%），均高于各自门槛。原始 LLVM 报告位于 `/tmp/redis-provider-improvements-coverage.json`（SHA256 `0ca405be9fec70b8b6381fbab02e9dc7a85d52e6f080e4737255ec89236e84e6`）。这是当前实施的独立采集，不替代或改写下方历史封存证据；它也不能证明覆盖率门禁通过或已可发布。
+一份于 2026-10-09 记录的独立插桩测试套件采集报告称完整测试套件通过，但覆盖率门禁未通过：函数为 516/545（94.68%），低于 95% 下限；行覆盖为 5,039/5,253（95.93%），区域为 7,747/8,176（94.75%），均高于各自门槛。记录的原始 LLVM 报告路径为 `/tmp/redis-provider-improvements-coverage.json`，SHA256 为 `0ca405be9fec70b8b6381fbab02e9dc7a85d52e6f080e4737255ec89236e84e6`。目前该路径下没有此文件，无法独立检查。该采集没有记录源码 seal，因此无法确定它对应哪个 HEAD，包括当前 HEAD。这些历史数字不能用于判断当前测试覆盖率；它们不替代或改写下方单独封存的历史 CI 证据，也不能证明覆盖率门禁通过或已可发布。
+
+## 2026-11-04 覆盖率测量
+
+独立运行 `sudo -n -u starfish -g docker ... ./.infra/bin/coverage.sh`，在分支 `codex/rbr-20261104` 上以状态 0 完成，基于 provider HEAD `b8c2c51d7d70564fc6bc850f123db268aef41a1c`。运行时间为 2026-11-04 13:01:00 至 13:05:51 UTC，使用 rustc/cargo 1.94.0、LLVM 21.1.8 和 cargo-llvm-cov 0.9.1。package 覆盖率通过全部已配置门槛：
+
+| 指标 | 结果 | 门槛 |
+| --- | ---: | ---: |
+| 函数 | 530/556（95.32%） | 至少 95% |
+| 行 | 5,165/5,374（96.11%） | 高于 90% |
+| 区域 | 8,014/8,435（95.01%） | 高于 85% |
+
+封存的 Rust 源码清单含 197 个受 Git 跟踪的 `.rs` 文件；规范化路径/内容清单的 SHA256 为 `4de83bcdfcef5ff0e71e3f4f1d146a2e1e8a1892d375f51a2bad5f8c3d53e334`。源码清单、报告及受测输入元数据持久保存在 `.infra/coverage/evidence-rbr-20261104/`。`tested-inputs.json` 的 SHA256 为 `782b73a65c6c513332c1cc673c4fc6a042ce35d5777f52e4fdad689e2b9e7013`，其中记录 provider/core/task 的 HEAD、dirty 状态路径摘要，以及 Cargo manifest/lock、CI、coverage 和 package 验证配置的内容哈希。输入清单哈希为 `6c48a652e10e23490ba85118ddfe4418a6a30e0fde45169ea0b0a01656ceba8c`；仓库状态清单哈希为 `7f203e8920e76de73c09d25d8b47bce9340f6528b3893036fa66b4ba0e339398`。provider/core/task HEAD 分别为 `b8c2c51d7d70564fc6bc850f123db268aef41a1c`、`99cf32ab1b4ee517758e5b13e5f41df19573bbc8` 和 `a29f3b93c2de884eaddf5fcd1bcb050874cf74ce`。core checkout 中另有两个不相关的未跟踪设计/计划文件，均予以保留。元数据中的 dirty 状态摘要在覆盖率结束后的证据整理期间采集；Rust 源码清单及受测输入哈希单独绑定了被测代码和配置。其他报告 SHA256：`source-files.json` 为 `6bd13e838a2dcf689ab02654552b404a185a4a3d4b58869e7ddea0290a103ff0`；`coverage.json` 为 `7f2c7b5af121accd9d5d80e0aaa55a0cb4be0521bebf770ee50ebf4a28af8d2d`；`coverage.txt` 为 `3ac7037f735114f5f4131b6af33b2575b6c6f164ce4eb9f17060c453a67cf822`；`lcov.info` 为 `f823072cd775b0cfa7944977fc243241965e891f165dd2b971e53c7534a53b53`；`cobertura.xml` 为 `6f33ea4dcc1ffcc47b6e46f57407569e7a5ee40e6978af941ca371b557553343`。
+
+完整 `.infra/bin/ci-check.sh` 在 package suite 以状态 1 退出，因此没有运行配置中的 coverage 任务。打包验证使用归一化归档和 registry Redis `2.0.0-rc.1` 编译；该版本缺少 fork 提供的 `redis::ConnectionConfig` 与 `AsyncConnectionConfig::set_max_response_bytes` API。这是尚未解决的 RBR-001 registry 依赖阻塞。单独的覆盖率运行证明被测源码快照达到覆盖率门槛，但不能将完整 CI 记为通过，也不能证明 registry 包已可发布。
 
 ## 已记录的 CI 证据（2026-10-09）
 

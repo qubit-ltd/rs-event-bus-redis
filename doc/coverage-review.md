@@ -2,9 +2,23 @@
 
 [简体中文](coverage-review.zh_CN.md)
 
-## 2026-10-09 implementation checkout
+## Historical coverage capture recorded on 2026-10-09
 
-The current task checkout ran the full instrumented test suite successfully, but its coverage gate did not pass: functions were 516/545 (94.68%) against the 95% minimum; lines were 5,039/5,253 (95.93%) and regions 7,747/8,176 (94.75%), both above their gates. The raw LLVM report is `/tmp/redis-provider-improvements-coverage.json` (SHA256 `0ca405be9fec70b8b6381fbab02e9dc7a85d52e6f080e4737255ec89236e84e6`). This is a separate, current implementation capture and does not replace or revise the historical sealed-run evidence below. It also does not establish a passing coverage gate or release readiness.
+A separate instrumented test-suite capture recorded on 2026-10-09 reported that the full suite passed, but its coverage gate failed: functions were 516/545 (94.68%) against the 95% minimum; lines were 5,039/5,253 (95.93%) and regions 7,747/8,176 (94.75%), both above their gates. The cited raw LLVM report path was `/tmp/redis-provider-improvements-coverage.json`, with SHA256 `0ca405be9fec70b8b6381fbab02e9dc7a85d52e6f080e4737255ec89236e84e6`. That file is not available at the cited path for independent inspection. No source seal for this capture is recorded, so its relationship to any particular HEAD, including the current HEAD, cannot be established. These historical figures cannot be used to determine current test coverage, do not replace or revise the separately sealed historical CI evidence below, and do not establish a passing coverage gate or release readiness.
+
+## Coverage measured on 2026-11-04
+
+The standalone `sudo -n -u starfish -g docker ... ./.infra/bin/coverage.sh` run completed with exit status 0 on branch `codex/rbr-20261104`, based on provider HEAD `b8c2c51d7d70564fc6bc850f123db268aef41a1c`. It ran from 2026-11-04 13:01:00 UTC to 13:05:51 UTC with rustc/cargo 1.94.0, LLVM 21.1.8, and cargo-llvm-cov 0.9.1. The package coverage result passed all configured thresholds:
+
+| Metric | Result | Gate |
+| --- | ---: | ---: |
+| Functions | 530/556 (95.32%) | at least 95% |
+| Lines | 5,165/5,374 (96.11%) | above 90% |
+| Regions | 8,014/8,435 (95.01%) | above 85% |
+
+The sealed Rust source inventory contains 197 tracked `.rs` files; its canonical path/content manifest SHA256 is `4de83bcdfcef5ff0e71e3f4f1d146a2e1e8a1892d375f51a2bad5f8c3d53e334`. The inventory, reports, and tested-input metadata are persisted under `.infra/coverage/evidence-rbr-20261104/`. `tested-inputs.json` (SHA256 `782b73a65c6c513332c1cc673c4fc6a042ce35d5777f52e4fdad689e2b9e7013`) records provider/core/task HEADs, dirty-status path digests, and content hashes for their manifests/lockfiles plus CI, coverage, and package-validation settings. Its manifest hash is `6c48a652e10e23490ba85118ddfe4418a6a30e0fde45169ea0b0a01656ceba8c`; repository-state manifest hash is `7f203e8920e76de73c09d25d8b47bce9340f6528b3893036fa66b4ba0e339398`. Provider/core/task HEADs are `b8c2c51d7d70564fc6bc850f123db268aef41a1c`, `99cf32ab1b4ee517758e5b13e5f41df19573bbc8`, and `a29f3b93c2de884eaddf5fcd1bcb050874cf74ce`. The core checkout had two unrelated untracked design/plan files; they were preserved. The metadata's dirty-status digest was captured during evidence finalization after coverage; the Rust source inventory and tested-input hashes bind the measured code/config independently. Other artifact SHA256 values: `source-files.json` `6bd13e838a2dcf689ab02654552b404a185a4a3d4b58869e7ddea0290a103ff0`; `coverage.json` `7f2c7b5af121accd9d5d80e0aaa55a0cb4be0521bebf770ee50ebf4a28af8d2d`; `coverage.txt` `3ac7037f735114f5f4131b6af33b2575b6c6f164ce4eb9f17060c453a67cf822`; `lcov.info` `f823072cd775b0cfa7944977fc243241965e891f165dd2b971e53c7534a53b53`; and `cobertura.xml` `6f33ea4dcc1ffcc47b6e46f57407569e7a5ee40e6978af941ca371b557553343`.
+
+The full `.infra/bin/ci-check.sh` run exited 1 in its package suite before reaching the configured coverage task. Package verification compiled the normalized archive against registry Redis `2.0.0-rc.1`, which lacks the fork's `redis::ConnectionConfig` and `AsyncConnectionConfig::set_max_response_bytes` APIs. This is the unresolved RBR-001 registry dependency blocker; the separate coverage run establishes that the measured source snapshot met the coverage gate, but does not turn the full CI run into a pass or establish registry package readiness.
 
 ## Recorded CI evidence (2026-10-09)
 

@@ -1,0 +1,127 @@
+{
+  "capture_note": "Repository status and non-Rust input hashes were captured during evidence finalization after standalone coverage. The tracked Rust source inventory is separately sealed; no Rust source changed between coverage and this metadata capture. Provider documentation/evidence files were edited after coverage and do not affect the Rust package coverage counters.",
+  "repositories": {
+    "provider": {
+      "path": "/data/working/qubit/rust-common/.worktrees/rs-event-bus-redis/codex-rbr-20261104",
+      "head": "b8c2c51d7d70564fc6bc850f123db268aef41a1c",
+      "dirty_paths": [
+        " M doc/coverage-review.md",
+        " M doc/coverage-review.zh_CN.md",
+        "?? .infra/implementation-evidence-rbr-20261104.md"
+      ],
+      "dirty_status_sha256": "efe154bca842fe248823c62fe1ebe93658138245bdf17adb4cd5d6d4736306af"
+    },
+    "core": {
+      "path": "/data/working/qubit/rust-common/rs-event-bus",
+      "head": "99cf32ab1b4ee517758e5b13e5f41df19573bbc8",
+      "dirty_paths": [
+        "?? doc/design-20261104T115949427Z-1371e6a2.md",
+        "?? doc/implementation-plan-20261104T115949427Z-1371e6a2.md"
+      ],
+      "dirty_status_sha256": "a6c214a6d8edf4ce97dd4379fd593d22c02defd35b2c6ad3591b17d77889286d"
+    },
+    "task": {
+      "path": "/data/working/qubit/rust-common/.worktrees/rs-task/codex-rbr-20261104",
+      "head": "a29f3b93c2de884eaddf5fcd1bcb050874cf74ce",
+      "dirty_paths": [
+        " M Cargo.lock",
+        " M Cargo.toml"
+      ],
+      "dirty_status_sha256": "2ad2fcea07b7421492249e572919a65936d135aecce07402dd7bea7fa4fdf458"
+    }
+  },
+  "inputs": [
+    {
+      "repository": "provider",
+      "path": "Cargo.toml",
+      "sha256": "907581a4e4cc0da4a7c6b884785fbe0c3403f72531a6ffe96a56918fd93f1d72",
+      "bytes": 2746
+    },
+    {
+      "repository": "provider",
+      "path": "Cargo.lock",
+      "sha256": "01f0ea3a360be443bf514e3ce4d5e1feb6efaf6ace31e1eda1b4b80c683b3c51",
+      "bytes": 36748
+    },
+    {
+      "repository": "provider",
+      "path": ".infra/ci/ci.toml",
+      "sha256": "126e0a1ac42ae4942283ffa3447935ebbf2b6fd1f486a99a652d86b6b815942f",
+      "bytes": 398
+    },
+    {
+      "repository": "provider",
+      "path": ".infra/ci/cargo-matrix.json",
+      "sha256": "7bebe04acea682766b72d8b93c0d052da399511674ce2a36bcfebbe37df9c8db",
+      "bytes": 1956
+    },
+    {
+      "repository": "provider",
+      "path": ".infra/coverage/coverage.json",
+      "sha256": "62290d2edbc3db35168e4b5fb4b9ff57a66eae7483f81b577f342f46d02f2518",
+      "bytes": 104
+    },
+    {
+      "repository": "provider",
+      "path": ".infra/bin/ci-check.sh",
+      "sha256": "e563cedf0ac12a9ed406850278b3ddec0b6dc27f5fedd492ac877d61843c3c84",
+      "bytes": 176
+    },
+    {
+      "repository": "provider",
+      "path": ".infra/bin/coverage.sh",
+      "sha256": "0e56dddddee87fd76477df4b615eab08b86b39f6a846811ce544f6469abbaf59",
+      "bytes": 176
+    },
+    {
+      "repository": "provider",
+      "path": ".infra/bin/project-ci-check.sh",
+      "sha256": "60643a95b295ec0c49b2bf74ea11bc8be55908adaee5d1655cd3124b325cd686",
+      "bytes": 184
+    },
+    {
+      "repository": "provider",
+      "path": ".infra/project-ci-check.local.sh",
+      "sha256": "db1438c86258c3a374c8ad556503bd3af2191f31783f59ce0864fbff9cbf68df",
+      "bytes": 223
+    },
+    {
+      "repository": "provider",
+      "path": "ci/check-package-candidate.sh",
+      "sha256": "c4e4175c5eb3b7a5923457f76f9c26a4566b0351f7a1f2f532e44409e51e4482",
+      "bytes": 3135
+    },
+    {
+      "repository": "provider",
+      "path": "ci/package_candidate.py",
+      "sha256": "cb9cf9d2aaed88e228439217f80b23a9d2c313bda0b36db5abe6c69566f4f512",
+      "bytes": 4155
+    },
+    {
+      "repository": "core",
+      "path": "Cargo.toml",
+      "sha256": "c1f359ace6754f13a6a178d2de61ac5386744111f39426d9a768fe95309b746a",
+      "bytes": 1841
+    },
+    {
+      "repository": "core",
+      "path": "Cargo.lock",
+      "sha256": "07b21e4f6f5fa2bd1f51fb4e08bf5dcc243dc878f30213ecdd6a71e1affce8f6",
+      "bytes": 15022
+    },
+    {
+      "repository": "task",
+      "path": "Cargo.toml",
+      "sha256": "497029fb38109c893d4a686680340b4bdf158682a79a819872cf82cf48d041bb",
+      "bytes": 2470
+    },
+    {
+      "repository": "task",
+      "path": "Cargo.lock",
+      "sha256": "1220e73f2de8795ed9cf97ce734512f34128fda7ecc1390d72c91333e6c49511",
+      "bytes": 48799
+    }
+  ],
+  "input_manifest_sha256": "6c48a652e10e23490ba85118ddfe4418a6a30e0fde45169ea0b0a01656ceba8c",
+  "repository_state_manifest_sha256": "7f203e8920e76de73c09d25d8b47bce9340f6528b3893036fa66b4ba0e339398"
+}
