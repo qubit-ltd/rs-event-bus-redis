@@ -401,6 +401,80 @@ fn test_async_subscribe_retries_transport_loss_and_reports_reconnection_failure(
     });
 }
 
+#[cfg(feature = "sync")]
+#[test]
+fn test_sync_subscribe_reports_unknown_when_retry_finds_existing_group() {
+    let server = ScriptedRedis::start(vec![
+        Step::disconnect("XGROUP", false),
+        Step::reply("XGROUP", b"-BUSYGROUP Consumer Group name already exists\r\n"),
+    ])
+    .expect("start RESP endpoint");
+    let bus = sync_bus(&server);
+
+    let Err(error) = bus.subscribe(request()) else {
+        panic!("first create result is unknown");
+    };
+    assert_failure(error, "subscribe", "outcome_unknown", Some(false));
+    let commands = server.finish();
+    assert_eq!(commands.len(), 2);
+    assert_eq!(commands[0], commands[1], "retry must preserve the requested cursor");
+}
+
+#[cfg(feature = "async")]
+#[test]
+fn test_async_subscribe_reports_unknown_when_retry_finds_existing_group() {
+    block_on(async {
+        let server = ScriptedRedis::start(vec![
+            Step::disconnect("XGROUP", false),
+            Step::reply("XGROUP", b"-BUSYGROUP Consumer Group name already exists\r\n"),
+        ])
+        .expect("start RESP endpoint");
+        let bus = async_bus(&server).await;
+
+        let Err(error) = bus.subscribe(request()).await else {
+            panic!("first create result is unknown");
+        };
+        assert_failure(error, "subscribe", "outcome_unknown", Some(false));
+        let commands = server.finish();
+        assert_eq!(commands.len(), 2);
+        assert_eq!(commands[0], commands[1], "retry must preserve the requested cursor");
+    });
+}
+
+#[cfg(feature = "sync")]
+#[test]
+fn test_sync_subscribe_preserves_explicit_busygroup_position_error() {
+    let server = ScriptedRedis::start(vec![Step::reply(
+        "XGROUP",
+        b"-BUSYGROUP Consumer Group name already exists\r\n",
+    )])
+    .expect("start RESP endpoint");
+    let bus = sync_bus(&server);
+    let Err(error) = bus.subscribe(request()) else {
+        panic!("an explicit existing group position must be rejected");
+    };
+    assert_failure(error, "subscribe", "existing_group_start_position_ignored", Some(false));
+    assert_eq!(server.finish().len(), 1);
+}
+
+#[cfg(feature = "async")]
+#[test]
+fn test_async_subscribe_preserves_explicit_busygroup_position_error() {
+    block_on(async {
+        let server = ScriptedRedis::start(vec![Step::reply(
+            "XGROUP",
+            b"-BUSYGROUP Consumer Group name already exists\r\n",
+        )])
+        .expect("start RESP endpoint");
+        let bus = async_bus(&server).await;
+        let Err(error) = bus.subscribe(request()).await else {
+            panic!("an explicit existing group position must be rejected");
+        };
+        assert_failure(error, "subscribe", "existing_group_start_position_ignored", Some(false));
+        assert_eq!(server.finish().len(), 1);
+    });
+}
+
 /// Returns a valid claimed record with optional Redis 7 deleted-entry IDs.
 fn claimed_record(with_deleted_entry: bool) -> Vec<u8> {
     let wire = to_string(&WireFields {

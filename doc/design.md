@@ -94,6 +94,8 @@ Adapters classify failure at the actual operation phase; there is no separate tw
 | Publish byte limit | `payload_too_large` / `wire_too_large` | `Some(false)`; no XADD |
 | Unknown version within wire limit | `unsupported_wire_version` | `Some(false)`; retain PEL |
 
+For subscription creation, a first-attempt `BUSYGROUP` is a definite existing-group result and retains the `existing_group_start_position_ignored` policy for explicit `Earliest` or `At`. A timeout or transport failure after sending `XGROUP CREATE` leaves its result unknown. The adapter retries once as before; if that retry returns `BUSYGROUP`, `New` and explicit `resume` continue using the existing cursor, while explicit `Earliest` or `At` under `reject` returns `operation=subscribe`, `kind=outcome_unknown`, `retryable=Some(false)`. The provider does not infer that the first call created the group, move its cursor, ACK, or delete anything. Recovery requires inspecting `XINFO GROUPS` and `XPENDING`; use `resume` only when the saved cursor is acceptable, or choose a new group for a new replay position.
+
 Known configuration/Redis rejection categories remain sanitized. Retryability is a contextual hint, not automatic retry or duplicate-free delivery. Failures before business command send do not fix settlement intent. Error formatting does not include URL secrets, raw Redis text or payloads.
 
 ## Wire v1 and quarantine

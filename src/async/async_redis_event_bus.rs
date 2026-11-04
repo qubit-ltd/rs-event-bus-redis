@@ -208,7 +208,10 @@ impl AsyncEventBusSpi for AsyncRedisEventBus {
     ///
     /// Returns an SPI error if subscription options are invalid, an existing
     /// group's cursor conflicts with an explicit start position, or Redis
-    /// cannot open a connection or create the requested consumer group.
+    /// cannot open a connection or create the requested consumer group. If
+    /// the first create result is unknown and its retry reports an existing
+    /// group, an explicit start position under the default policy returns
+    /// `subscribe/outcome_unknown` with `retryable=Some(false)`.
     fn subscribe<'a>(
         &'a self,
         request: SpiSubscriptionRequest,
@@ -273,10 +276,10 @@ impl AsyncEventBusSpi for AsyncRedisEventBus {
                 .arg("MKSTREAM")
                 .query_async(&mut connection)
                 .await;
-            let result = if result
+            let first_result_unknown = result
                 .as_ref()
-                .is_err_and(|error| error.is_io_error() || error.is_timeout())
-            {
+                .is_err_and(|error| error.is_io_error() || error.is_timeout());
+            let result = if first_result_unknown {
                 self.client.invalidate_async_connection(connection.generation).await;
                 drop(connection);
                 let mut retry_connection = self
@@ -298,7 +301,17 @@ impl AsyncEventBusSpi for AsyncRedisEventBus {
             match result {
                 Ok(()) => {}
                 Err(error) if error.code() == Some("BUSYGROUP") => {
-                    ensure_existing_group_start(&request, policy)?;
+                    if let Err(error) = ensure_existing_group_start(&request, policy) {
+                        return Err(if first_result_unknown {
+                            spi_error(
+                                "subscribe",
+                                Some(&topic),
+                                RedisProviderError::OutcomeUnknown { operation: "subscribe" },
+                            )
+                        } else {
+                            error
+                        });
+                    }
                 }
                 Err(error) => {
                     return Err(spi_error(
