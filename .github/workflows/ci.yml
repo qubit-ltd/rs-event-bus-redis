@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       registry_consumer:
-        description: Run compatibility checks for a specified published version combination
+        description: Run registry compatibility checks for a specified version combination
         required: false
         type: boolean
         default: false
@@ -24,6 +24,14 @@ on:
         description: Published qubit-spi version (X.Y.Z)
         required: false
         type: string
+      registry_consumer_mode:
+        description: Registry compatibility validation mode
+        required: false
+        type: choice
+        options:
+          - source-candidate
+          - published
+        default: source-candidate
 
 env:
   RS_EVENT_BUS_PIN: "1"
@@ -83,4 +91,5 @@ jobs:
           PROVIDER_VERSION: ${{ inputs.provider_version }}
           CORE_VERSION: ${{ inputs.core_version }}
           SPI_VERSION: ${{ inputs.spi_version }}
-        run: bash ./ci/check-registry-consumer.sh --provider-version "$PROVIDER_VERSION" --core-version "$CORE_VERSION" --spi-version "$SPI_VERSION"
+          REGISTRY_CONSUMER_MODE: ${{ inputs.registry_consumer_mode }}
+        run: bash ./ci/check-registry-consumer.sh --mode "$REGISTRY_CONSUMER_MODE" --provider-version "$PROVIDER_VERSION" --core-version "$CORE_VERSION" --spi-version "$SPI_VERSION"

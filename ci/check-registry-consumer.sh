@@ -2,14 +2,20 @@
 set -euo pipefail
 
 usage() {
-    echo "usage: $0 --provider-version X.Y.Z --core-version X.Y.Z --spi-version X.Y.Z" >&2
+    echo "usage: $0 [--mode source-candidate|published] --provider-version X.Y.Z --core-version X.Y.Z --spi-version X.Y.Z" >&2
 }
 
+mode=source-candidate
 provider_version=
 core_version=
 spi_version=
 while (($#)); do
     case "$1" in
+        --mode)
+            if (($# < 2)); then usage; exit 2; fi
+            mode=$2
+            shift 2
+            ;;
         --provider-version|--core-version|--spi-version)
             option=$1
             if (($# < 2)); then usage; exit 2; fi
@@ -23,6 +29,10 @@ while (($#)); do
         *) usage; echo "error: unknown argument: $1" >&2; exit 2 ;;
     esac
 done
+case "$mode" in
+    source-candidate|published) ;;
+    *) usage; echo "error: unknown registry consumer mode: $mode" >&2; exit 2 ;;
+esac
 if [[ -z "$provider_version" || -z "$core_version" || -z "$spi_version" ]]; then
     usage
     echo "error: all three candidate versions are required" >&2
@@ -36,16 +46,17 @@ stage=argument-validation
 on_exit() {
     status=$?
     if ((status != 0)); then
-        echo "registry consumer failed during $stage (exit $status)" >&2
+        echo "registry consumer mode=$mode failed during $stage (exit $status)" >&2
     fi
     rm -rf "$consumer_dir"
 }
 trap on_exit EXIT
-echo "registry consumer candidate: provider=$provider_version core=$core_version spi=$spi_version"
+echo "registry consumer mode=$mode: provider=$provider_version core=$core_version spi=$spi_version"
 
 stage=prepare
 python3 "$project_root/ci/registry_consumer_target.py" prepare \
     --source-manifest "$project_root/Cargo.toml" --fixture "$fixture" --output "$consumer_dir" \
+    --mode "$mode" \
     --provider-version "$provider_version" --core-version "$core_version" --spi-version "$spi_version"
 stage=manifest-check
 python3 "$project_root/ci/check_registry_consumer_manifest.py" "$consumer_dir/Cargo.toml"
@@ -63,5 +74,5 @@ metadata=$(cargo +1.94.0 metadata --format-version 1 --locked)
 stage=metadata-verify
 printf '%s' "$metadata" | python3 "$project_root/ci/registry_consumer_target.py" verify \
     --provider-version "$provider_version" --core-version "$core_version" --spi-version "$spi_version"
-echo "registry consumer checks passed for provider=$provider_version core=$core_version spi=$spi_version"
+echo "registry consumer checks passed for mode=$mode provider=$provider_version core=$core_version spi=$spi_version"
 stage=complete

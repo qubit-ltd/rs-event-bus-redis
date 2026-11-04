@@ -64,7 +64,11 @@ def check_source_versions(source_manifest: Path, versions: dict[str, str]) -> No
 
 def prepare(args) -> None:
     versions = arguments_versions(args)
-    check_source_versions(Path(args.source_manifest), versions)
+    mode = getattr(args, "mode", "source-candidate")
+    if mode not in {"source-candidate", "published"}:
+        raise TargetError(f"unknown registry consumer mode: {mode}")
+    if mode == "source-candidate":
+        check_source_versions(Path(args.source_manifest), versions)
     fixture = Path(args.fixture)
     output = Path(args.output)
     if not (fixture / "Cargo.toml").is_file():
@@ -141,7 +145,7 @@ def verify(args) -> None:
     if core_ids != {core_id}:
         versions_found = sorted(package.get("version", "?") for package in packages if package.get("name") == PACKAGES["core"])
         raise TargetError(f"multiple core package identities in metadata: {versions_found}")
-    print("verified registry candidate: " + ", ".join(f"{role}={versions[role]}" for role in PACKAGES))
+    print("verified registry combination: " + ", ".join(f"{role}={versions[role]}" for role in PACKAGES))
 
 
 def main() -> int:
@@ -151,6 +155,7 @@ def main() -> int:
     prep.add_argument("--source-manifest", required=True)
     prep.add_argument("--fixture", required=True)
     prep.add_argument("--output", required=True)
+    prep.add_argument("--mode", choices=("source-candidate", "published"), default="source-candidate")
     verify_parser = commands.add_parser("verify")
     for command in (prep, verify_parser):
         for role in PACKAGES:

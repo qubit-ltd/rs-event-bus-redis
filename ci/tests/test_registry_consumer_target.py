@@ -17,7 +17,7 @@ VERSIONS = {"provider": "0.7.0", "core": "0.21.0", "spi": "0.14.0"}
 
 def args(**overrides):
     values = dict(provider_version=VERSIONS["provider"], core_version=VERSIONS["core"],
-                  spi_version=VERSIONS["spi"])
+                  spi_version=VERSIONS["spi"], mode="source-candidate")
     values.update(overrides)
     return SimpleNamespace(**values)
 
@@ -72,6 +72,36 @@ class RegistryConsumerTargetTests(unittest.TestCase):
         with self.assertRaisesRegex(TARGET.TargetError, "does not equal"):
             TARGET.check_source_versions(ROOT / "Cargo.toml", TARGET.arguments_versions(args(provider_version="0.8.0")))
 
+    def test_published_prepare_accepts_historical_versions_without_source_constraint(self):
+        fixture = ROOT / "tests/fixtures/registry_consumer"
+        historical = args(core_version="0.20.1", mode="published")
+        with tempfile.TemporaryDirectory() as directory:
+            TARGET.prepare(SimpleNamespace(source_manifest=str(ROOT / "Cargo.toml"), fixture=str(fixture),
+                                          output=directory, **vars(historical)))
+            manifest = (Path(directory) / "Cargo.toml").read_text()
+            self.assertIn('version = "=0.7.0"', manifest)
+            self.assertIn('version = "=0.20.1"', manifest)
+
+    def test_source_candidate_prepare_rejects_historical_core_combination(self):
+        fixture = ROOT / "tests/fixtures/registry_consumer"
+        with tempfile.TemporaryDirectory() as directory, self.assertRaisesRegex(TARGET.TargetError, "does not match"):
+            TARGET.prepare(SimpleNamespace(source_manifest=str(ROOT / "Cargo.toml"), fixture=str(fixture),
+                                          output=directory, **vars(args(core_version="0.20.1"))))
+
+    def test_prepare_rejects_unknown_mode(self):
+        fixture = ROOT / "tests/fixtures/registry_consumer"
+        with tempfile.TemporaryDirectory() as directory, self.assertRaisesRegex(TARGET.TargetError, "mode"):
+            TARGET.prepare(SimpleNamespace(source_manifest=str(ROOT / "Cargo.toml"), fixture=str(fixture),
+                                          output=directory, **vars(args(mode="typo"))))
+
+    def test_prepare_defaults_to_source_candidate_mode(self):
+        fixture = ROOT / "tests/fixtures/registry_consumer"
+        with tempfile.TemporaryDirectory() as directory:
+            values = vars(args())
+            values.pop("mode")
+            TARGET.prepare(SimpleNamespace(source_manifest=str(ROOT / "Cargo.toml"), fixture=str(fixture),
+                                          output=directory, **values))
+
     def test_prepare_writes_exact_versions_and_preserves_fixture_files(self):
         fixture = ROOT / "tests/fixtures/registry_consumer"
         with tempfile.TemporaryDirectory() as directory:
@@ -99,6 +129,15 @@ class RegistryConsumerTargetTests(unittest.TestCase):
     def test_rejects_double_core_identity_and_wrong_provider_edge(self):
         self.assert_metadata_rejected(metadata(double_core=True), "multiple core package identities")
         self.assert_metadata_rejected(metadata(bad_edge=True), "core dependency edge")
+
+    def test_rejects_missing_root_and_wrong_requested_version(self):
+        payload = metadata()
+        payload["resolve"]["root"] = "missing root"
+        self.assert_metadata_rejected(payload, "root package is missing")
+        with patch("sys.stdin") as stdin:
+            stdin.read.return_value = json.dumps(metadata())
+            with self.assertRaisesRegex(TARGET.TargetError, "resolved version"):
+                TARGET.verify(args(core_version="0.20.1", mode="published"))
 
     def test_rejects_target_path_or_git_source(self):
         self.assert_metadata_rejected(metadata(git_target="provider"), "expected registry source")
