@@ -406,6 +406,7 @@ impl EventSubscriptionSpi for Subscription {
         {
             self.closed = true;
             self.receive_connection.take();
+            self.receiver_permit.take();
         }
         if let Some(diagnostics) = self.client.diagnostics() {
             match &result {

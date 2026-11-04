@@ -394,6 +394,7 @@ impl AsyncEventSubscriptionSpi for Subscription {
             {
                 self.closed = true;
                 self.receive_connection.take();
+                self.receiver_permit.take();
             }
             if let Some(diagnostics) = self.client.diagnostics() {
                 match &result {
@@ -661,6 +662,10 @@ async fn scan_missing_tombstones(
 ///   active state.
 /// - `connection`: Dedicated transport used for controlled quarantine I/O.
 /// - `entry`: Owned stream entry returned by a successful read or claim.
+/// - `recovered`: Whether the entry came from pending-message recovery rather
+///   than a new-message read.
+/// - `connection_reusable`: Set to `false` when this operation makes the
+///   dedicated connection unsafe to reuse.
 /// - `driver`: Current receive budget used to reserve poison maintenance.
 ///
 /// # Returns

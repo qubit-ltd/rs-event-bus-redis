@@ -178,6 +178,22 @@ mod durable {
             .unwrap()
     }
 
+    fn single_receiver_bus(url: &str, namespace: &str) -> Arc<dyn EventBusSpi> {
+        let options: ProviderOptions = [
+            ("redis.url".into(), url.into()),
+            ("redis.namespace".into(), namespace.into()),
+            ("redis.max_wire_bytes".into(), "1024".into()),
+            ("redis.max_payload_bytes".into(), "1024".into()),
+            ("redis.max_active_receivers".into(), "1".into()),
+            ("redis.claim_min_idle_ms".into(), "0".into()),
+            ("redis.command_timeout_ms".into(), "250".into()),
+        ]
+        .into();
+        RedisEventBusProvider
+            .create_configured(&EventBusConfig::default().with_provider_options(options))
+            .unwrap()
+    }
+
     fn oversized_stream_response(stream: &str) -> Vec<u8> {
         let mut response = format!(
             "*1\r\n*2\r\n${}\r\n{}\r\n*1\r\n*2\r\n$3\r\n1-0\r\n*2\r\n$4\r\nwire\r\n$70000\r\n",
@@ -211,6 +227,40 @@ mod durable {
         assert_eq!(error.retryable(), Some(true));
         assert!(matches!(receiver.receive(Duration::ZERO), Ok(ReceiveOutcome::Closed)));
         assert_eq!(server.finish().len(), 4, "the failed receiver socket is never reused");
+    }
+
+    #[test]
+    fn oversized_receive_releases_admission_once() {
+        let namespace = "scripted-response-limit-admission";
+        let stream = stream_key(namespace, "limits");
+        let server = ScriptedRedis::start(vec![
+            Step::reply("XGROUP", b"+OK\r\n"),
+            Step::reply("XAUTOCLAIM", b"*2\r\n$3\r\n0-0\r\n*0\r\n"),
+            Step::reply("XREADGROUP", b"*0\r\n"),
+            Step::reply("XREADGROUP", &oversized_stream_response(&stream)),
+            Step::reply("XGROUP", b"+OK\r\n"),
+        ])
+        .unwrap();
+        let spi = single_receiver_bus(server.url(), namespace);
+        let mut first = spi.subscribe(request_at(82, StartPosition::New)).unwrap();
+        let error = match first.receive(Duration::from_secs(2)) {
+            Err(error) => error,
+            Ok(_) => panic!("oversized RESP frame must stop this receiver"),
+        };
+        assert_eq!(error.kind(), "receive_response_too_large");
+        assert!(matches!(first.receive(Duration::ZERO), Ok(ReceiveOutcome::Closed)));
+
+        let second = spi
+            .subscribe(request_at(83, StartPosition::New))
+            .expect("closed receiver must release admission");
+        first.close().unwrap();
+        let error = match spi.subscribe(request_at(84, StartPosition::New)) {
+            Err(error) => error,
+            Ok(_) => panic!("repeated close must not release the second receiver permit"),
+        };
+        assert_eq!(error.kind(), "resource_limit");
+        drop(second);
+        assert_eq!(server.finish().len(), 5);
     }
 
     #[test]
@@ -731,6 +781,59 @@ mod async_response_limit {
                 Ok(ReceiveOutcome::Closed)
             ));
             assert_eq!(server.finish().len(), 4, "the failed receiver socket is never reused");
+        });
+    }
+
+    #[test]
+    fn oversized_async_receive_releases_admission_once() {
+        block_on(async {
+            let namespace = "scripted-async-response-limit-admission";
+            let stream = format!("{namespace}:limits");
+            let server = ScriptedRedis::start(vec![
+                Step::reply("XGROUP", b"+OK\r\n"),
+                Step::reply("XAUTOCLAIM", b"*2\r\n$3\r\n0-0\r\n*0\r\n"),
+                Step::reply("XREADGROUP", b"*0\r\n"),
+                Step::reply("XREADGROUP", &oversized_stream_response(&stream)),
+                Step::reply("XGROUP", b"+OK\r\n"),
+            ])
+            .unwrap();
+            let options: ProviderOptions = [
+                ("redis.url".into(), server.url().into()),
+                ("redis.namespace".into(), namespace.into()),
+                ("redis.max_wire_bytes".into(), "1024".into()),
+                ("redis.max_payload_bytes".into(), "1024".into()),
+                ("redis.max_active_receivers".into(), "1".into()),
+                ("redis.claim_min_idle_ms".into(), "0".into()),
+                ("redis.command_timeout_ms".into(), "250".into()),
+            ]
+            .into();
+            let spi = AsyncRedisEventBusProvider
+                .create_configured(&EventBusConfig::default().with_provider_options(options))
+                .await
+                .unwrap();
+            let mut first = spi.subscribe(request()).await.unwrap();
+            let error = match first.receive(Duration::from_secs(2)).await {
+                Err(error) => error,
+                Ok(_) => panic!("oversized RESP frame must stop this receiver"),
+            };
+            assert_eq!(error.kind(), "receive_response_too_large");
+            assert!(matches!(
+                first.receive(Duration::ZERO).await,
+                Ok(ReceiveOutcome::Closed)
+            ));
+
+            let second = spi
+                .subscribe(request())
+                .await
+                .expect("closed receiver must release admission");
+            first.close().await.unwrap();
+            let error = match spi.subscribe(request()).await {
+                Err(error) => error,
+                Ok(_) => panic!("repeated close must not release the second receiver permit"),
+            };
+            assert_eq!(error.kind(), "resource_limit");
+            drop(second);
+            assert_eq!(server.finish().len(), 5);
         });
     }
 }
