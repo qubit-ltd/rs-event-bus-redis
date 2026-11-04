@@ -17,7 +17,7 @@ qubit-spi = "0.14"
 
 这些路径适用于 sibling checkout；应按 consumer manifest 所在位置调整。当前源码在本地使用 core 0.21。2026-11-03 检查时，crates.io 无法解析 `qubit-event-bus-redis 0.7.0` 或 `qubit-event-bus 0.21.0`；历史组合 `0.7.0 / 0.20.1 / 0.14.0` 的 published 检查在生成锁文件阶段停止。不要把该不可用结果当作 registry 兼容性证据。升级现有服务前，请先按迁移指南检查版本变化和恢复步骤。
 
-源码清单将带响应限额的 Redis client 固定到 Qubit fork `qubit-ltd/redis-rs` 的提交 `a668891e9fcfed32f8905c2fd729fa05c1732aa5`（redis-rs 2.0.0-rc.1）。应用只需依赖 provider，无须配置本地 Cargo patch，也无须直接依赖 Redis client。Cargo 打包规范化会移除 Git 来源，只保留精确 registry 版本；该 registry 依赖仍须提供响应限额实现后，provider 才能发布。
+源码清单将带响应限额的 Redis client 固定到 Qubit fork `qubit-ltd/redis-rs` 的提交 `a668891e9fcfed32f8905c2fd729fa05c1732aa5`（redis-rs 2.0.0-rc.1）。应用只需依赖 provider，无须配置本地 Cargo patch，也无须直接依赖 Redis client。Cargo 打包规范化会移除 Git 来源，只保留精确 registry 版本；该 registry 依赖仍须提供响应限额实现后，provider 才能发布。2026-11-04 运行 `bash ci/check-package-candidate.sh` 时，在 crate 生成阶段因 crates.io 缺少 `qubit-event-bus ^0.21` 而失败。执行 `cargo +1.94.0 info redis@2.0.0-rc.2` 并检查源码后，未发现该 registry 版本提供响应限额 API；发布仍受所需 core 版本和等价响应预算能力的 registry 依赖阻塞。
 
 Registry 验证有两种模式。默认 `source-candidate` 会将输入的 provider/core 版本与当前源码清单比较；`published` 跳过此比较，但仍要求精确稳定版本、registry 来源、唯一 core 包身份及正确的 provider→core 依赖边。两种模式都会执行 prepare、manifest 检查、生成锁文件、feature 构建和 metadata 校验。示例：`bash ci/check-registry-consumer.sh --mode published --provider-version X.Y.Z --core-version X.Y.Z --spi-version X.Y.Z`。
 
@@ -413,7 +413,7 @@ let options = SubscribeOptions::<String>::builder()
 
 发布先在复制 payload 前检查大小，再用有界 writer 序列化 headers/wire，成功后才调用 `XADD`。接收先借用 wire 字节检查长度，再复制字符串；先解析版本，随后对版本 1 字段做有界解码，不构造完整 JSON Value 树。payload 每次 push 前检查增长，headers 字符串在二次 JSON 解析前检查，嵌套 JSON 保持深度保护。专用 receiver 连接还会在构造响应值前，将 RESP 响应帧限制为 `redis.max_wire_bytes + 65,536` 字节。这是 receiver 帧输入的上限，不代表进程 RSS 上限；解码后的结构、其他连接及 Redis 自身的内存使用另行计算。
 
-`receive_limit_exceeded` 和 `receive_response_too_large` 都会停止订阅并保留 PEL 记录，不执行 `XACK`、`XDEL` 或隔离。后一错误表示 RESP 帧超过配置上限，receiver 连接会关闭。合法但不支持的 wire 版本同样保留。先用 `XPENDING` 检查记录及 owner，再修复限额或部署兼容 provider/codec，并以同一 group 创建新订阅验证恢复。是否删除或隔离保留记录应由运维人员评估决定，不要为掩盖错误而清理。限额内格式错误的版本 1 数据仍走隔离；旧版本发布的 wire 版本 1 继续可读。
+可读取记录超过 wire、payload 或 headers 配置容量时返回 `receive_limit_exceeded`，源记录保留在 PEL 中，不执行 `XACK`、`XDEL` 或隔离。`receive_response_too_large` 表示完整 RESP 帧超过 receiver 连接的独立上限；连接会关闭、订阅停止并释放 receiver 准入，可能形成的 PEL 记录保持不变。合法但不支持的 wire 版本同样保留。先用 `XPENDING` 检查记录及 owner，再修复限额或部署兼容 provider/codec，并以同一 group 创建新订阅验证恢复。是否删除或隔离保留记录应由运维人员评估决定，不要为掩盖错误而清理。限额内格式错误的版本 1 数据仍走隔离；旧版本发布的 wire 版本 1 继续可读。
 
 codec 接收 `&EncodedPayload`，默认精确验证 content type 和可选 schema；`None` 与具名 schema 不同。需要支持旧 schema 时明确重写验证方法。元数据不兼容或 codec panic 会使 facade 停止接收而不结算；查看 `terminal_failure()`，修复 codec，再创建新持久订阅。普通 `CodecError::Decode` 仍以 `XACK` 拒绝坏消息。
 
@@ -475,7 +475,7 @@ claim、pending、attempt 明细和 tombstone 维护命令通过 receiver 专用
 
 `max_idle_connections` 默认为 8，且不得超过 `max_concurrent_commands`。短操作上限设为 8 以下时，应同时降低空闲保留数，例如同时设置 `redis.max_concurrent_commands=4` 和 `redis.max_idle_connections=4`；只降低前者会被配置校验拒绝。新增字节、时间、数量配置均为有限范围内的正十进制数，不能用 0 关闭限制。
 
-默认 1MiB payload 限额按编码字节计量，8MiB wire 限额计入完整 JSON，包括 byte-array 膨胀和元数据。payload 合法不代表任意 headers 都能装入 wire。发布先检查 payload，再通过有界 sink 写出 JSON；中间 headers JSON 也受限。provider 编码借用调用方元数据和 payload，分配的 headers/wire String 都有界；直接调用 `WireFields::from_outbound` 转换不会应用这些 provider 配置限额。接收先检查借用的原始 wire，再解析 UTF-8/JSON 和版本 1 payload。历史超限记录以 `oversized_wire`/`oversized_payload` 隔离并返回 Gap；wire 限额优先于未知版本处理。版本 1 拒绝第 128 层 JSON 容器，包括被忽略的字段；未知版本在 v1 字段形状和深度校验前返回。
+默认 1MiB payload 限额按编码字节计量，8MiB wire 限额计入完整 JSON，包括 byte-array 膨胀和元数据。payload 合法不代表任意 headers 都能装入 wire。发布先检查 payload，再通过有界 sink 写出 JSON；中间 headers JSON 也受限。provider 编码借用调用方元数据和 payload，分配的 headers/wire String 都有界；直接调用 `WireFields::from_outbound` 转换不会应用这些 provider 配置限额。接收先检查借用的原始 wire，再解析 UTF-8/JSON 和版本 1 payload。可读取历史记录超过 wire、payload 或 headers 容量时返回 `receive_limit_exceeded` 并保留 pending；只有确定性格式错误进入隔离。专用 receiver 的 RESP 帧上限与这些解码记录限额相互独立。版本 1 拒绝第 128 层 JSON 容器，包括被忽略的字段；未知版本在 v1 字段形状和深度校验前返回。
 
 限制约束 provider 后续序列化、解析的追加分配。RESP 字节已由 Redis client 库接收，因此它不是抵御恶意超大 RESP bulk 的硬隔离边界，也不是整个进程的绝对内存上限。应结合可信 Redis/网络、server `maxmemory`、应用并发及源 stream/隔离流保留策略管理资源。隔离流没有自动保留上限。
 

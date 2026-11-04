@@ -48,9 +48,10 @@ use crate::wire::WireFields;
 /// # Errors
 ///
 /// Returns `UnsupportedVersion` for an unknown numeric version within the wire
-/// budget. Other failures return a stable poison reason for missing fields,
-/// unsupported RESP values, oversized bytes, invalid UTF-8/JSON, or malformed
-/// event metadata. The original wire bytes are never cloned into a String.
+/// budget and `LimitExceeded` when wire, payload, or header limits are
+/// exceeded. Limit failures leave the source entry pending; deterministic
+/// malformed data returns a stable poison reason. The original wire bytes are
+/// never cloned into a String.
 pub(crate) fn decode_entry(
     subscription_id: Id,
     topic: &TopicAddress,

@@ -22,7 +22,7 @@ qubit-spi = "0.14"
 
 **Registry 状态：** 默认 `source-candidate` 模式会将输入版本与当前源码清单比较。`published` 模式跳过该源码版本比较，但仍会解析精确 registry 版本、构建两种 feature 组合并校验 Cargo metadata 依赖图。源码候选示例：`bash ci/check-registry-consumer.sh --mode source-candidate --provider-version X.Y.Z --core-version X.Y.Z --spi-version X.Y.Z`；验证已发布组合时将模式改为 `published`。两种模式都要求目标包已存在于 registry。
 
-源码清单将 Redis client 固定到 Qubit `qubit-ltd/redis-rs` fork 提交 `a668891e9fcfed32f8905c2fd729fa05c1732aa5`（redis-rs 2.0.0-rc.1），该 fork 支持有界响应读取。Cargo 打包规范化会移除 Git 来源，只保留精确 registry 版本；发布前，规范化后的 registry 依赖也必须提供相同的响应限额。当前源码使用本地 core `0.21`。2026-11-03 检查时，crates.io 无法解析 `qubit-event-bus-redis 0.7.0` 或 `qubit-event-bus 0.21.0`；历史组合 `0.7.0 / 0.20.1 / 0.14.0` 的 published 检查在生成锁文件阶段停止。该结果代表 registry 证据不可用，不代表兼容或不兼容。上方安装示例目前无法从所检查的 registry 状态安装。
+源码清单将 Redis client 固定到 Qubit `qubit-ltd/redis-rs` fork 提交 `a668891e9fcfed32f8905c2fd729fa05c1732aa5`（redis-rs 2.0.0-rc.1），该 fork 支持有界响应读取。Cargo 打包规范化会移除 Git 来源，只保留精确 registry 版本；发布前，规范化后的 registry 依赖也必须提供相同的响应限额。当前源码使用本地 core `0.21`。2026-11-03 检查时，crates.io 无法解析 `qubit-event-bus-redis 0.7.0` 或 `qubit-event-bus 0.21.0`；历史组合 `0.7.0 / 0.20.1 / 0.14.0` 的 published 检查在生成锁文件阶段停止。2026-11-04 运行 `bash ci/check-package-candidate.sh` 时也在 package 阶段因 crates.io 缺少 `qubit-event-bus ^0.21` 而退出；`cargo +1.94.0 info redis@2.0.0-rc.2` 及源码检查未发现该 registry 候选具有响应限额 API。候选包门禁已接入，但发布仍受 core 包缺失及 registry client 缺少等价响应预算能力阻塞。上述失败代表候选包证据不可用，不是构建通过。上方安装示例目前无法从所检查的 registry 状态安装。
 
 
 ## 快速开始
@@ -144,7 +144,7 @@ event-bus SPI 允许应用更换传输实现，而不改业务 handler。Redis S
 - 支持 Redis 单实例与 Sentinel 主节点发现；异步调用可由 Smol 或 Tokio host 驱动，应用无需启动 Tokio。
 - 使用带版本的 stream 记录保存编码 payload、headers、事件 ID、content type，以及可选 schema 和排序元数据。
 - 支持消费组、`Accept`/`Reject` 确认、通过待处理列表执行 `Retry`，并用 `XAUTOCLAIM` 恢复消息。
-- 提供 client 级命令/receiver 准入限制、有限连接/命令等待、payload/wire 字节限制，以及每个订阅的未结算投递上限；格式错误或超限的历史记录通过单条 Lua 脚本隔离；Redis 订阅必须显式使用 `Durable`。
+- 提供 client 级命令/receiver 准入限制、有限连接/命令等待、payload/wire 字节限制，以及每个订阅的未结算投递上限；确定性格式错误的历史记录通过单条 Lua 脚本隔离，配置容量超限的记录则保留为 pending；Redis 订阅必须显式使用 `Durable`。
 - 通过进程内 `RedisProviderDiagnostics::snapshots()` 读取存活 SPI 的准入、连接、发布和恢复计数；PEL 与内存仍须查询 Redis。[运维指南](doc/user_guide.zh_CN.md#11-怎样维护消费组和处理下游通知)提供采集、告警和人工保留决策流程。
 - 测试会通过 Docker 启动隔离的 Redis 6.2、Redis 7 和 Sentinel 服务。
 
@@ -152,7 +152,7 @@ Redis 短命令额度默认是 64，其中 8 个名额专供结算；专用 rece
 
 Redis 使用至少一次投递，业务 handler 应能处理重复事件。`XADD` 成功只表示 Redis 接受了命令，不能证明记录已经 fsync 或完成处理。默认不会裁剪 stream。只有同时设置 `redis.stream_maxlen_approx` 和 `redis.allow_lossy_retention=true`，并完成人工损失评估，才启用 Redis `XADD MAXLEN ~ N`；近似保留策略可能删除尚未消费或仍处于 pending 的历史记录并产生缺口。单实例和 Sentinel 连接均可按需启用 TLS，并验证证书及主机名；Sentinel 与主节点的 TLS 设置彼此独立。当前不支持 Cluster、native/delayed delivery 或死信策略。stream 和消费组由运维人员负责清理。
 
-provider 对单条 wire、payload 和解码后的 headers 字符串设置有限容量，默认分别为 8 MiB、1 MiB 和 64 KiB；facade 另有默认各 1 MiB 的编码发布/接收限制。专用 receiver 还会把每个 RESP 响应帧限制在 `redis.max_wire_bytes + 65,536` 字节以内。响应超限时订阅会停止，记录仍留在 PEL 中，不确认也不隔离。应先用 `XPENDING` 排查；是否删除或隔离记录须由运维人员评估后决定。恢复消息的 provider attempt 只有在 Redis `XPENDING` 明细中的记录 ID 和 consumer owner 均匹配时才可信；查询失败或不匹配时仍为未知（`None`）。因此每条实际交付的恢复消息会额外执行一次 Redis 命令；新消息仍报告 `Some(1)`。公开发布错误可通过 `PublishFailure.effect()` 判断效果；`XADD` 回复丢失属于未知结果，默认禁止盲目重发。仍支持 wire 版本 1。详见[用户指南](doc/user_guide.zh_CN.md#6-理解投递重试和清理)和[迁移指南](doc/migration.zh_CN.md)。
+provider 对单条 wire、payload 和解码后的 headers 字符串设置有限容量，默认分别为 8 MiB、1 MiB 和 64 KiB；facade 另有默认各 1 MiB 的编码发布/接收限制。可读取记录超过上述配置容量时返回 `receive_limit_exceeded`，保留在 PEL 中，不确认也不隔离。专用 receiver 另将完整 RESP 响应帧限制在 `redis.max_wire_bytes + 65,536` 字节以内。响应帧超限会停止订阅、释放 receiver 准入，并保留可能形成的 PEL 记录。应先用 `XPENDING` 排查；是否删除或隔离记录须由运维人员评估后决定。恢复消息的 provider attempt 只有在 Redis `XPENDING` 明细中的记录 ID 和 consumer owner 均匹配时才可信；查询失败或不匹配时仍为未知（`None`）。因此每条实际交付的恢复消息会额外执行一次 Redis 命令；新消息仍报告 `Some(1)`。公开发布错误可通过 `PublishFailure.effect()` 判断效果；`XADD` 回复丢失属于未知结果，默认禁止盲目重发。仍支持 wire 版本 1。详见[用户指南](doc/user_guide.zh_CN.md#6-理解投递重试和清理)和[迁移指南](doc/migration.zh_CN.md)。
 
 已有 Redis 消费组的起始位置现在有明确规则：`StartPosition::New` 沿用已保存游标；默认情况下，`Earliest` 和 `At` 返回 `existing_group_start_position_ignored`，不再静默忽略请求的位置。订阅可通过 `redis.existing_group_start=resume` 显式选择继续使用已有游标；该选项不会执行 `XGROUP SETID`。详见[消费组恢复指南](doc/user_guide.zh_CN.md#6-理解投递重试和清理)和[迁移指南](doc/migration.zh_CN.md#已有消费组起始位置变更)。
 

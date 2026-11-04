@@ -47,7 +47,9 @@ use crate::wire_fields::WireFields;
 use crate::wire_limits::WireLimits;
 
 /// Parses version first, preserving future records without interpreting their
-/// layout. Limits do not cap the client's RESP frame allocation.
+/// layout. These parser limits cover the decoded wire record, payload, and
+/// headers; they do not cap the client's RESP frame allocation. The dedicated
+/// receiver applies a separate limit to the complete RESP response frame.
 ///
 /// # Parameters
 ///
