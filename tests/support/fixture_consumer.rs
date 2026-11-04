@@ -11,6 +11,8 @@ use std::error::Error;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use super::fixture_process::run_logged;
@@ -18,6 +20,7 @@ use super::fixture_process::run_logged;
 const TREE_TIMEOUT: Duration = Duration::from_secs(120);
 const BUILD_TIMEOUT: Duration = Duration::from_secs(600);
 const RUN_TIMEOUT: Duration = Duration::from_secs(120);
+static INVOCATION_ID: AtomicU64 = AtomicU64::new(0);
 
 /// Executes standalone `fixture` against the real Redis endpoint `url`.
 ///
@@ -55,7 +58,8 @@ pub fn run_with_tls_ca(
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let manifest = root.join("tests/fixtures").join(fixture).join("Cargo.toml");
     let target = root.join("target/isolated-fixtures");
-    let evidence = target.join("evidence");
+    let invocation = INVOCATION_ID.fetch_add(1, Ordering::Relaxed);
+    let evidence = target.join(format!("evidence-{}-{invocation}", std::process::id()));
     fs::create_dir_all(&evidence)?;
     let graph = run_logged(
         Command::new("cargo")
