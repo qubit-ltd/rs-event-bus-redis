@@ -12,6 +12,8 @@ pub mod controlled_redis;
 #[allow(dead_code)]
 pub mod fixture_consumer;
 #[allow(dead_code)]
+pub mod fixture_process;
+#[allow(dead_code)]
 pub mod redis_server;
 #[allow(dead_code)]
 pub mod scripted_redis;

@@ -11,15 +11,20 @@ use std::error::Error;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
+use std::time::Duration;
+
+use super::fixture_process::run_logged;
+
+const TREE_TIMEOUT: Duration = Duration::from_secs(120);
+const BUILD_TIMEOUT: Duration = Duration::from_secs(600);
+const RUN_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Executes standalone `fixture` against the real Redis endpoint `url`.
 ///
 /// When `production_async` is true, asserts smol-comp without tokio-comp.
 /// Returns success after locked Cargo feature inspection and executable
-/// completion. Spawns blocking Cargo processes and writes logs under the
-/// isolated target. Returns filesystem, process-spawn, or feature-output UTF-8
-/// errors; panics if a process fails, the feature graph violates isolation, or
-/// the executable fails.
+/// completion. Tree, build, and execution have separate deadlines, with logs
+/// under the isolated target. Returns filesystem, process, or feature errors.
 pub fn run(fixture: &str, url: &str, production_async: bool) -> Result<(), Box<dyn Error>> {
     run_with_tls_ca(fixture, url, None, production_async)
 }
@@ -35,12 +40,12 @@ pub fn run(fixture: &str, url: &str, production_async: bool) -> Result<(), Box<d
 ///
 /// # Returns
 ///
-/// Success after locked feature inspection and fixture execution.
+/// Success after locked feature inspection and bounded fixture execution.
 ///
 /// # Errors
 ///
-/// Returns filesystem, process-spawn, and UTF-8 errors; panics when Cargo or
-/// the fixture exits unsuccessfully or the requested feature graph is invalid.
+/// Returns filesystem and process errors, including failed exit status,
+/// deadline expiry, and invalid requested feature graphs.
 pub fn run_with_tls_ca(
     fixture: &str,
     url: &str,
@@ -52,47 +57,68 @@ pub fn run_with_tls_ca(
     let target = root.join("target/isolated-fixtures");
     let evidence = target.join("evidence");
     fs::create_dir_all(&evidence)?;
-    let graph = Command::new("cargo")
-        .args(["tree", "--locked", "--edges", "features", "--manifest-path"])
-        .arg(&manifest)
-        .env("CARGO_TARGET_DIR", &target)
-        .output()?;
-    fs::write(evidence.join(format!("{fixture}-features.txt")), &graph.stdout)?;
-    assert!(
-        graph.status.success(),
-        "fixture feature graph failed: {}",
-        String::from_utf8_lossy(&graph.stderr)
-    );
-    let graph = String::from_utf8(graph.stdout)?;
+    let graph = run_logged(
+        Command::new("cargo")
+            .args(["tree", "--locked", "--edges", "features", "--manifest-path"])
+            .arg(&manifest)
+            .env("CARGO_TARGET_DIR", &target),
+        &evidence.join(format!("{fixture}-tree.stderr.log")),
+        TREE_TIMEOUT,
+    )?;
+    fs::write(evidence.join(format!("{fixture}-features.txt")), &graph)?;
     if production_async {
-        assert!(
-            graph.contains("redis feature \"smol-comp\""),
-            "production smol-comp feature must be present"
-        );
-        assert!(
-            !graph.contains("redis feature \"tokio-comp\""),
-            "fixture must not unify the provider's Redis dev features"
-        );
+        if !graph.contains("redis feature \"smol-comp\"") {
+            return Err("production smol-comp feature must be present".into());
+        }
+        if graph.contains("redis feature \"tokio-comp\"") {
+            return Err("fixture must not unify the provider's Redis dev features".into());
+        }
     }
     let mut command = Command::new("cargo");
     command
-        .args(["run", "--locked", "--manifest-path"])
+        .args([
+            "build",
+            "--locked",
+            "--message-format=json-render-diagnostics",
+            "--manifest-path",
+        ])
         .arg(manifest)
-        .arg("--")
-        .arg(url)
         .env("CARGO_TARGET_DIR", &target);
+    let build_json = run_logged(
+        &mut command,
+        &evidence.join(format!("{fixture}-build.stderr.log")),
+        BUILD_TIMEOUT,
+    )?;
+    fs::write(evidence.join(format!("{fixture}-build.jsonl")), &build_json)?;
+    let executables = build_json
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter_map(|message| {
+            (message.get("reason")?.as_str()? == "compiler-artifact"
+                && message
+                    .get("target")?
+                    .get("kind")?
+                    .as_array()?
+                    .iter()
+                    .any(|kind| kind.as_str() == Some("bin")))
+            .then(|| message.get("executable")?.as_str().map(PathBuf::from))
+            .flatten()
+        })
+        .collect::<Vec<_>>();
+    let executable = match executables.as_slice() {
+        [executable] => executable,
+        [] => return Err("Cargo build output did not contain a fixture binary".into()),
+        _ => return Err("Cargo build output contained multiple fixture binaries".into()),
+    };
+    let mut run = Command::new(executable);
+    run.arg(url);
     if let Some(tls_ca_path) = tls_ca_path {
-        command.arg(tls_ca_path);
+        run.arg(tls_ca_path);
     }
-    let output = command.output()?;
-    fs::write(evidence.join(format!("{fixture}-stdout.log")), &output.stdout)?;
-    fs::write(evidence.join(format!("{fixture}-stderr.log")), &output.stderr)?;
-    assert!(
-        output.status.success(),
-        "fixture {fixture} failed:\n{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    print!("{}", String::from_utf8_lossy(&output.stdout));
+    run_logged(
+        &mut run,
+        &evidence.join(format!("{fixture}-run.stderr.log")),
+        RUN_TIMEOUT,
+    )?;
     Ok(())
 }
