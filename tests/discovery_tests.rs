@@ -14,10 +14,6 @@ mod support;
 use std::any::type_name;
 use std::error::Error;
 #[cfg(feature = "sync")]
-use std::path::Path;
-#[cfg(feature = "sync")]
-use std::process::Command;
-#[cfg(feature = "sync")]
 use std::sync::Arc;
 #[cfg(feature = "sync")]
 use std::sync::mpsc::channel;
@@ -56,6 +52,7 @@ use qubit_event_bus::model::SubscribeRequest;
 use qubit_event_bus::model::SubscriptionDurability;
 #[cfg(feature = "sync")]
 use qubit_event_bus::model::Topic;
+#[cfg(feature = "sync")]
 use qubit_event_bus::spi::EncodedPayload;
 #[cfg(all(feature = "async", feature = "conformance"))]
 use qubit_event_bus::spi::conformance::AsyncConformanceHooks;
@@ -180,27 +177,7 @@ fn test_async_registry_discovers_and_creates_redis_provider() -> Result<(), Box<
 #[cfg(feature = "sync")]
 fn test_business_consumer_binary_links_provider_without_provider_type_imports() -> Result<(), Box<dyn Error>> {
     let server = RedisServer::start()?;
-    let mut command = Command::new("cargo");
-    command
-        .arg("run")
-        .arg("--locked")
-        .arg("--quiet")
-        .arg("--manifest-path")
-        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/business_consumer/Cargo.toml"))
-        .arg("--")
-        .arg(server.url());
-    #[cfg(coverage)]
-    command.env(
-        "CARGO_TARGET_DIR",
-        concat!(env!("CARGO_MANIFEST_DIR"), "/target/coverage-business-consumer"),
-    );
-    let output = command.output()?;
-    assert!(
-        output.status.success(),
-        "business consumer fixture failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    Ok(())
+    support::fixture_consumer::run("business_consumer", server.url(), false)
 }
 
 /// Returns provider settings for `url` in the discovery namespace without I/O.
