@@ -102,7 +102,11 @@ wire 限额优先：超限历史记录作为 poison，即使其版本本来未�
 
 Accept/Reject 确认 Redis PEL，Retry 只释放本地占用并保留 PEL。`XREADGROUP >` 返回的新消息携带 `provider_attempt = Some(1)`。每条准备交付的恢复记录会先额外执行一次精确 ID 的 `XPENDING` 明细查询；只有恰好一条明细的 ID 与预期记录匹配、owner 为当前 consumer，且非零次数可由 SPI 的 `u32` 表示时，才报告投递次数。查询失败、空结果、格式错误、次数为零或不可表示、以及 owner/ID 不匹配时，次数保持未知（`None`）。因此每条恢复消息多一次 Redis 命令，新消息路径不增加查询。关闭不 ACK，不删除消费组或 stream。可选 `XADD MAXLEN ~` 会丢失未读/pending 历史；未读记录被裁剪不一定返回 Gap。至少一次投递要求业务幂等，claim idle 阈值应匹配 handler 时长。
 
-provider 依赖 Qubit 维护的 GitHub fork `qubit-ltd/redis-rs` 的 `qubit/redis-2-0-0-rc1-response-limit` 分支中的 `redis` 包，该分支基于 redis-rs 2.0.0-rc.1 并提供响应帧大小限制 API。应用只需依赖 `qubit-event-bus-redis`，无须添加本地 Cargo patch 或直接依赖 fork。
+源码清单将 `redis` 包固定到 Qubit 维护的 `qubit-ltd/redis-rs` 提交 `a668891e9fcfed32f8905c2fd729fa05c1732aa5`，基于 redis-rs 2.0.0-rc.1 并提供响应帧大小限制 API。应用只需依赖 `qubit-event-bus-redis`，无须添加本地 Cargo patch 或直接依赖 fork。Cargo package 规范化会移除 Git 来源，只保留 `=2.0.0-rc.1`。诊断用 no-verify `.crate` 确认了该来源变化，但独立包验证无法从 crates.io 解析 `qubit-event-bus ^0.21`。独立 registry probe 还发现 Redis 2.0.0-rc.1 和当前最新的 2.0.0-rc.2 都没有 `ConnectionConfig`；registry 包因此缺少响应帧限额所需 API。取得具备等价响应预算能力的 registry client 前，不应发布该 provider。
+
+Registry consumer 验证有两种模式：默认 `source-candidate` 将版本与当前源码清单比较；`published` 跳过此比较，但保留精确版本、registry 来源、依赖边和唯一 core 身份校验。2026-11-03 检查时，历史组合 `0.7.0 / 0.20.1 / 0.14.0` 无法解析，因为 crates.io 没有 `qubit-event-bus-redis 0.7.0`。这是缺少证据，不是兼容性结论。
+
+独立 fixture 执行器为 feature tree、构建和程序执行分别设置 120 秒、600 秒和 120 秒期限；每个 fixture/阶段都保存 stdout/stderr 日志，从 Cargo JSON 定位可执行文件，并仅在 Linux 上终止命令自己的进程组后回收 leader。该平台范围与仓库当前 Ubuntu CI 一致。
 
 XADD Accepted 不证明 fsync、副本持久化或业务完成。新 observer 连接上的 WAIT 无法为 provider 连接写入提供 fencing；Sentinel 验收应观察实际复制的消费组游标、PEL ID 和 owner。旧 consumer 清理须先停实例、确认 PEL 清空并满足业务保留要求，不引入自动 DELCONSUMER。
 

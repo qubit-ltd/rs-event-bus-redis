@@ -1,6 +1,6 @@
 # Redis Streams 用户指南
 
-**读者：** 使用当前 sibling source checkout 的 Rust 服务开发者：该源码组合使用 core 0.21 和 Redis provider 源码（包版本 0.7）。已发布的 Redis 0.7 包仍依赖 core 0.20。
+**读者：** 使用当前 sibling source checkout 的 Rust 服务开发者：该源码组合使用 core 0.21 和 Redis provider 源码（包版本 0.7）。Registry 当前可用性及其限制见第 1 节。
 
 [English](user_guide.md) · [README](../README.zh_CN.md) · [API 文档](https://docs.rs/qubit-event-bus-redis)
 
@@ -15,9 +15,11 @@ qubit-event-bus-redis = { version = "0.7", path = "../rs-event-bus-redis" }
 qubit-spi = "0.14"
 ```
 
-这些路径适用于 sibling checkout；应按 consumer manifest 所在位置调整。已发布的 Redis 0.7 使用 core 0.20，registry 依赖应继续配套。当前源码的 locked metadata 图解析到 core 0.21，但不能据此证明已发布的 Redis 0.7 包兼容 core 0.21。registry consumer 应等到兼容的 Redis provider 发布并完成集成验证后，再迁移到 core 0.21。升级现有服务前，请先按迁移指南检查版本变化和恢复步骤。
+这些路径适用于 sibling checkout；应按 consumer manifest 所在位置调整。当前源码在本地使用 core 0.21。2026-11-03 检查时，crates.io 无法解析 `qubit-event-bus-redis 0.7.0` 或 `qubit-event-bus 0.21.0`；历史组合 `0.7.0 / 0.20.1 / 0.14.0` 的 published 检查在生成锁文件阶段停止。不要把该不可用结果当作 registry 兼容性证据。升级现有服务前，请先按迁移指南检查版本变化和恢复步骤。
 
-provider 会从 GitHub fork `qubit-ltd/redis-rs` 的 `qubit/redis-2-0-0-rc1-response-limit` 分支解析带响应大小限制的 Redis client，该分支基于 redis-rs 2.0.0-rc.1。应用只需依赖 provider，无须配置本地 Cargo patch，也无须直接依赖 Redis client。
+源码清单将带响应限额的 Redis client 固定到 Qubit fork `qubit-ltd/redis-rs` 的提交 `a668891e9fcfed32f8905c2fd729fa05c1732aa5`（redis-rs 2.0.0-rc.1）。应用只需依赖 provider，无须配置本地 Cargo patch，也无须直接依赖 Redis client。Cargo 打包规范化会移除 Git 来源，只保留精确 registry 版本；该 registry 依赖仍须提供响应限额实现后，provider 才能发布。
+
+Registry 验证有两种模式。默认 `source-candidate` 会将输入的 provider/core 版本与当前源码清单比较；`published` 跳过此比较，但仍要求精确稳定版本、registry 来源、唯一 core 包身份及正确的 provider→core 依赖边。两种模式都会执行 prepare、manifest 检查、生成锁文件、feature 构建和 metadata 校验。示例：`bash ci/check-registry-consumer.sh --mode published --provider-version X.Y.Z --core-version X.Y.Z --spi-version X.Y.Z`。
 
 采用自动发现时，provider 关闭默认 feature 后应选择 `["sync", "discovery"]` 或 `["async", "discovery"]`，facade 也须启用 `discovery`。采用手动注册时，provider 只需 `["sync"]` 或 `["async"]`，facade 无须启用发现功能。`async` 可以使用 Redis client 的 Smol adapter，也能在 Tokio host 中运行。crate 不会启动 Tokio runtime 或生成订阅 worker；异步 facade 的 runner 由应用现有 executor 驱动。
 

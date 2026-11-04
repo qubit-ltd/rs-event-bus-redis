@@ -20,7 +20,9 @@ qubit-spi = "0.14"
 
 默认启用 `sync`、`async` 和 `discovery`。如需只保留一种 SPI 并继续使用 registry 自动发现，在 `qubit-event-bus-redis` 上设置 `default-features = false`，选择 `features = ["sync", "discovery"]` 或 `features = ["async", "discovery"]`。只在 `qubit-event-bus` 上启用 discovery 不会注册 Redis provider。`XAUTOCLAIM` 恢复需要 Redis 6.2 或更高版本。
 
-**Registry 状态：** 已发布的 Redis `0.7` 包依赖 core `0.20`，所以上方 registry 配置保持同一 core 类型身份。纯 registry 消费者验收尚未通过。当前源码工作树已通过 workspace path 对 core `0.21` 完成 locked metadata 解析；该依赖图检查不能证明已发布的 Redis `0.7` 包兼容 core `0.21`。core `0.21` 的 registry consumer 需要先有基于 core `0.21` 构建的 Redis 发布版本，并提供自身集成验证证据。
+**Registry 状态：** 默认 `source-candidate` 模式会将输入版本与当前源码清单比较。`published` 模式跳过该源码版本比较，但仍会解析精确 registry 版本、构建两种 feature 组合并校验 Cargo metadata 依赖图。源码候选示例：`bash ci/check-registry-consumer.sh --mode source-candidate --provider-version X.Y.Z --core-version X.Y.Z --spi-version X.Y.Z`；验证已发布组合时将模式改为 `published`。两种模式都要求目标包已存在于 registry。
+
+源码清单将 Redis client 固定到 Qubit `qubit-ltd/redis-rs` fork 提交 `a668891e9fcfed32f8905c2fd729fa05c1732aa5`（redis-rs 2.0.0-rc.1），该 fork 支持有界响应读取。Cargo 打包规范化会移除 Git 来源，只保留精确 registry 版本；发布前，规范化后的 registry 依赖也必须提供相同的响应限额。当前源码使用本地 core `0.21`。2026-11-03 检查时，crates.io 无法解析 `qubit-event-bus-redis 0.7.0` 或 `qubit-event-bus 0.21.0`；历史组合 `0.7.0 / 0.20.1 / 0.14.0` 的 published 检查在生成锁文件阶段停止。该结果代表 registry 证据不可用，不代表兼容或不兼容。上方安装示例目前无法从所检查的 registry 状态安装。
 
 
 ## 快速开始

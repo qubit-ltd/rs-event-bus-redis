@@ -1,6 +1,6 @@
 # Redis Streams User Guide
 
-**For:** Rust service developers following the current sibling-source checkout, which uses core 0.21 with this Redis provider source (package version 0.7). The already published Redis 0.7 package still depends on core 0.20.
+**For:** Rust service developers following the current sibling-source checkout, which uses core 0.21 with this Redis provider source (package version 0.7). The current registry availability and its limits are recorded in section 1.
 
 [简体中文](user_guide.zh_CN.md) · [README](../README.md) · [API docs](https://docs.rs/qubit-event-bus-redis)
 
@@ -15,9 +15,11 @@ qubit-event-bus-redis = { version = "0.7", path = "../rs-event-bus-redis" }
 qubit-spi = "0.14"
 ```
 
-These paths are for sibling checkouts; adjust them to the consumer manifest's location. Published Redis 0.7 uses core 0.20, so keep that released registry pair together. The current source checkout's local locked metadata graph uses core 0.21 but does not establish compatibility for the published Redis 0.7 package. A registry consumer should move to core 0.21 only after a compatible Redis provider release and its integration evidence are available. Consult the migration guide before upgrading an existing deployment.
+These paths are for sibling checkouts; adjust them to the consumer manifest's location. This checkout uses core 0.21 locally. On 2026-11-03, crates.io could not resolve `qubit-event-bus-redis 0.7.0` or `qubit-event-bus 0.21.0`; the historical `0.7.0 / 0.20.1 / 0.14.0` published-mode check stopped during lockfile generation. Do not treat that unavailable result as registry compatibility evidence. Consult the migration guide before upgrading an existing deployment.
 
-The provider resolves its bounded-response Redis client from the `qubit-ltd/redis-rs` GitHub fork branch `qubit/redis-2-0-0-rc1-response-limit`, based on redis-rs 2.0.0-rc.1. Applications depend on the provider and do not need a local Cargo patch or a direct Redis client dependency.
+The source manifest pins its bounded-response Redis client to the Qubit `qubit-ltd/redis-rs` fork commit `a668891e9fcfed32f8905c2fd729fa05c1732aa5` (redis-rs 2.0.0-rc.1). Applications depend on the provider and do not need a local Cargo patch or a direct Redis client dependency. Cargo package normalization removes the Git source and leaves the exact registry version; that packaged dependency still needs a published response-limit implementation before this provider can be released.
+
+Registry verification has two modes. `source-candidate` is the default and compares requested provider/core versions with this source manifest. `published` skips that comparison, but still requires exact stable versions, registry sources, a single core package identity, and the provider-to-core dependency edge. Both modes run prepare, manifest validation, lockfile generation, feature builds, and metadata verification. Example: `bash ci/check-registry-consumer.sh --mode published --provider-version X.Y.Z --core-version X.Y.Z --spi-version X.Y.Z`.
 
 For discovery, disable defaults and select `features = ["sync", "discovery"]` or `["async", "discovery"]` on the provider, and enable facade `discovery`. For manual registration, provider `features = ["sync"]` or `["async"]` suffice; facade discovery is unnecessary. `async` enables the Redis client's Smol adapter; its futures can be polled by a Smol or Tokio host. The crate does not start a Tokio runtime or spawn a subscription worker; the facade's async runner is polled by the application's executor.
 
