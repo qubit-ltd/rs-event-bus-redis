@@ -11,18 +11,22 @@
 
 ## Installation
 
+This checkout has not completed registry compatibility validation. To use the
+current source, add the sibling checkouts as path dependencies:
+
+<!-- current-source-dependencies -->
 ```toml
 [dependencies]
-qubit-event-bus = { version = "0.20", features = ["discovery"] }
-qubit-event-bus-redis = "0.7"
+qubit-event-bus = { version = "0.21", path = "../rs-event-bus", features = ["discovery"] }
+qubit-event-bus-redis = { version = "0.7.0", path = "../rs-event-bus-redis" }
 qubit-spi = "0.14"
 ```
 
-The default features enable `sync`, `async`, and `discovery`. To keep one SPI while using registry discovery, set `default-features = false` on `qubit-event-bus-redis` and select `features = ["sync", "discovery"]` or `features = ["async", "discovery"]`. Enabling discovery only on `qubit-event-bus` does not register the Redis provider. Redis 6.2 or later is required for `XAUTOCLAIM` recovery.
+The default features enable `sync`, `async`, and `discovery`. Once registry packages are available, keep one SPI by setting `default-features = false` on `qubit-event-bus-redis` and selecting `features = ["sync", "discovery"]` or `features = ["async", "discovery"]`. Enabling discovery only on `qubit-event-bus` does not register the Redis provider. Redis 6.2 or later is required for `XAUTOCLAIM` recovery.
 
-**Registry status:** the source-candidate check is the default and compares requested versions with this checkout. The published mode skips that source comparison but still resolves exact registry versions, builds both feature sets, and verifies the Cargo metadata graph. Run `bash ci/check-registry-consumer.sh --mode source-candidate --provider-version X.Y.Z --core-version X.Y.Z --spi-version X.Y.Z` for a source candidate, or use `--mode published` with the same version arguments to check a published combination. Both modes require the requested packages to exist in the registry.
+**Registry status (checked 2026-11-04):** the source manifest is provider 0.7.0/core 0.21/SPI 0.14.0. crates.io has neither `qubit-event-bus-redis 0.7.0` nor `qubit-event-bus 0.21.0`; `redis 2.0.0-rc.1` and the latest `2.0.0-rc.2` also lack the pinned fork's response-limit API. Registry installation and published compatibility are therefore unverified and unavailable for this source combination. The path example above is for sibling source checkouts, not a registry installation.
 
-The source manifest pins its Redis client to the Qubit `qubit-ltd/redis-rs` fork commit `a668891e9fcfed32f8905c2fd729fa05c1732aa5` (redis-rs 2.0.0-rc.1), which provides bounded response reads. Cargo package normalization removes the Git source and keeps the exact registry version; the normalized registry dependency must provide the same response limit before release. The current checkout uses core `0.21` locally. On 2026-11-03, crates.io could not resolve `qubit-event-bus-redis 0.7.0` or `qubit-event-bus 0.21.0`; the historical `0.7.0 / 0.20.1 / 0.14.0` published-mode check stopped during lockfile generation. On 2026-11-04, `bash ci/check-package-candidate.sh` also stopped at the package stage because crates.io had no `qubit-event-bus ^0.21`; `cargo +1.94.0 info redis@2.0.0-rc.2` and source inspection found no response-limit API in the latest registry candidate. The candidate gate is installed, but a registry client with equivalent response-budget behavior and the required core package are still needed before release. These failures are unavailable package evidence, not a successful candidate build. The example above is not currently installable from the observed registry state.
+The source manifest pins its Redis client to the Qubit `qubit-ltd/redis-rs` fork commit `a668891e9fcfed32f8905c2fd729fa05c1732aa5` (redis-rs 2.0.0-rc.1), which provides bounded response reads. Cargo package normalization removes the Git source and keeps the exact registry version, so the candidate still needs an equivalent registry API. On 2026-11-04, `bash ci/check-package-candidate.sh` stopped in its package phase because crates.io had no `qubit-event-bus ^0.21`. Source inspection also found no response-limit API in registry Redis 2.0.0-rc.1 or 2.0.0-rc.2. The candidate archive and runtime behavior have not been verified; a registry core at 0.21 and a client with equivalent response-budget support are required to unblock this check.
 
 
 ## Quick Start

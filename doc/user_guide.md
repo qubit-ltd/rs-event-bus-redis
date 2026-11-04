@@ -1,6 +1,6 @@
 # Redis Streams User Guide
 
-**For:** Rust service developers following the current sibling-source checkout, which uses core 0.21 with this Redis provider source (package version 0.7). The current registry availability and its limits are recorded in section 1.
+**For:** Rust service developers using the current sibling-source checkout, whose manifest versions are provider 0.7.0, core 0.21, and SPI 0.14. Registry availability is recorded below.
 
 [简体中文](user_guide.zh_CN.md) · [README](../README.md) · [API docs](https://docs.rs/qubit-event-bus-redis)
 
@@ -8,16 +8,17 @@
 
 For a consumer in the Qubit source workspace, add both sibling checkouts as direct dependencies. `discovery` is on by default in the provider crate; it submits `redis-streams` to the synchronous and asynchronous provider inventories. Your application calls `EventBusRegistry::discover()` or `AsyncEventBusRegistry::discover()` and selects the provider by ID.
 
+<!-- current-source-dependencies -->
 ```toml
 [dependencies]
 qubit-event-bus = { version = "0.21", path = "../rs-event-bus", features = ["discovery"] }
-qubit-event-bus-redis = { version = "0.7", path = "../rs-event-bus-redis" }
+qubit-event-bus-redis = { version = "0.7.0", path = "../rs-event-bus-redis" }
 qubit-spi = "0.14"
 ```
 
-These paths are for sibling checkouts; adjust them to the consumer manifest's location. This checkout uses core 0.21 locally. On 2026-11-03, crates.io could not resolve `qubit-event-bus-redis 0.7.0` or `qubit-event-bus 0.21.0`; the historical `0.7.0 / 0.20.1 / 0.14.0` published-mode check stopped during lockfile generation. Do not treat that unavailable result as registry compatibility evidence. Consult the migration guide before upgrading an existing deployment.
+These paths are for sibling checkouts; adjust them to the consumer manifest's location. Registry query on 2026-11-04 found neither `qubit-event-bus-redis 0.7.0` nor `qubit-event-bus 0.21.0` on crates.io. Treat this example as a local source integration, not a registry installation. Consult the migration guide before upgrading an existing deployment.
 
-The source manifest pins its bounded-response Redis client to the Qubit `qubit-ltd/redis-rs` fork commit `a668891e9fcfed32f8905c2fd729fa05c1732aa5` (redis-rs 2.0.0-rc.1). Applications depend on the provider and do not need a local Cargo patch or a direct Redis client dependency. Cargo package normalization removes the Git source and leaves the exact registry version; that packaged dependency still needs a published response-limit implementation before this provider can be released. On 2026-11-04, `bash ci/check-package-candidate.sh` failed during package creation because crates.io had no `qubit-event-bus ^0.21`. `cargo +1.94.0 info redis@2.0.0-rc.2` followed by source inspection found no response-limit API in that registry release, so release remains blocked pending registry dependencies with the required core version and equivalent response-budget support.
+The source manifest pins its bounded-response Redis client to the Qubit `qubit-ltd/redis-rs` fork commit `a668891e9fcfed32f8905c2fd729fa05c1732aa5` (redis-rs 2.0.0-rc.1). Applications depend on the provider and do not need a local Cargo patch or a direct Redis client dependency. Cargo package normalization removes the Git source and leaves the exact registry version; that packaged dependency still needs an equivalent response-limit implementation. On 2026-11-04, `bash ci/check-package-candidate.sh` stopped in the package phase because crates.io had no `qubit-event-bus ^0.21`. Source inspection also found no response-limit API in registry Redis 2.0.0-rc.1 or 2.0.0-rc.2. The candidate archive and runtime behavior remain unverified until the required registry dependencies are available.
 
 Registry verification has two modes. `source-candidate` is the default and compares requested provider/core versions with this source manifest. `published` skips that comparison, but still requires exact stable versions, registry sources, a single core package identity, and the provider-to-core dependency edge. Both modes run prepare, manifest validation, lockfile generation, feature builds, and metadata verification. Example: `bash ci/check-registry-consumer.sh --mode published --provider-version X.Y.Z --core-version X.Y.Z --spi-version X.Y.Z`.
 
@@ -543,7 +544,7 @@ With typed `qubit-task` notifications, consumers should deduplicate by `TaskId` 
 
 ## 12. Upgrade from provider 0.6
 
-The released `qubit-event-bus-redis` 0.7 package remains on core 0.20. The current source checkout is being validated against core 0.21 through sibling paths, but that is not a released dependency combination. A registry consumer needs a Redis provider release built against core 0.21 before migrating to that core minor. `RedisSubscriptionProfile` builds durable subscription options from an explicit `StartPosition`; use it for new subscriptions and preserve the intended consumer group. Core codec registration now rejects duplicate payload types and returns `Result`; handle it with `?` or use `replace` deliberately. `InboundMessage` carries optional provider-attempt metadata without changing its existing `into_parts` tuple. Keep stored wire version 1 data and consumer groups; test retained pending entries before rollout. Start collecting provider snapshots and Redis PEL/memory separately as described above. The [migration guide](migration.md) covers the complete version-specific changes.
+The current source manifest is provider 0.7.0 with core 0.21. As of the 2026-11-04 registry check, neither `qubit-event-bus-redis 0.7.0` nor `qubit-event-bus 0.21.0` is available on crates.io, so this pairing is not a published release combination. `RedisSubscriptionProfile` builds durable subscription options from an explicit `StartPosition`; use it for new subscriptions and preserve the intended consumer group. Core codec registration now rejects duplicate payload types and returns `Result`; handle it with `?` or use `replace` deliberately. `InboundMessage` carries optional provider-attempt metadata without changing its existing `into_parts` tuple. Keep stored wire version 1 data and consumer groups; test retained pending entries before rollout. Start collecting provider snapshots and Redis PEL/memory separately as described above. The [migration guide](migration.md) covers the complete version-specific changes.
 
 
 See [design](design.md), [coverage evidence](coverage-review.md), and [workload benchmark](connection-reuse-benchmark.md). Performance/coverage results require their own measured evidence; this guide makes no new throughput or final coverage claim.

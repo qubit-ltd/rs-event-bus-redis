@@ -4,12 +4,15 @@
 
 ## 当前版本配套关系
 
-当前源码 checkout 是 provider 0.7，并依赖 core 0.21。README 记录了 provider
-0.7/core 0.20 发布组合，但截至 2026-11-03 无法在 crates.io 验证该组合。它
-不代表此源码 checkout。下文记录 provider 0.6 到 0.7 的 API 迁移，其最初
-发布组合为 core 0.19。
+当前源码 manifest 版本为 provider 0.7.0，并依赖 core 0.21 和 SPI 0.14.0。
+2026-11-04 查询 crates.io 时，provider 0.7.0 和 core 0.21.0 均不可用，因此
+本文不宣称该源码组合已发布或兼容。下文记录 provider 0.6 到 0.7 的 API
+迁移；历史发布说明使用 core 0.19。
 
 ### Core 0.20 配套说明
+
+本节说明迁移中涉及的 core 0.20 API 行为，不代表 provider 0.7/core 0.20
+组合已在 registry 发布。
 
 Redis 不提供逐目标接纳信息。调用 `publish_checked` 时应使用
 `AdmissionRequirement::ProviderOrDestinationAccepted`；要求更严格的逐目标
@@ -40,9 +43,9 @@ stream、消费组和 pending entry 无需格式迁移。保留策略仍可能�
 
 ## 从 provider 0.6 升级到 0.7
 
-provider 0.7 最初迁移时与 `qubit-event-bus` 0.19 配套。当前源码 checkout
-使用 core 0.21；README 记录 provider 0.7 与 core 0.20 配套，但截至 2026-11-03
-无法在 crates.io 验证。把重复设置 `durability(Durable)`、`start_position(...)` 和可选 `consumer_group(...)` 的代码改为 `RedisSubscriptionProfile::new(start_position).consumer_group(group).options()`；不使用消费组时省略 `consumer_group`。profile 要求明确指定 `StartPosition`，并始终生成 durable options；后续 `.durability(Ephemeral)` 会被 Redis capability 检查拒绝。
+本节说明 provider 0.6 到 0.7 的源码 API 变化。历史 provider 0.7 发布说明使用
+core 0.19；当前源码 manifest 使用 core 0.21，该 registry 组合截至 2026-11-04
+尚不可用。把重复设置 `durability(Durable)`、`start_position(...)` 和可选 `consumer_group(...)` 的代码改为 `RedisSubscriptionProfile::new(start_position).consumer_group(group).options()`；不使用消费组时省略 `consumer_group`。profile 要求明确指定 `StartPosition`，并始终生成 durable options；后续 `.durability(Ephemeral)` 会被 Redis capability 检查拒绝。
 
 由 `XREADGROUP >` 返回的新消息会通过 `provider_attempt()` 报告 `Some(1)`。每条 pending
 或 `XAUTOCLAIM` 恢复消息都会额外查询一次 `XPENDING` 明细。只有查询恰好返回一条该

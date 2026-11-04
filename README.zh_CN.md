@@ -11,18 +11,22 @@
 
 ## 安装
 
+当前源码尚未完成 registry 兼容性验证。若要使用当前源码，请将 sibling
+checkout 配置为 path dependency：
+
+<!-- current-source-dependencies -->
 ```toml
 [dependencies]
-qubit-event-bus = { version = "0.20", features = ["discovery"] }
-qubit-event-bus-redis = "0.7"
+qubit-event-bus = { version = "0.21", path = "../rs-event-bus", features = ["discovery"] }
+qubit-event-bus-redis = { version = "0.7.0", path = "../rs-event-bus-redis" }
 qubit-spi = "0.14"
 ```
 
-默认启用 `sync`、`async` 和 `discovery`。如需只保留一种 SPI 并继续使用 registry 自动发现，在 `qubit-event-bus-redis` 上设置 `default-features = false`，选择 `features = ["sync", "discovery"]` 或 `features = ["async", "discovery"]`。只在 `qubit-event-bus` 上启用 discovery 不会注册 Redis provider。`XAUTOCLAIM` 恢复需要 Redis 6.2 或更高版本。
+默认启用 `sync`、`async` 和 `discovery`。待 registry 包可用后，如需只保留一种 SPI 并使用自动发现，可在 `qubit-event-bus-redis` 上设置 `default-features = false`，选择 `features = ["sync", "discovery"]` 或 `features = ["async", "discovery"]`。只在 `qubit-event-bus` 上启用 discovery 不会注册 Redis provider。`XAUTOCLAIM` 恢复需要 Redis 6.2 或更高版本。
 
-**Registry 状态：** 默认 `source-candidate` 模式会将输入版本与当前源码清单比较。`published` 模式跳过该源码版本比较，但仍会解析精确 registry 版本、构建两种 feature 组合并校验 Cargo metadata 依赖图。源码候选示例：`bash ci/check-registry-consumer.sh --mode source-candidate --provider-version X.Y.Z --core-version X.Y.Z --spi-version X.Y.Z`；验证已发布组合时将模式改为 `published`。两种模式都要求目标包已存在于 registry。
+**Registry 状态（2026-11-04 查询）：** 当前源码清单版本为 provider 0.7.0/core 0.21/SPI 0.14.0。crates.io 尚无 `qubit-event-bus-redis 0.7.0` 和 `qubit-event-bus 0.21.0`；`redis 2.0.0-rc.1` 及当时最新的 `2.0.0-rc.2` 也没有源码 fork 所需的响应限额 API。因此 registry 安装和已发布组合兼容性均未验证，当前源码组合在 registry 中不可用。上面的 path 示例只适用于 sibling source checkout。
 
-源码清单将 Redis client 固定到 Qubit `qubit-ltd/redis-rs` fork 提交 `a668891e9fcfed32f8905c2fd729fa05c1732aa5`（redis-rs 2.0.0-rc.1），该 fork 支持有界响应读取。Cargo 打包规范化会移除 Git 来源，只保留精确 registry 版本；发布前，规范化后的 registry 依赖也必须提供相同的响应限额。当前源码使用本地 core `0.21`。2026-11-03 检查时，crates.io 无法解析 `qubit-event-bus-redis 0.7.0` 或 `qubit-event-bus 0.21.0`；历史组合 `0.7.0 / 0.20.1 / 0.14.0` 的 published 检查在生成锁文件阶段停止。2026-11-04 运行 `bash ci/check-package-candidate.sh` 时也在 package 阶段因 crates.io 缺少 `qubit-event-bus ^0.21` 而退出；`cargo +1.94.0 info redis@2.0.0-rc.2` 及源码检查未发现该 registry 候选具有响应限额 API。候选包门禁已接入，但发布仍受 core 包缺失及 registry client 缺少等价响应预算能力阻塞。上述失败代表候选包证据不可用，不是构建通过。上方安装示例目前无法从所检查的 registry 状态安装。
+源码清单将 Redis client 固定到 Qubit `qubit-ltd/redis-rs` fork 提交 `a668891e9fcfed32f8905c2fd729fa05c1732aa5`（redis-rs 2.0.0-rc.1），该 fork 支持有界响应读取。Cargo 打包规范化会移除 Git 来源，只保留精确 registry 版本，因此候选包仍须使用提供等价 API 的 registry client。2026-11-04 运行 `bash ci/check-package-candidate.sh` 时，在 package 阶段因 crates.io 缺少 `qubit-event-bus ^0.21` 而退出。源码检查也确认 registry 的 Redis 2.0.0-rc.1 和 2.0.0-rc.2 均没有响应限额 API。候选归档和运行行为尚未验证；解除该检查阻塞需要 registry 提供 core 0.21，以及具有等价响应预算能力的 client。
 
 
 ## 快速开始

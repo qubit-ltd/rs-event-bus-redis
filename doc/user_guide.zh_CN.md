@@ -1,6 +1,6 @@
 # Redis Streams 用户指南
 
-**读者：** 使用当前 sibling source checkout 的 Rust 服务开发者：该源码组合使用 core 0.21 和 Redis provider 源码（包版本 0.7）。Registry 当前可用性及其限制见第 1 节。
+**读者：** 使用当前 sibling source checkout 的 Rust 服务开发者；manifest 版本为 provider 0.7.0、core 0.21 和 SPI 0.14。Registry 可用性见下文。
 
 [English](user_guide.md) · [README](../README.zh_CN.md) · [API 文档](https://docs.rs/qubit-event-bus-redis)
 
@@ -8,16 +8,17 @@
 
 在 Qubit 源码 workspace 中，将两个 sibling checkout 都作为直接依赖。provider crate 默认启用 `discovery`，会把 `redis-streams` 提交到同步和异步 provider inventory。应用在启动时调用 `EventBusRegistry::discover()` 或 `AsyncEventBusRegistry::discover()`，再按 ID 选择 Redis。
 
+<!-- current-source-dependencies -->
 ```toml
 [dependencies]
 qubit-event-bus = { version = "0.21", path = "../rs-event-bus", features = ["discovery"] }
-qubit-event-bus-redis = { version = "0.7", path = "../rs-event-bus-redis" }
+qubit-event-bus-redis = { version = "0.7.0", path = "../rs-event-bus-redis" }
 qubit-spi = "0.14"
 ```
 
-这些路径适用于 sibling checkout；应按 consumer manifest 所在位置调整。当前源码在本地使用 core 0.21。2026-11-03 检查时，crates.io 无法解析 `qubit-event-bus-redis 0.7.0` 或 `qubit-event-bus 0.21.0`；历史组合 `0.7.0 / 0.20.1 / 0.14.0` 的 published 检查在生成锁文件阶段停止。不要把该不可用结果当作 registry 兼容性证据。升级现有服务前，请先按迁移指南检查版本变化和恢复步骤。
+这些路径适用于 sibling checkout；应按 consumer manifest 所在位置调整。2026-11-04 registry 查询时，crates.io 尚无 `qubit-event-bus-redis 0.7.0` 和 `qubit-event-bus 0.21.0`。本示例用于本地源码集成，不能作为 registry 安装示例。升级现有服务前，请先按迁移指南检查版本变化和恢复步骤。
 
-源码清单将带响应限额的 Redis client 固定到 Qubit fork `qubit-ltd/redis-rs` 的提交 `a668891e9fcfed32f8905c2fd729fa05c1732aa5`（redis-rs 2.0.0-rc.1）。应用只需依赖 provider，无须配置本地 Cargo patch，也无须直接依赖 Redis client。Cargo 打包规范化会移除 Git 来源，只保留精确 registry 版本；该 registry 依赖仍须提供响应限额实现后，provider 才能发布。2026-11-04 运行 `bash ci/check-package-candidate.sh` 时，在 crate 生成阶段因 crates.io 缺少 `qubit-event-bus ^0.21` 而失败。执行 `cargo +1.94.0 info redis@2.0.0-rc.2` 并检查源码后，未发现该 registry 版本提供响应限额 API；发布仍受所需 core 版本和等价响应预算能力的 registry 依赖阻塞。
+源码清单将带响应限额的 Redis client 固定到 Qubit fork `qubit-ltd/redis-rs` 的提交 `a668891e9fcfed32f8905c2fd729fa05c1732aa5`（redis-rs 2.0.0-rc.1）。应用只需依赖 provider，无须配置本地 Cargo patch，也无须直接依赖 Redis client。Cargo 打包规范化会移除 Git 来源，只保留精确 registry 版本；该 registry 依赖仍须提供等价的响应限额实现。2026-11-04 运行 `bash ci/check-package-candidate.sh` 时，在 package 阶段因 crates.io 缺少 `qubit-event-bus ^0.21` 而失败。源码检查也未在 registry Redis 2.0.0-rc.1 或 2.0.0-rc.2 中发现响应限额 API。registry 依赖可用前，候选归档和运行行为均未验证。
 
 Registry 验证有两种模式。默认 `source-candidate` 会将输入的 provider/core 版本与当前源码清单比较；`published` 跳过此比较，但仍要求精确稳定版本、registry 来源、唯一 core 包身份及正确的 provider→core 依赖边。两种模式都会执行 prepare、manifest 检查、生成锁文件、feature 构建和 metadata 校验。示例：`bash ci/check-registry-consumer.sh --mode published --provider-version X.Y.Z --core-version X.Y.Z --spi-version X.Y.Z`。
 
@@ -543,7 +544,7 @@ Redis 持久化和复制由部署负责。`Accepted` 只证明 XADD 被接受，
 
 ## 12. 从 provider 0.6 升级
 
-已发布的 `qubit-event-bus-redis` 0.7 仍使用 core 0.20。当前源码工作树通过 sibling path 验证 core 0.21，但这不是已发布的依赖组合。registry consumer 应先等待基于 core 0.21 构建的 Redis provider 发布，再迁移到该 core minor。新版 `RedisSubscriptionProfile` 根据明确的 `StartPosition` 构造 durable 订阅选项；创建新订阅时使用它，并保留预期的消费组。核心 codec 注册现在会拒绝重复载荷类型并返回 `Result`；要传播错误，使用 `?`，确需替换时才调用 `replace`。`InboundMessage` 增加可选 provider attempt 元数据，但 `into_parts` tuple 保持原样。保留 wire 版本 1 数据和现有消费组；发布前应验证 pending 记录，并按上文分别采集 provider 快照与 Redis PEL/内存。[迁移指南](migration.zh_CN.md)列出完整变更。
+当前源码 manifest 版本为 provider 0.7.0/core 0.21。截至 2026-11-04 registry 查询，crates.io 尚无 `qubit-event-bus-redis 0.7.0` 和 `qubit-event-bus 0.21.0`，因此该源码组合并非已发布的 registry 组合。`RedisSubscriptionProfile` 根据明确的 `StartPosition` 构造 durable 订阅选项；创建新订阅时使用它，并保留预期的消费组。核心 codec 注册现在会拒绝重复载荷类型并返回 `Result`；要传播错误，使用 `?`，确需替换时才调用 `replace`。`InboundMessage` 增加可选 provider attempt 元数据，但 `into_parts` tuple 保持原样。保留 wire 版本 1 数据和现有消费组；发布前应验证 pending 记录，并按上文分别采集 provider 快照与 Redis PEL/内存。[迁移指南](migration.zh_CN.md)列出完整变更。
 
 
 参阅[设计说明](design.zh_CN.md)、[覆盖率证据](coverage-review.zh_CN.md)和[工作负载基准](connection-reuse-benchmark.zh_CN.md)。性能、覆盖率须以各自测量为证；本指南没有宣称新的吞吐量或最终覆盖率结果。
