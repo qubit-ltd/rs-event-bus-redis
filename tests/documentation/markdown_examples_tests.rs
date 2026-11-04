@@ -106,7 +106,71 @@ fn assemble(blocks: &[MarkdownBlock], tag: &str) -> String {
     match tag {
         "codec" | "sync-discovery" => format!("{codec}\n{}", code(blocks, "sync-discovery")),
         "async-discovery" => format!("{codec}\n{}", code(blocks, "async-discovery")),
-        "existing-group-resume" => format!("fn main() {{\n{}\n}}", code(blocks, tag)),
+        "existing-group-resume" => {
+            let program = format!(
+                r#"
+use std::sync::mpsc;
+use std::time::Duration;
+
+use qubit_event_bus::DeliveryError;
+use qubit_event_bus::EventBusRegistry;
+use qubit_event_bus::model::PublishRequest;
+use qubit_event_bus::model::StartPosition;
+use qubit_event_bus::model::SubscribeRequest;
+use qubit_event_bus::model::Topic;
+use qubit_event_bus::registry::EventBusConfig;
+use qubit_event_bus::spi::ShutdownMode;
+use qubit_event_bus::spi::ShutdownOutcome;
+use qubit_event_bus_redis::RedisSubscriptionProfile;
+use qubit_spi::ProviderSelection;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {{
+    let url = std::env::var("REDIS_URL")?;
+    let namespace = std::env::var("REDIS_NAMESPACE")?;
+    let config = EventBusConfig::default()
+        .with_selection(ProviderSelection::named("redis-streams")?)
+        .with_provider_options([("redis.url".into(), url), ("redis.namespace".into(), namespace)].into())
+        .with_facade_config(facade_config()?);
+    let bus = EventBusRegistry::discover()?.create(&config)?;
+    let topic = Topic::<String>::new("orders.created")?;
+    let first_group = RedisSubscriptionProfile::new(StartPosition::Earliest)
+        .options()
+        .build();
+    let (first_tx, first_rx) = mpsc::channel();
+    let first_subscription = bus.subscribe(
+        SubscribeRequest::new("billing-worker", topic.clone())?.with_options(first_group),
+        move |delivery| first_tx.send(delivery.payload().clone())
+            .map_err(|source| DeliveryError::Handler {{ source: Box::new(source) }}),
+    )?;
+    bus.publish(PublishRequest::new(topic.clone(), "order-42".to_owned())?)?;
+    let first = first_rx.recv_timeout(Duration::from_secs(5))?;
+    if first != "order-42" {{ return Err(format!("unexpected first event: {{first}}").into()); }}
+    first_subscription.cancel()?;
+
+    bus.publish(PublishRequest::new(topic.clone(), "order-43".to_owned())?)?;
+    let (resume_tx, resume_rx) = mpsc::channel();
+    let options = {{
+{}
+    options
+    }};
+    let resumed = bus.subscribe(
+        SubscribeRequest::new("billing-worker", topic)?.with_options(options),
+        move |delivery| resume_tx.send(delivery.payload().clone())
+            .map_err(|source| DeliveryError::Handler {{ source: Box::new(source) }}),
+    )?;
+    let second = resume_rx.recv_timeout(Duration::from_secs(5))?;
+    println!("resumed event: {{second}}");
+    if second != "order-43" {{ return Err(format!("resume replayed or missed event: {{second}}").into()); }}
+    resumed.cancel()?;
+    let report = bus.shutdown(ShutdownMode::Graceful {{ timeout: Duration::from_secs(5) }})?;
+    if report.outcome != ShutdownOutcome::Complete {{ return Err("graceful shutdown incomplete".into()); }}
+    Ok(())
+}}
+"#,
+                code(blocks, tag)
+            );
+            format!("{codec}\n{program}")
+        }
         "sync-manual" | "async-manual" => {
             let asynchronous = tag == "async-manual";
             let registry = if asynchronous {
@@ -364,7 +428,20 @@ fn test_markdown_fragments_and_programs_publish_settle_and_close() -> Result<(),
                 Duration::from_secs(15),
             )?;
             if tag == "existing-group-resume" {
-                println!("validated Markdown {guide} block {tag}: options compile and execute");
+                assert!(
+                    output.contains("resumed event: order-43"),
+                    "{id} did not resume at the stored group cursor: {output}"
+                );
+                let stream = stream_key(&namespace, "orders.created");
+                let group = group_name(&namespace, "orders.created", "billing-worker", None);
+                let length: usize = cmd("XLEN").arg(&stream).query(&mut observer)?;
+                assert_eq!(length, 2, "{id} must preserve both records");
+                let pending: Value = cmd("XPENDING").arg(&stream).arg(group).query(&mut observer)?;
+                assert!(
+                    matches!(pending, Value::Array(ref values) if matches!(values.first(), Some(Value::Int(0)))),
+                    "{id} must ACK the resumed record; actual PEL: {pending:?}"
+                );
+                println!("validated Markdown {guide} block {tag}: resumed second event, preserved first, PEL empty");
                 continue;
             }
             let expected = if tag.starts_with("async") {

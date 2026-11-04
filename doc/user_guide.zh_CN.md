@@ -153,7 +153,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 此入门练习先安装账单 handler，再发布 `order-42`，等待 handler 发出通知，打印 `consumed order event: order-42`，最后取消订阅并关闭总线。生产 handler 应完成并提交应用自己的账单变更后才返回 `Ok(())`；打印和 channel 通知只是练习的验收信号。总线和订阅应由服务的启动、关闭模块持有。第一次运行会从 `Earliest` 创建消费组；再次运行时，订阅通过 `redis.existing_group_start=resume` 显式选择沿用 Redis 保存的游标。Redis 只在首次创建 group 时应用起始位置；恢复时不会执行 `XGROUP SETID`，也不会重放已确认的历史记录。更换 namespace 可隔离演示数据；已有 pending 记录仍可能先于本次发布的事件交付。新建的 `Earliest` 消费组也能读取已保留的记录。生产服务若使用 `New`，应先注册 consumer，再依赖后续发布的事件。Redis Streams 只接受 `Durable` 订阅；`Ephemeral` 会在执行 Redis I/O 前被拒绝。服务断连或关闭订阅时，group 会保留，未结算记录仍在 pending entries list 中。
 
-限额内格式错误的版本 1 wire 记录会被原子复制到按 group 隔离的 stream（`qubit:poison:*`），并从源 group 确认。隔离记录包含 `source_stream`、`source_id`、`group`、稳定的 `reason`、原始 `wire` 字节和 `wire_missing`。隔离成功后返回 `Gap`，不会把 payload 放进错误信息。可用 `XRANGE <quarantine-key> - + COUNT 100` 读取一页记录，并用 `XLEN`、`XPENDING` 监控隔离流、源 stream 和 pending 数量；完整检查须继续翻页。provider 不会自动裁剪这些 stream；运维应按保留策略归档或清理隔离数据。
+限额内格式错误的版本 1 wire 记录由单条 Lua 脚本串行处理：先用 `XADD` 写入按 group 隔离的记录（`qubit:poison:*`），再用 `XACK` 确认源记录。隔离记录包含 `source_stream`、`source_id`、`group`、稳定的 `reason`、原始 `wire` 字节和 `wire_missing`。确认失败时脚本不会回滚已成功写入的隔离记录；如果回复丢失，仅凭回复无法判断哪些步骤已完成。应检查源 ID、group、pending owner 和隔离记录，再决定如何处理。确认隔离成功后返回 `Gap`，不会把 payload 放进错误信息。可用 `XRANGE <quarantine-key> - + COUNT 100` 读取一页记录，并用 `XLEN`、`XPENDING` 监控隔离流、源 stream 和 pending 数量；完整检查须继续翻页。provider 不会自动裁剪这些 stream；运维应按保留策略归档或清理隔离数据。
 
 投递语义仍是至少一次。如果 handler 运行时间超过 `redis.claim_min_idle_ms`，其他 consumer 可能接管该 pending 记录。若 `XADD` 回复丢失，发布结果未知，facade 默认安全门阻止自动重发；人工或明确允许的重试仍可能重复。`redis.max_unsettled_per_subscription` 限制本地活跃投递数，默认值为 100。
 
@@ -382,9 +382,10 @@ Redis 提供至少一次投递，因此 handler 应具备幂等性。新消息�
 
 <!-- doc-example: existing-group-resume -->
 ```rust
-use qubit_event_bus::model::{StartPosition, SubscribeOptions};
+use qubit_event_bus::model::{StartPosition, SubscribeOptions, SubscriptionDurability};
 
 let options = SubscribeOptions::<String>::builder()
+    .durability(SubscriptionDurability::Durable)
     .start_position(StartPosition::Earliest)
     .provider_option("redis.existing_group_start", "resume")
     .build();
@@ -414,7 +415,7 @@ let options = SubscribeOptions::<String>::builder()
 
 `redis.max_wire_bytes`、`redis.max_payload_bytes`、`redis.max_headers_bytes` 默认分别为 8,388,608、1,048,576、65,536 字节。值必须为正整数，零、非法数字和溢出都是配置错误。三个限额独立，payload 未超限仍可能因 JSON 膨胀使 wire 超限。facade 的 `PayloadLimits` 另有默认各 1 MiB 的双向限制，需要一起配置。
 
-发布先在复制 payload 前检查大小，再用有界 writer 序列化 headers/wire，成功后才调用 `XADD`。接收先借用 wire 字节检查长度，再复制字符串；先解析版本，随后对版本 1 字段做有界解码，不构造完整 JSON Value 树。payload 每次 push 前检查增长，headers 字符串在二次 JSON 解析前检查，嵌套 JSON 保持深度保护。专用 receiver 连接还会在构造响应值前，将 RESP 响应帧限制为 `redis.max_wire_bytes + 65,536` 字节。这是 receiver 帧输入的上限，不代表进程 RSS 上限；解码后的结构、其他连接及 Redis 自身的内存使用另行计算。
+发布先在复制 payload 前检查大小，再用有界 writer 序列化 headers/wire，成功后才调用 `XADD`。接收先借用 wire 字节检查长度，再复制字符串；先解析版本，随后对版本 1 字段做有界解码，不构造完整 JSON Value 树。payload 每次 push 前检查增长，headers 字符串在二次 JSON 解析前检查，嵌套 JSON 保持深度保护。专用 receiver 连接还会在构造完整响应值前，将 RESP 响应帧限制为 `redis.max_wire_bytes + 65,536` 字节。解码预算会约束 provider 随字段解码而追加的分配。这些保护不构成进程 RSS 上限；receiver 帧上限也不适用于其他连接读取的响应。解码后的数据结构、其他连接和 Redis 本身都有独立的内存开销。
 
 可读取记录超过 wire、payload 或 headers 配置容量时返回 `receive_limit_exceeded`，源记录保留在 PEL 中，不执行 `XACK`、`XDEL` 或隔离。`receive_response_too_large` 表示完整 RESP 帧超过 receiver 连接的独立上限；连接会关闭、订阅停止并释放 receiver 准入，可能形成的 PEL 记录保持不变。合法但不支持的 wire 版本同样保留。先用 `XPENDING` 检查记录及 owner，再修复限额或部署兼容 provider/codec，并以同一 group 创建新订阅验证恢复。是否删除或隔离保留记录应由运维人员评估决定，不要为掩盖错误而清理。限额内格式错误的版本 1 数据仍走隔离；旧版本发布的 wire 版本 1 继续可读。
 
