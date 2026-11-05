@@ -162,3 +162,22 @@ The downstream change is committed separately as `2dceec2 build: pin released Re
 ## Branch synchronization
 
 The target provider commits were fast-forward integrated into the original `dev-starfish` checkout, then the resulting commit was fast-forward merged and pushed to the existing `dev`, `main`, and `dev-starfish` branches. The downstream `rs-task` commit was likewise synchronized to all three existing branches. The Redis fork package/workflow commit `7b15f27` was pushed to its existing `qubit/redis-2-0-0-rc1-response-limit` and `main` branches; remote `dev` and `dev-starfish` branches were absent and were skipped without creating them.
+
+## Resolved validation attempts
+
+The following intermediate failures were diagnosed and resolved before the final green runs:
+
+| Attempt | Result and resolution |
+| --- | --- |
+| Initial `.infra/bin/align-ci.sh` | Failed on 97 pre-existing mechanical style findings. Required source/test layout, Rustdoc, and test-name fixes were applied; later align runs exited 0. |
+| First target `ci-check.sh` after fixture lock refresh | Failed `--no-default-features` test compilation because the relocated Redis error-classification test module imported a Redis-only helper. The test module now has a matching `sync`/`async` cfg; the standalone no-default test and later full CI passed. |
+| Next target `ci-check.sh` feature matrix | Failed because `.infra/ci/cargo-matrix.json` still requested `cargo update --package redis` after the package was renamed to `qubit-redis`. Updated the package selector; full CI passed. |
+| Earlier downstream fixture CI case | Failed `--locked` because four fixture lockfiles still referred to the old Git Redis identity. Regenerated those four locks from the registry, then each fixture passed both unlocked and locked checks. |
+| First rc.2 `cargo +1.94.0 check --locked --workspace --all-targets --all-features` | Exit 101 because the existing lockfile still selected Redis rc.1. Ran the same check without `--locked` to update only qubit-redis to rc.2, then reran the locked check successfully. |
+| First Redis fork `cargo publish --dry-run --locked --manifest-path redis/Cargo.toml` | Exit 101 because README and `redis/Cargo.toml` were modified but not committed. Re-ran before commit with `--allow-dirty`; package verification passed. The committed package was subsequently published without `--allow-dirty`. |
+| Initial `ci/check-package-candidate.sh` attempts | Failed first because Cargo download chatter was merged into metadata JSON, then because the checker used the archive directory name instead of the manifest package name. Captured metadata stdout separately and read the name from normalized `Cargo.toml`; rc.1 and rc.2 candidate runs passed. |
+| `ci/check-registry-consumer.sh --mode source-candidate --provider-version 0.7.0 --core-version 0.21.0 --spi-version 0.14.0` | Failed during lock generation because `qubit-event-bus-redis 0.7.0` itself is not published. This pre-publication consumer check cannot resolve a target release; no target provider publication was authorized or attempted. The normalized source package check and full package archive verification passed. |
+| rc.2 Markdown example Cargo lock generation during full CI | crates.io index intermittently timed out; Cargo's built-in retries eventually generated the locks, and the complete rc.2 CI exited 0. |
+| First Redis fork `cargo +1.94.0 test -p qubit-redis --all-features` | Failed because runtime-selection integration tests share process-global runtime state under single-process `cargo test`. The repository Makefile uses nextest process isolation; the complete `RUSTUP_TOOLCHAIN=1.94.0 make test` suite passed for rc.2. |
+
+Final `git diff --check`, all required verification commands, registry publication checks, branch synchronization, and cleanup completed successfully. The only unavailable check is the published-consumer lookup above, which depends on a separate release of the target provider crate.
