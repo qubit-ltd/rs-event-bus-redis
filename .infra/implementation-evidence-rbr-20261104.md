@@ -157,4 +157,8 @@ After the provider worktree was fast-forwarded into its original `dev-starfish` 
 | `cargo +1.94.0 check --locked --all-targets --features event-bus,sqlite` | exit 0 |
 | `cargo +1.94.0 tree -d --features event-bus,sqlite --locked` | exit 0; one qubit-redis registry identity, no duplicate Redis driver |
 
-The downstream change is committed separately as `2dceec2 build: pin released Redis driver rc.2` and will be fast-forward integrated and synchronized on its existing branches.
+The downstream change is committed separately as `2dceec2 build: pin released Redis driver rc.2`, fast-forward integrated to `rs-task/dev-starfish`, then fast-forward synchronized and pushed to its existing `dev`, `main`, and `dev-starfish` branches.
+
+## Branch synchronization
+
+The target provider commits were fast-forward integrated into the original `dev-starfish` checkout, then the resulting commit was fast-forward merged and pushed to the existing `dev`, `main`, and `dev-starfish` branches. The downstream `rs-task` commit was likewise synchronized to all three existing branches. The Redis fork package/workflow commit `7b15f27` was pushed to its existing `qubit/redis-2-0-0-rc1-response-limit` and `main` branches; remote `dev` and `dev-starfish` branches were absent and were skipped without creating them.
