@@ -156,6 +156,7 @@ After the provider worktree was fast-forwarded into its original `dev-starfish` 
 | `cargo +1.94.0 check --all-targets --features event-bus,sqlite` | exit 0; lock refresh selected qubit-redis rc.2 |
 | `cargo +1.94.0 check --locked --all-targets --features event-bus,sqlite` | exit 0 |
 | `cargo +1.94.0 tree -d --features event-bus,sqlite --locked` | exit 0; one qubit-redis registry identity, no duplicate Redis driver |
+| `cargo +1.94.0 test --test redis_event_bus_integration_tests --features event-bus --locked -- --test-threads=1` | exit 0; 6 passed against Redis with temporary Docker socket access |
 
 The downstream change is committed separately as `2dceec2 build: pin released Redis driver rc.2`, fast-forward integrated to `rs-task/dev-starfish`, then fast-forward synchronized and pushed to its existing `dev`, `main`, and `dev-starfish` branches.
 
@@ -180,4 +181,4 @@ The following intermediate failures were diagnosed and resolved before the final
 | rc.2 Markdown example Cargo lock generation during full CI | crates.io index intermittently timed out; Cargo's built-in retries eventually generated the locks, and the complete rc.2 CI exited 0. |
 | First Redis fork `cargo +1.94.0 test -p qubit-redis --all-features` | Failed because runtime-selection integration tests share process-global runtime state under single-process `cargo test`. The repository Makefile uses nextest process isolation; the complete `RUSTUP_TOOLCHAIN=1.94.0 make test` suite passed for rc.2. |
 
-Final `git diff --check`, all required verification commands, registry publication checks, branch synchronization, and cleanup completed successfully. The only unavailable check is the published-consumer lookup above, which depends on a separate release of the target provider crate.
+Final `git diff --check`, all required verification commands, registry publication checks, branch synchronization, and cleanup completed successfully. The temporary Docker socket ACL used for the final downstream integration test was revoked and verified absent. The only unavailable check is the published-consumer lookup above, which depends on a separate release of the target provider crate.
