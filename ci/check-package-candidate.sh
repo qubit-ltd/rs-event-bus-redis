@@ -53,6 +53,12 @@ with tarfile.open(archive, "r:gz") as crate:
 PY
 crate_root=$(find "$tmp_dir/unpacked" -mindepth 1 -maxdepth 1 -type d -print -quit)
 [[ -n "$crate_root" && -f "$crate_root/Cargo.toml" ]] || { echo 'normalized package manifest missing' >&2; exit 1; }
+crate_name=$(python3 - "$crate_root/Cargo.toml" <<'PY'
+import sys, tomllib
+with open(sys.argv[1], "rb") as manifest_file:
+    print(tomllib.load(manifest_file)["package"]["name"])
+PY
+)
 
 phase=manifest
 run manifest python3 "$repo_root/ci/package_candidate.py" check-manifest "$crate_root/Cargo.toml"
@@ -68,5 +74,10 @@ run check-no-default cargo +1.94.0 check --lib --no-default-features
 run check-sync-discovery cargo +1.94.0 check --lib --no-default-features --features sync,discovery --locked
 run check-async-discovery cargo +1.94.0 check --lib --no-default-features --features async,discovery --locked
 run check-default cargo +1.94.0 check --lib --locked
-run metadata cargo +1.94.0 metadata --format-version 1 --locked
-python3 "$repo_root/ci/package_candidate.py" check-metadata "$(basename "$crate_root")" < "$log_dir/metadata.log" > "$log_dir/metadata-validation.log" 2>&1 || { cat "$log_dir/metadata-validation.log" >&2; exit 1; }
+phase=metadata
+printf 'FIRST_CHECK phase=%s\n' "$phase"
+cargo +1.94.0 metadata --format-version 1 --locked >"$log_dir/metadata.log" 2>"$log_dir/metadata.stderr" || {
+  cat "$log_dir/metadata.stderr" >&2
+  exit 1
+}
+python3 "$repo_root/ci/package_candidate.py" check-metadata "$crate_name" < "$log_dir/metadata.log" > "$log_dir/metadata-validation.log" 2>&1 || { cat "$log_dir/metadata-validation.log" >&2; exit 1; }

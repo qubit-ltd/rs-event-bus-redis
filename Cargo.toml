@@ -39,14 +39,13 @@ thiserror = "^2.0"
 rustls = { version = "^0.23", default-features = false, features = ["ring", "std", "tls12"] }
 async-lock = { version = "^3", optional = true }
 redis = {
-  version = "=2.0.0-rc.1",
-  git = "https://github.com/qubit-ltd/redis-rs.git",
-  rev = "a668891e9fcfed32f8905c2fd729fa05c1732aa5",
+  package = "qubit-redis",
+  version = "=2.0.0-rc.2",
   default-features = false,
   features = ["streams", "sentinel", "tls-rustls-webpki-roots"]
 }
 
-qubit-event-bus = { version = "0.21", path = "../rs-event-bus" }
+qubit-event-bus = { version = "0.21" }
 qubit-spi = "0.14"
 qubit-id = { version = "0.7", default-features = false, features = ["uuid"] }
 
@@ -56,9 +55,8 @@ futures-channel = "^0.3"
 tempfile = "^3.27"
 tokio = { version = "^1.53", features = ["rt", "macros"] }
 redis = {
-  version = "=2.0.0-rc.1",
-  git = "https://github.com/qubit-ltd/redis-rs.git",
-  rev = "a668891e9fcfed32f8905c2fd729fa05c1732aa5",
+  package = "qubit-redis",
+  version = "=2.0.0-rc.2",
   default-features = false,
   features = ["tokio-rustls-comp", "streams", "sentinel", "tls-rustls-webpki-roots"]
 }
@@ -91,6 +89,3 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage)', 'cfg(loom)'] }
 name = "redis_workloads"
 harness = false
 required-features = ["sync", "async"]
-
-[patch.crates-io]
-qubit-event-bus = { path = "../rs-event-bus" }

@@ -82,7 +82,7 @@
         "conformance"
       ],
       "dependency": {
-        "name": "redis",
+        "name": "qubit-redis",
         "resolution": "latest"
       }
     },
@@ -97,7 +97,7 @@
         "conformance"
       ],
       "dependency": {
-        "name": "redis",
+        "name": "qubit-redis",
         "resolution": "latest"
       }
     },
@@ -108,7 +108,7 @@
       ],
       "allFeatures": true,
       "dependency": {
-        "name": "redis",
+        "name": "qubit-redis",
         "resolution": "latest"
       }
     }
