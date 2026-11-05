@@ -146,3 +146,15 @@ The registry-consumer helper was attempted twice for provider `0.7.0` and exited
 The planning documents were deleted from the target checkout only after the user's explicit `y` authorization. Their requested paths were `/data/working/qubit/rust-common/rs-event-bus-redis/doc/design-20261104T160908541Z-85e4ecfb.md` and `/data/working/qubit/rust-common/rs-event-bus-redis/doc/implementation-plan-20261104T160908541Z-85e4ecfb.md`; both are confirmed absent.
 
 Current RBR status: RBR-001's dependency/package-candidate blocker is resolved by publishing the compatible core and Redis dependencies and passing the normalized package validation. RBR-003's accepted implementation and CI/coverage requirements are green. RBR-004, RBR-005, and RBR-006 were implemented within their selected scope; the registry consumer itself remains pre-publication-only because the target provider release was outside this task's publishing authorization.
+
+## Downstream rs-task follow-up
+
+After the provider worktree was fast-forwarded into its original `dev-starfish` checkout, the `rs-task` dependency was updated to exact `qubit-redis 2.0.0-rc.2`. Its lockfile now resolves `qubit-event-bus-redis` through the provider's registry dependency and contains no old Git-sourced `redis` package identity.
+
+| Command | Result |
+| --- | --- |
+| `cargo +1.94.0 check --all-targets --features event-bus,sqlite` | exit 0; lock refresh selected qubit-redis rc.2 |
+| `cargo +1.94.0 check --locked --all-targets --features event-bus,sqlite` | exit 0 |
+| `cargo +1.94.0 tree -d --features event-bus,sqlite --locked` | exit 0; one qubit-redis registry identity, no duplicate Redis driver |
+
+The downstream change is committed separately as `2dceec2 build: pin released Redis driver rc.2` and will be fast-forward integrated and synchronized on its existing branches.
