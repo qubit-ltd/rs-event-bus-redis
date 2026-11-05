@@ -15,12 +15,20 @@ use serde::de::Visitor;
 use super::string_seed::StringSeed;
 
 /// Collects a string after checking its decoded byte length.
+///
+/// The visitor records an over-limit result in the seed's shared marker before
+/// returning a deserialization error, allowing the caller to classify it.
+///
+/// # Type Parameters
+///
+/// - `'a`: Lifetime of the seed's shared overflow flag.
 pub(super) struct StringVisitor<'a>(
     /// Seed containing the configured limit and overflow flag.
     pub(super) StringSeed<'a>,
 );
 
 impl<'de> Visitor<'de> for StringVisitor<'_> {
+    /// The decoded owned string.
     type Value = String;
 
     /// Describes the expected bounded string input.

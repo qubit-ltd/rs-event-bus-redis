@@ -32,6 +32,7 @@ mod discovery;
 pub mod error;
 /// Shared existing-group start-position policy.
 #[cfg(any(feature = "sync", feature = "async"))]
+#[path = "existing_group_start_policy.rs"]
 mod existing_group_start;
 /// Shared private receiver, recovery, and wire-decision state.
 #[cfg(any(feature = "sync", feature = "async"))]

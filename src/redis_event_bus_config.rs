@@ -716,6 +716,10 @@ impl RedisEventBusConfig {
     }
 
     /// Returns the maximum serialized headers JSON size in bytes.
+    ///
+    /// # Returns
+    ///
+    /// The configured inclusive maximum in bytes.
     pub const fn max_headers_bytes(&self) -> usize {
         self.max_headers_bytes
     }
@@ -938,6 +942,19 @@ fn validate_url(connection_url: &str) -> Result<bool, RedisProviderError> {
 }
 
 /// Parses a strict lowercase boolean provider option.
+///
+/// # Parameters
+///
+/// - `options`: Provider settings containing the boolean option.
+/// - `key`: Name of the option to parse.
+///
+/// # Returns
+///
+/// The parsed boolean value.
+///
+/// # Errors
+///
+/// Returns a configuration error when the option is not a lowercase boolean.
 fn parse_bool_option(options: &ProviderOptions, key: &str) -> Result<bool, RedisProviderError> {
     match options.get(key).map(String::as_str) {
         None | Some("false") => Ok(false),

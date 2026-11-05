@@ -20,17 +20,27 @@ use super::skip::Skip;
 use super::string_seed::StringSeed;
 use crate::wire_fields::WireFields;
 
-/// Validates required/duplicate fields and constructs the version-one record.
+/// Validates required and duplicate fields while constructing the version-one
+/// record directly from the deserializer.
+///
+/// The visitor shares the configured field limits and records limit failures
+/// for the caller; it does not build an intermediate JSON tree.
+///
+/// # Type Parameters
+///
+/// - `'a`: Lifetime of the limits seed and its shared rejection marker.
 pub(super) struct FieldsVisitor<'a>(
     /// Decoder limits and the shared exceeded flag.
     pub(super) FieldsSeed<'a>,
 );
 impl<'de> Visitor<'de> for FieldsVisitor<'_> {
+    /// The decoded version-one wire record.
     type Value = WireFields;
     /// Describes the supported version-one field layout.
     ///
     /// # Parameters
     ///
+    /// - `self`: Visitor describing the wire field map.
     /// - `f`: Formatter receiving the expected-layout description.
     ///
     /// # Returns
@@ -53,6 +63,7 @@ impl<'de> Visitor<'de> for FieldsVisitor<'_> {
     ///
     /// # Parameters
     ///
+    /// - `self`: Visitor carrying field limits and rejection state.
     /// - `map`: Top-level object map containing wire fields.
     ///
     /// # Returns

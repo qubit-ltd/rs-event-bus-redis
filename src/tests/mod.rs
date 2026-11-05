@@ -18,7 +18,6 @@ mod internal;
 #[cfg(all(feature = "sync", feature = "async"))]
 mod provider_tests;
 mod redis_event_bus_config_tests;
-mod redis_provider_error_tests;
 mod stream_protocol_tests;
 /// Shared fixtures for crate-private Redis contract tests.
 pub(crate) mod support;

@@ -140,6 +140,11 @@ impl SentinelResolver {
     /// Opens bounded sync Sentinel/setup/ROLE connections; never pools the
     /// target.
     ///
+    /// # Parameters
+    ///
+    /// - `max_response_bytes`: Optional response-size cap for the target
+    ///   socket.
+    ///
     /// # Returns
     ///
     /// A master socket after probing each configured endpoint at most once.
@@ -181,6 +186,11 @@ impl SentinelResolver {
     }
     /// Uses the host executor for bounded Sentinel/setup/ROLE probes, one per
     /// node.
+    ///
+    /// # Parameters
+    ///
+    /// - `max_response_bytes`: Optional response-size cap for the target
+    ///   socket.
     ///
     /// # Returns
     ///

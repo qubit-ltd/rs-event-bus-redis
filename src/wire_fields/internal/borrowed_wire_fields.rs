@@ -19,7 +19,7 @@ use serde::Serialize;
 /// - `'a`: Shared lifetime of the outbound metadata, encoded bytes, and bounded
 ///   header JSON.
 #[derive(Serialize)]
-pub(super) struct BorrowedWireFields<'a> {
+pub(in crate::wire_fields) struct BorrowedWireFields<'a> {
     /// Fixed supported protocol version.
     version: u32,
     /// Caller-owned stable event identifier.
@@ -60,7 +60,7 @@ impl<'a> BorrowedWireFields<'a> {
     /// allocation, Redis command, or other external I/O is performed.
     #[must_use]
     #[inline]
-    pub(super) fn new(
+    pub(in crate::wire_fields) fn new(
         message: &'a OutboundMessage,
         payload: &'a EncodedPayload,
         headers_json: &'a str,
@@ -80,5 +80,4 @@ impl<'a> BorrowedWireFields<'a> {
 }
 
 #[cfg(test)]
-#[path = "../../tests/wire_fields/internal/borrowed_wire_fields_tests.rs"]
-mod tests;
+mod borrowed_wire_fields_tests;

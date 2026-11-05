@@ -15,14 +15,20 @@ use serde::de::Visitor;
 
 use super::skip::Skip;
 
-/// Reads the version field while recursively validating unknown JSON members.
+/// Reads the single version field while recursively validating unknown JSON
+/// members.
+///
+/// The visitor rejects duplicate or missing versions and consumes unknown
+/// values through the bounded recursion-aware discard visitor.
 pub(super) struct VersionVisitor;
 impl<'de> Visitor<'de> for VersionVisitor {
+    /// The numeric version extracted from the wire object.
     type Value = u64;
     /// Requires the versioned top-level object.
     ///
     /// # Parameters
     ///
+    /// - `self`: Visitor requiring a versioned object.
     /// - `f`: Formatter receiving the required input description.
     ///
     /// # Returns
@@ -45,6 +51,7 @@ impl<'de> Visitor<'de> for VersionVisitor {
     ///
     /// # Parameters
     ///
+    /// - `self`: Visitor extracting the wire version.
     /// - `map`: Top-level object map to inspect.
     ///
     /// # Returns

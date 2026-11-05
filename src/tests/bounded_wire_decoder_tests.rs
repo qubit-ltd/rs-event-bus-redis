@@ -12,7 +12,7 @@ use crate::error::RedisProviderError;
 use crate::wire_limits::WireLimits;
 
 #[test]
-fn skipping_future_layout_keeps_json_recursion_guard() {
+fn test_skipping_future_layout_keeps_json_recursion_guard() {
     let limits = WireLimits {
         wire: 4096,
         payload: 1,
@@ -31,7 +31,7 @@ fn skipping_future_layout_keeps_json_recursion_guard() {
 }
 
 #[test]
-fn bounded_decoder_rejects_oversize_headers_before_inner_json_validation() {
+fn test_bounded_decoder_rejects_oversize_headers_before_inner_json_validation() {
     let wire = br#"{"version":1,"event_id":"event","timestamp_ms":0,"headers_json":"not JSON","content_type":"text/plain","payload":[]}"#;
     assert!(matches!(
         decode(
@@ -47,7 +47,7 @@ fn bounded_decoder_rejects_oversize_headers_before_inner_json_validation() {
 }
 
 #[test]
-fn bounded_decoder_preserves_exact_lengths_and_rejects_each_limit_plus_one() {
+fn test_bounded_decoder_preserves_exact_lengths_and_rejects_each_limit_plus_one() {
     let wire = br#"{"version":1,"event_id":"event","timestamp_ms":0,"headers_json":"{}","content_type":"text/plain","payload":[0,255]}"#;
     let fields = decode(
         wire,
@@ -82,7 +82,7 @@ fn bounded_decoder_preserves_exact_lengths_and_rejects_each_limit_plus_one() {
 }
 
 #[test]
-fn duplicate_version_and_invalid_bytes_are_malformed() {
+fn test_duplicate_version_and_invalid_bytes_are_malformed() {
     let limits = WireLimits {
         wire: 4096,
         payload: 2,
@@ -114,7 +114,7 @@ fn duplicate_version_and_invalid_bytes_are_malformed() {
 }
 
 #[test]
-fn mixed_extension_fields_preserve_version_one_transport_fields() {
+fn test_mixed_extension_fields_preserve_version_one_transport_fields() {
     let wire = br#"{"extension":{"enabled":true,"offset":-7,"ratio":1.25,"nested":[false,null,{"label":"future metadata"}]},"version":1,"event_id":"event","timestamp_ms":17,"headers_json":"{}","content_type":"text/plain","payload":[0,255]}"#;
     let fields = decode(
         wire,
@@ -136,7 +136,7 @@ fn mixed_extension_fields_preserve_version_one_transport_fields() {
 }
 
 #[test]
-fn valid_future_layout_is_unsupported_without_applying_version_one_field_types() {
+fn test_valid_future_layout_is_unsupported_without_applying_version_one_field_types() {
     let wire = br#"{"payload":{"compressed":true,"offset":-7,"ratio":1.25,"blocks":[null,{"bytes":"future representation"}]},"headers_json":{"future":false},"version":2}"#;
     assert!(matches!(
         decode(
@@ -152,7 +152,7 @@ fn valid_future_layout_is_unsupported_without_applying_version_one_field_types()
 }
 
 #[test]
-fn incomplete_version_one_records_are_malformed_instead_of_defaulted() {
+fn test_incomplete_version_one_records_are_malformed_instead_of_defaulted() {
     let complete = r#"{"version":1,"event_id":"event","timestamp_ms":0,"headers_json":"{}","content_type":"text/plain","payload":[0,255]}"#;
     for missing in [
         "version",
@@ -183,7 +183,7 @@ fn incomplete_version_one_records_are_malformed_instead_of_defaulted() {
 }
 
 #[test]
-fn wrong_json_types_and_trailing_values_are_malformed() {
+fn test_wrong_json_types_and_trailing_values_are_malformed() {
     let limits = WireLimits {
         wire: 4096,
         payload: 2,

@@ -17,7 +17,7 @@ use serde_json::to_writer;
 use crate::error::RedisProviderError;
 
 /// Accumulates at most `limit` JSON bytes without performing external I/O.
-pub(super) struct BoundedWriter {
+pub(in crate::wire_fields) struct BoundedWriter {
     /// Serialized bytes accepted so far.
     bytes: Vec<u8>,
     /// Inclusive serialized byte budget.
@@ -38,7 +38,7 @@ impl BoundedWriter {
     /// An empty in-memory sink that allocates no payload storage yet.
     #[must_use]
     #[inline]
-    pub(super) fn new(limit: usize) -> Self {
+    pub(in crate::wire_fields) fn new(limit: usize) -> Self {
         Self {
             bytes: Vec::new(),
             limit,
@@ -64,7 +64,10 @@ impl BoundedWriter {
     ///
     /// Returns `WireTooLarge` for a rejected write and a stable operation error
     /// for another serializer failure. The partial output is discarded.
-    pub(super) fn serialize<T: Serialize + ?Sized>(mut self, value: &T) -> Result<String, RedisProviderError> {
+    pub(in crate::wire_fields) fn serialize<T: Serialize + ?Sized>(
+        mut self,
+        value: &T,
+    ) -> Result<String, RedisProviderError> {
         if to_writer(&mut self, value).is_err() {
             return Err(if self.exceeded {
                 RedisProviderError::WireTooLarge
@@ -113,5 +116,4 @@ impl Write for BoundedWriter {
 }
 
 #[cfg(test)]
-#[path = "../../tests/wire_fields/internal/bounded_writer_tests.rs"]
-mod tests;
+mod bounded_writer_tests;

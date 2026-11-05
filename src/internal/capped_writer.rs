@@ -27,6 +27,19 @@ struct CappedWriter {
 impl Write for CappedWriter {
     /// Appends a complete chunk or rejects it without allocating beyond the
     /// cap.
+    ///
+    /// # Parameters
+    ///
+    /// - `self`: In-memory writer enforcing the configured output cap.
+    /// - `bytes`: Complete output chunk to append.
+    ///
+    /// # Returns
+    ///
+    /// The number of bytes appended when the full chunk fits.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error without appending when the chunk exceeds the cap.
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         if bytes.len() > self.limit.saturating_sub(self.bytes.len()) {
             self.exceeded = true;
@@ -44,6 +57,10 @@ impl Write for CappedWriter {
 }
 
 /// Serializes `value` without constructing output larger than `limit`.
+///
+/// # Type Parameters
+///
+/// - `T`: Serializable value encoded as JSON.
 ///
 /// # Parameters
 ///

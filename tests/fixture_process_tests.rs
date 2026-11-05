@@ -35,7 +35,7 @@ const CHILD_MODE: &str = "QUBIT_FIXTURE_PROCESS_CHILD";
 // The grandchild modes intentionally let descendants outlive their leader so
 // the watchdog's process-group cleanup can be observed by the parent test.
 #[allow(clippy::zombie_processes)]
-fn child_process_entrypoint() {
+fn test_child_process_entrypoint() {
     match std::env::var(CHILD_MODE).as_deref() {
         Ok("success") => {
             println!("child stdout marker");
@@ -58,7 +58,7 @@ fn child_process_entrypoint() {
         Ok("grandchild") => {
             let mut command = Command::new(std::env::current_exe().unwrap());
             command
-                .args(["--exact", "child_process_entrypoint", "--nocapture"])
+                .args(["--exact", "test_child_process_entrypoint", "--nocapture"])
                 .env(CHILD_MODE, "hang")
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
@@ -72,7 +72,7 @@ fn child_process_entrypoint() {
         Ok("grandchild-success" | "grandchild-failure") => {
             let mut command = Command::new(std::env::current_exe().unwrap());
             command
-                .args(["--exact", "child_process_entrypoint", "--nocapture"])
+                .args(["--exact", "test_child_process_entrypoint", "--nocapture"])
                 .env(CHILD_MODE, "hang")
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
@@ -91,14 +91,14 @@ fn child_process_entrypoint() {
 fn child_command(mode: &str) -> Command {
     let mut command = Command::new(std::env::current_exe().unwrap());
     command
-        .args(["--exact", "child_process_entrypoint", "--nocapture"])
+        .args(["--exact", "test_child_process_entrypoint", "--nocapture"])
         .env(CHILD_MODE, mode);
     command
 }
 
 #[test]
 #[cfg(target_os = "linux")]
-fn returns_success_stdout_and_logs_both_streams() -> Result<(), Box<dyn Error>> {
+fn test_returns_success_stdout_and_logs_both_streams() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let output = run_logged(
         &mut child_command("success"),
@@ -113,7 +113,7 @@ fn returns_success_stdout_and_logs_both_streams() -> Result<(), Box<dyn Error>> 
 
 #[test]
 #[cfg(target_os = "linux")]
-fn nonzero_exit_returns_error_with_stderr_in_log() -> Result<(), Box<dyn Error>> {
+fn test_nonzero_exit_returns_error_with_stderr_in_log() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let log = temp.path().join("failure.log");
     let error = run_logged(&mut child_command("failure"), &log, Duration::from_secs(5)).unwrap_err();
@@ -124,7 +124,7 @@ fn nonzero_exit_returns_error_with_stderr_in_log() -> Result<(), Box<dyn Error>>
 
 #[test]
 #[cfg(target_os = "linux")]
-fn hanging_process_times_out_and_is_reaped() -> Result<(), Box<dyn Error>> {
+fn test_hanging_process_times_out_and_is_reaped() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let log = temp.path().join("hang.log");
     let started = Instant::now();
@@ -137,7 +137,7 @@ fn hanging_process_times_out_and_is_reaped() -> Result<(), Box<dyn Error>> {
 
 #[test]
 #[cfg(target_os = "linux")]
-fn maximum_timeout_returns_error_without_spawning() -> Result<(), Box<dyn Error>> {
+fn test_maximum_timeout_returns_error_without_spawning() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let marker = temp.path().join("spawned");
     let mut command = child_command("mark");
@@ -150,7 +150,7 @@ fn maximum_timeout_returns_error_without_spawning() -> Result<(), Box<dyn Error>
 
 #[cfg(not(target_os = "linux"))]
 #[test]
-fn unsupported_platform_returns_error_without_spawning() -> Result<(), Box<dyn Error>> {
+fn test_unsupported_platform_returns_error_without_spawning() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let marker = temp.path().join("spawned");
     let mut command = child_command("mark");
@@ -172,7 +172,7 @@ fn unsupported_platform_returns_error_without_spawning() -> Result<(), Box<dyn E
 
 #[test]
 #[cfg(target_os = "linux")]
-fn poll_error_reaps_running_child_and_logs_its_path() -> Result<(), Box<dyn Error>> {
+fn test_poll_error_reaps_running_child_and_logs_its_path() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let log = temp.path().join("poll-error.log");
     let stdout_log = temp.path().join("poll-error.log.stdout.log");
@@ -210,7 +210,7 @@ fn poll_error_reaps_running_child_and_logs_its_path() -> Result<(), Box<dyn Erro
 
 #[cfg(target_os = "linux")]
 #[test]
-fn timeout_reclaims_child_process_group() -> Result<(), Box<dyn Error>> {
+fn test_timeout_reclaims_child_process_group() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let log = temp.path().join("tree.log");
     let started = Instant::now();
@@ -234,7 +234,7 @@ fn timeout_reclaims_child_process_group() -> Result<(), Box<dyn Error>> {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn successful_leader_reclaims_its_process_group() -> Result<(), Box<dyn Error>> {
+fn test_successful_leader_reclaims_its_process_group() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let log = temp.path().join("leader-success.log");
     let output = run_logged(&mut child_command("grandchild-success"), &log, Duration::from_secs(5))?;
@@ -249,7 +249,7 @@ fn successful_leader_reclaims_its_process_group() -> Result<(), Box<dyn Error>> 
 
 #[cfg(target_os = "linux")]
 #[test]
-fn failing_leader_reclaims_its_process_group() -> Result<(), Box<dyn Error>> {
+fn test_failing_leader_reclaims_its_process_group() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let log = temp.path().join("leader-failure.log");
     let error = run_logged(&mut child_command("grandchild-failure"), &log, Duration::from_secs(5)).unwrap_err();
@@ -277,7 +277,7 @@ fn assert_process_stops(pid: i32) {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn timeout_kills_only_its_own_process_group() -> Result<(), Box<dyn Error>> {
+fn test_timeout_kills_only_its_own_process_group() -> Result<(), Box<dyn Error>> {
     use std::os::unix::process::CommandExt;
 
     let mut unrelated_command = child_command("hang");

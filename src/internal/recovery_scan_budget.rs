@@ -124,14 +124,22 @@ impl RecoveryScanBudget {
 
     /// Restores a subscription's next recovery deadline for this receive.
     ///
-    /// `next` is a monotonic instant saved only after a complete prior round.
+    /// # Parameters
+    ///
+    /// - `next`: Monotonic instant saved only after a complete prior round.
     pub(crate) fn schedule_recovery_at(&mut self, next: Instant) {
         self.next_recovery = next;
     }
 
     /// Schedules the next scan after a complete claim and pending round.
     ///
-    /// Returns the new deadline for persistence in the subscription. An
+    /// # Parameters
+    ///
+    /// - `now`: Completion instant of the fully completed recovery round.
+    ///
+    /// # Returns
+    ///
+    /// The new deadline for persistence in the subscription. An
     /// overflowing instant remains due immediately rather than losing recovery.
     pub(crate) fn schedule_after_completed_round(&mut self, now: Instant) -> Instant {
         self.next_recovery = now.checked_add(self.recovery_interval).unwrap_or(now);

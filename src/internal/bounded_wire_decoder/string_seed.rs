@@ -15,6 +15,10 @@ use serde::de::DeserializeSeed;
 use super::string_visitor::StringVisitor;
 
 /// Deserializes a string while enforcing its byte limit.
+///
+/// # Type Parameters
+///
+/// - `'a`: Lifetime of the shared overflow flag borrowed during decoding.
 pub(super) struct StringSeed<'a> {
     /// Maximum decoded UTF-8 byte length.
     pub(super) limit: usize,
@@ -23,6 +27,7 @@ pub(super) struct StringSeed<'a> {
 }
 
 impl<'de> DeserializeSeed<'de> for StringSeed<'_> {
+    /// The decoded owned string.
     type Value = String;
 
     /// Decodes a JSON string through the bounded string visitor.

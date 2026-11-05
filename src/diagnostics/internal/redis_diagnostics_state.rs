@@ -58,6 +58,12 @@ impl RedisDiagnosticsState {
     /// Registers a new instance without keeping it alive in the directory.
     ///
     /// Returns a creation error if the process-wide ID space is exhausted.
+    ///
+    /// # Parameters
+    ///
+    /// - `mode`: Adapter mode represented by this state.
+    /// - `namespace`: Validated namespace associated with the provider.
+    /// - `budget`: Shared admission counters sampled by diagnostics.
     pub(crate) fn register(
         mode: RedisProviderMode,
         namespace: &str,
@@ -104,6 +110,10 @@ impl RedisDiagnosticsState {
 
     /// Saturatingly increments one monotonic counter without taking the
     /// directory lock.
+    ///
+    /// # Parameters
+    ///
+    /// - `field`: Counter to increment.
     pub(crate) fn increment(&self, field: RedisDiagnosticCounter) {
         let counter = match field {
             RedisDiagnosticCounter::CommandRejections => &self.command_rejections,

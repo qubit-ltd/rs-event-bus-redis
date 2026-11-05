@@ -13,6 +13,7 @@ mod command;
 mod decode;
 #[path = "internal/decode_failure.rs"]
 mod decode_failure;
+mod pending_entry;
 #[path = "internal/poison_outcome.rs"]
 mod poison_outcome;
 #[path = "internal/poison_reason.rs"]
@@ -21,6 +22,7 @@ mod receive_action;
 mod receive_driver;
 mod receive_reply;
 mod receive_stage;
+mod recovery_guard;
 #[path = "internal/recovery_scan_budget.rs"]
 pub(crate) mod recovery_scan_budget;
 #[path = "internal/recovery_scan_stage.rs"]
@@ -35,16 +37,17 @@ mod settlement_state;
 pub(crate) use command::read_group_command;
 pub(crate) use decode::decode_entry;
 pub(crate) use decode_failure::DecodeFailure;
+pub(crate) use pending_entry::PendingEntry;
 pub(crate) use poison_outcome::PoisonOutcome;
 pub(crate) use poison_reason::PoisonReason;
 pub(crate) use receive_action::ReceiveAction;
 pub(crate) use receive_driver::ReceiveDriver;
 pub(crate) use receive_reply::ReceiveReply;
+pub(crate) use recovery_guard::RecoveryGuard;
 #[cfg(test)]
 pub(crate) use recovery_scan_budget::RecoveryScanBudget;
 #[cfg(test)]
 pub(crate) use recovery_scan_stage::RecoveryScanStage;
-pub(crate) use recovery_state::RecoveryGuard;
 pub(crate) use recovery_state::RecoveryState;
 pub(crate) use settlement_action::SettlementAction;
 pub(crate) use settlement_state::SettlementState;

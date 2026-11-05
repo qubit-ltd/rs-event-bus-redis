@@ -41,7 +41,7 @@ fn message(bytes: usize) -> OutboundMessage {
 }
 
 #[test]
-fn positive_wire_options_are_supported() {
+fn test_positive_wire_options_are_supported() {
     let options: ProviderOptions = [
         ("redis.max_wire_bytes".into(), "1024".into()),
         ("redis.max_payload_bytes".into(), "128".into()),
@@ -64,7 +64,7 @@ fn positive_wire_options_are_supported() {
 }
 
 #[test]
-fn public_wire_constructor_copies_payload_without_provider_limits() {
+fn test_public_wire_constructor_copies_payload_without_provider_limits() {
     assert_eq!(
         WireFields::from_outbound(&message(1_048_577)).unwrap().payload.len(),
         1_048_577
@@ -76,7 +76,7 @@ fn public_wire_constructor_copies_payload_without_provider_limits() {
 }
 
 #[test]
-fn invalid_wire_options_are_secret_safe() {
+fn test_invalid_wire_options_are_secret_safe() {
     for key in [
         "redis.max_wire_bytes",
         "redis.max_payload_bytes",
@@ -207,7 +207,7 @@ mod durable {
     }
 
     #[test]
-    fn scripted_oversized_receive_frame_stops_the_subscription() {
+    fn test_scripted_oversized_receive_frame_stops_the_subscription() {
         let namespace = "scripted-response-limit";
         let stream = stream_key(namespace, "limits");
         let server = ScriptedRedis::start(vec![
@@ -230,7 +230,7 @@ mod durable {
     }
 
     #[test]
-    fn oversized_receive_releases_admission_once() {
+    fn test_oversized_receive_releases_admission_once() {
         let namespace = "scripted-response-limit-admission";
         let stream = stream_key(namespace, "limits");
         let server = ScriptedRedis::start(vec![
@@ -264,7 +264,7 @@ mod durable {
     }
 
     #[test]
-    fn real_oversized_receive_frame_keeps_record_pending_for_recovery() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_real_oversized_receive_frame_keeps_record_pending_for_recovery() -> Result<(), Box<dyn std::error::Error>> {
         let server = RedisServer::start()?;
         let mut observer = redis::Client::open(server.url())?.get_connection()?;
         let namespace = "real-response-limit";
@@ -313,7 +313,7 @@ mod durable {
     }
 
     #[test]
-    fn receive_limits_preserve_pending_entries_and_allow_recovery() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_receive_limits_preserve_pending_entries_and_allow_recovery() -> Result<(), Box<dyn std::error::Error>> {
         let server = RedisServer::start()?;
         let mut observer = redis::Client::open(server.url())?.get_connection()?;
         for (index, key) in [
@@ -375,7 +375,8 @@ mod durable {
         Ok(())
     }
     #[test]
-    fn future_version_is_preserved_while_malformed_wire_is_quarantined() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_future_version_is_preserved_while_malformed_wire_is_quarantined() -> Result<(), Box<dyn std::error::Error>>
+    {
         let server = RedisServer::start()?;
         let mut observer = redis::Client::open(server.url())?.get_connection()?;
         for (namespace, wire, future) in [
@@ -438,7 +439,7 @@ mod durable {
     }
 
     #[test]
-    fn direct_spi_publish_checks_all_components_before_xadd() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_direct_spi_publish_checks_all_components_before_xadd() -> Result<(), Box<dyn std::error::Error>> {
         use qubit_event_bus::model::PublishEffect;
 
         use crate::support::scripted_redis::ScriptedRedis;
@@ -508,7 +509,8 @@ mod durable {
     }
 
     #[test]
-    fn real_core_codec_failures_leave_redis_durable_record_recoverable() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_real_core_codec_failures_leave_redis_durable_record_recoverable() -> Result<(), Box<dyn std::error::Error>>
+    {
         use qubit_event_bus::EventBus;
         use qubit_event_bus::codec::CodecRegistry;
         use qubit_event_bus::facade::EventBusFacadeConfig;
@@ -583,7 +585,7 @@ mod durable {
 
     #[cfg(feature = "async")]
     #[test]
-    fn async_receive_limits_preserve_pending_entries_and_recover() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_async_receive_limits_preserve_pending_entries_and_recover() -> Result<(), Box<dyn std::error::Error>> {
         use qubit_event_bus_redis::r#async::AsyncRedisEventBusProvider;
         use qubit_spi::AsyncServiceProvider;
         let server = RedisServer::start()?;
@@ -668,7 +670,7 @@ mod durable {
     }
 
     #[test]
-    fn direct_spi_publish_accepts_exact_custom_component_limits() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_direct_spi_publish_accepts_exact_custom_component_limits() -> Result<(), Box<dyn std::error::Error>> {
         use crate::support::scripted_redis::ScriptedRedis;
         use crate::support::scripted_redis::Step;
         for (index, key) in [
@@ -745,7 +747,7 @@ mod async_response_limit {
     }
 
     #[test]
-    fn scripted_oversized_async_receive_frame_stops_the_subscription() {
+    fn test_scripted_oversized_async_receive_frame_stops_the_subscription() {
         block_on(async {
             let namespace = "scripted-async-response-limit";
             let stream = format!("{namespace}:limits");
@@ -785,7 +787,7 @@ mod async_response_limit {
     }
 
     #[test]
-    fn oversized_async_receive_releases_admission_once() {
+    fn test_oversized_async_receive_releases_admission_once() {
         block_on(async {
             let namespace = "scripted-async-response-limit-admission";
             let stream = format!("{namespace}:limits");

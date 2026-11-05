@@ -34,6 +34,14 @@ impl Default for WireLimits {
 
 impl WireLimits {
     /// Copies the validated byte budgets from provider configuration.
+    ///
+    /// # Parameters
+    ///
+    /// - `config`: Validated provider configuration supplying each byte cap.
+    ///
+    /// # Returns
+    ///
+    /// The wire, payload, and header limits copied from `config`.
     #[must_use]
     pub(crate) fn from_config(config: &RedisEventBusConfig) -> Self {
         Self {
@@ -44,6 +52,18 @@ impl WireLimits {
     }
 
     /// Checks one inclusive wire byte budget.
+    ///
+    /// # Parameters
+    ///
+    /// - `actual`: Number of encoded wire bytes to check.
+    ///
+    /// # Returns
+    ///
+    /// Success when `actual` is within the configured wire limit.
+    ///
+    /// # Errors
+    ///
+    /// Returns `WireTooLarge` when `actual` exceeds the wire limit.
     pub(crate) fn check_wire(self, actual: usize) -> Result<(), RedisProviderError> {
         if actual > self.wire {
             Err(RedisProviderError::WireTooLarge)
@@ -53,6 +73,18 @@ impl WireLimits {
     }
 
     /// Checks one inclusive payload byte budget.
+    ///
+    /// # Parameters
+    ///
+    /// - `actual`: Number of decoded payload bytes to check.
+    ///
+    /// # Returns
+    ///
+    /// Success when `actual` is within the configured payload limit.
+    ///
+    /// # Errors
+    ///
+    /// Returns `PayloadTooLarge` when `actual` exceeds the payload limit.
     pub(crate) fn check_payload(self, actual: usize) -> Result<(), RedisProviderError> {
         if actual > self.payload {
             Err(RedisProviderError::PayloadTooLarge)

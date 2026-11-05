@@ -24,6 +24,14 @@ pub(crate) enum ExistingGroupStartPolicy {
 }
 
 /// Returns a non-retryable option error tied to the subscription topic.
+///
+/// # Parameters
+///
+/// - `request`: Subscription request whose topic identifies the resource.
+///
+/// # Returns
+///
+/// A sanitized invalid-option error for this subscription.
 fn option_error(request: &SpiSubscriptionRequest) -> SpiError {
     SpiError::Operation {
         provider_id: "redis-streams".into(),
@@ -39,6 +47,18 @@ fn option_error(request: &SpiSubscriptionRequest) -> SpiError {
 ///
 /// Returns an `invalid_subscription_option` error for an unsupported policy
 /// value or any other `redis.*` subscription key.
+///
+/// # Parameters
+///
+/// - `request`: Subscription request containing provider options.
+///
+/// # Returns
+///
+/// The selected policy, defaulting to rejection of explicit positions.
+///
+/// # Errors
+///
+/// Returns a non-retryable option error for unsupported provider options.
 pub(crate) fn parse_existing_group_policy(
     request: &SpiSubscriptionRequest,
 ) -> Result<ExistingGroupStartPolicy, SpiError> {
@@ -61,6 +81,15 @@ pub(crate) fn parse_existing_group_policy(
 /// `New` always resumes the existing cursor. Explicit positions need the
 /// `Resume` policy; otherwise this returns a non-retryable error because Redis
 /// cannot move an existing group's cursor with `XGROUP CREATE`.
+///
+/// # Parameters
+///
+/// - `request`: Subscription whose requested start position is checked.
+/// - `policy`: Existing-group cursor policy parsed from provider options.
+///
+/// # Errors
+///
+/// Returns a non-retryable error when Redis would ignore an explicit position.
 pub(crate) fn ensure_existing_group_start(
     request: &SpiSubscriptionRequest,
     policy: ExistingGroupStartPolicy,

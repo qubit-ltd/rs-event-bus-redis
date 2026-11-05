@@ -7,14 +7,7 @@
 // =============================================================================
 //! Versioned byte-safe Redis stream message fields.
 
-/// Serializes caller-owned metadata and payload without additional copies.
-#[cfg(any(feature = "sync", feature = "async"))]
-#[path = "wire_fields/internal/borrowed_wire_fields.rs"]
-mod borrowed_wire_fields;
-/// Rejects serializer writes before they exceed the configured wire budget.
-#[cfg(any(feature = "sync", feature = "async"))]
-#[path = "wire_fields/internal/bounded_writer.rs"]
-mod bounded_writer;
+mod internal;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -36,9 +29,9 @@ use serde_json::from_str;
 use serde_json::to_string;
 
 #[cfg(any(feature = "sync", feature = "async"))]
-use self::borrowed_wire_fields::BorrowedWireFields;
+use self::internal::BorrowedWireFields;
 #[cfg(any(feature = "sync", feature = "async"))]
-use self::bounded_writer::BoundedWriter;
+use self::internal::BoundedWriter;
 use crate::error::RedisProviderError;
 #[cfg(any(feature = "sync", feature = "async"))]
 use crate::internal::WireLimits;

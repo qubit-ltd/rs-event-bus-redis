@@ -14,7 +14,14 @@ use serde::de::DeserializeSeed;
 
 use super::payload_visitor::PayloadVisitor;
 
-/// Deserializes a byte array while enforcing its length limit.
+/// Deserializes a JSON byte array while enforcing its decoded length limit.
+///
+/// The shared marker lets the caller distinguish a size rejection from other
+/// deserializer errors without depending on diagnostic text.
+///
+/// # Type Parameters
+///
+/// - `'a`: Lifetime of the shared rejection marker used during decoding.
 pub(super) struct PayloadSeed<'a> {
     /// Maximum number of decoded bytes.
     pub(super) limit: usize,
@@ -23,6 +30,7 @@ pub(super) struct PayloadSeed<'a> {
 }
 
 impl<'de> DeserializeSeed<'de> for PayloadSeed<'_> {
+    /// The decoded payload bytes.
     type Value = Vec<u8>;
 
     /// Decodes a JSON sequence through the bounded payload visitor.

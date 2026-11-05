@@ -15,13 +15,21 @@ use serde::de::Visitor;
 
 use super::payload_seed::PayloadSeed;
 
-/// Collects bytes after checking the configured length limit.
+/// Collects JSON byte values while enforcing the configured length limit.
+///
+/// The visitor checks capacity before each append and marks the shared
+/// rejection flag when the decoded payload exceeds its byte budget.
+///
+/// # Type Parameters
+///
+/// - `'a`: Lifetime of the seed's shared rejection marker.
 pub(super) struct PayloadVisitor<'a>(
     /// Seed containing the configured limit and overflow flag.
     pub(super) PayloadSeed<'a>,
 );
 
 impl<'de> Visitor<'de> for PayloadVisitor<'_> {
+    /// The decoded payload bytes.
     type Value = Vec<u8>;
 
     /// Describes the expected bounded byte array input.

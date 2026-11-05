@@ -9,13 +9,8 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
+use super::command_lane::CommandLane;
 use super::resource_budget::ResourceBudget;
-/// Counter owned by a short-command permit.
-#[derive(Clone, Copy, Debug)]
-pub(super) enum CommandLane {
-    General,
-    ReservedSettlement,
-}
 /// Non-cloneable permit; cancellation releases admission, not Redis execution.
 #[must_use]
 pub(crate) struct CommandPermit {
@@ -27,6 +22,10 @@ pub(crate) struct CommandPermit {
 }
 impl Drop for CommandPermit {
     /// Releases exactly the slot acquired for this application operation.
+    ///
+    /// # Parameters
+    ///
+    /// - `self`: Permit whose reserved counter slot is released.
     #[inline]
     fn drop(&mut self) {
         match self.lane {

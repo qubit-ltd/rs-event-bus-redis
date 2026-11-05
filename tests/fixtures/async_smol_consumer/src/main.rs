@@ -67,20 +67,21 @@ async fn exercise() -> Result<(), Box<dyn Error>> {
         ))
         .await?;
     let payload: Arc<[u8]> = Arc::from(b"independent production features".as_slice());
-    let _ = bus.publish(OutboundMessage::new(
-        topic,
-        EventId::new("isolated-runtime-event")?,
-        SystemTime::now(),
-        Headers::new(),
-        None,
-        None,
-        TransportPayload::Encoded(EncodedPayload::new(
-            payload.clone(),
-            ContentType::new("text/plain")?,
+    let _ = bus
+        .publish(OutboundMessage::new(
+            topic,
+            EventId::new("isolated-runtime-event")?,
+            SystemTime::now(),
+            Headers::new(),
             None,
-        )),
-    ))
-    .await?;
+            None,
+            TransportPayload::Encoded(EncodedPayload::new(
+                payload.clone(),
+                ContentType::new("text/plain")?,
+                None,
+            )),
+        ))
+        .await?;
     let ReceiveOutcome::Message(received) = receiver.receive(Duration::from_secs(5)).await? else {
         return Err("provider did not deliver under the fixture executor".into());
     };

@@ -127,6 +127,15 @@ pub(crate) fn from_redis_error(operation: &'static str, error: &RedisError) -> R
 }
 
 /// Maps a server-supplied Redis error code to a stable provider category.
+///
+/// # Parameters
+///
+/// - `code`: Redis error code returned by the server.
+///
+/// # Returns
+///
+/// A stable category and retryability hint for recognized codes; otherwise
+/// `None`.
 #[inline]
 fn redis_error_code_class(code: &str) -> Option<(&'static str, Option<bool>)> {
     match code {
@@ -139,6 +148,5 @@ fn redis_error_code_class(code: &str) -> Option<(&'static str, Option<bool>)> {
     }
 }
 
-#[cfg(test)]
-#[path = "tests/redis_error_code_class_tests.rs"]
+#[cfg(all(test, any(feature = "sync", feature = "async")))]
 mod redis_error_code_class_tests;

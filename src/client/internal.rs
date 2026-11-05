@@ -12,6 +12,8 @@ mod async_command_connection;
 mod async_connection_cache;
 #[cfg(feature = "async")]
 mod cache_state;
+mod command_class;
+mod command_lane;
 mod command_permit;
 #[cfg(feature = "sync")]
 mod pooled_connection;
@@ -26,12 +28,12 @@ pub(super) mod tls;
 pub(crate) use async_command_connection::AsyncCommandConnection;
 #[cfg(feature = "async")]
 pub(crate) use async_connection_cache::AsyncConnectionCache;
+pub(crate) use command_class::CommandClass;
 #[cfg(test)]
 pub(crate) use command_permit::CommandPermit;
 #[cfg(feature = "sync")]
 pub(crate) use pooled_connection::PooledConnection;
 pub(crate) use receiver_permit::ReceiverPermit;
-pub(crate) use resource_budget::CommandClass;
 pub(crate) use resource_budget::ResourceBudget;
 pub(crate) use sentinel_resolver::SentinelResolver;
 #[cfg(feature = "sync")]

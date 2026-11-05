@@ -16,14 +16,19 @@ use serde::de::Visitor;
 
 use super::skip::Skip;
 
-/// Recursively consumes JSON values without retaining their contents.
+/// Recursively validates and consumes JSON values without retaining contents.
+///
+/// Nested arrays and objects are traversed through the deserializer, preserving
+/// its syntax and recursion checks without constructing an intermediate tree.
 pub(super) struct SkipVisitor;
 impl<'de> Visitor<'de> for SkipVisitor {
+    /// A zero-sized value marking successful consumption.
     type Value = Skip;
     /// Describes any valid JSON value accepted by this discard visitor.
     ///
     /// # Parameters
     ///
+    /// - `self`: Visitor describing accepted JSON values.
     /// - `f`: Formatter receiving the expected input description.
     ///
     /// # Returns
@@ -44,6 +49,7 @@ impl<'de> Visitor<'de> for SkipVisitor {
     ///
     /// # Parameters
     ///
+    /// - `self`: Visitor that discards the value.
     /// - `value`: Boolean value to discard.
     ///
     /// # Returns
@@ -65,6 +71,7 @@ impl<'de> Visitor<'de> for SkipVisitor {
     ///
     /// # Parameters
     ///
+    /// - `self`: Visitor that discards the value.
     /// - `value`: Signed integer to discard.
     ///
     /// # Returns
@@ -87,6 +94,7 @@ impl<'de> Visitor<'de> for SkipVisitor {
     ///
     /// # Parameters
     ///
+    /// - `self`: Visitor that discards the value.
     /// - `value`: Unsigned integer to discard.
     ///
     /// # Returns
@@ -108,6 +116,7 @@ impl<'de> Visitor<'de> for SkipVisitor {
     ///
     /// # Parameters
     ///
+    /// - `self`: Visitor that discards the value.
     /// - `value`: Floating point value to discard.
     ///
     /// # Returns
@@ -129,6 +138,7 @@ impl<'de> Visitor<'de> for SkipVisitor {
     ///
     /// # Parameters
     ///
+    /// - `self`: Visitor that discards the value.
     /// - `value`: Borrowed string to discard.
     ///
     /// # Returns
@@ -147,6 +157,10 @@ impl<'de> Visitor<'de> for SkipVisitor {
     /// # Type Parameters
     ///
     /// - `E`: Error type selected by the deserializer.
+    ///
+    /// # Parameters
+    ///
+    /// - `self`: Visitor that discards the null value.
     ///
     /// # Returns
     ///
@@ -168,6 +182,7 @@ impl<'de> Visitor<'de> for SkipVisitor {
     ///
     /// # Parameters
     ///
+    /// - `self`: Visitor that consumes each array element.
     /// - `seq`: Access to the array elements to consume.
     ///
     /// # Returns
@@ -191,6 +206,7 @@ impl<'de> Visitor<'de> for SkipVisitor {
     ///
     /// # Parameters
     ///
+    /// - `self`: Visitor that consumes each object value.
     /// - `map`: Access to the object keys and values to consume.
     ///
     /// # Returns

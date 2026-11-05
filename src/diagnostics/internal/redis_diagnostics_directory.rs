@@ -16,22 +16,35 @@ use super::RedisDiagnosticsState;
 
 /// Weak references to states registered by providers.
 pub(in crate::diagnostics) struct RedisDiagnosticsDirectory {
+    /// Weak handles retained only while their provider state is alive.
     entries: Vec<Weak<RedisDiagnosticsState>>,
 }
 
 impl RedisDiagnosticsDirectory {
     /// Creates an empty directory, primarily for isolated lifecycle checks.
+    ///
+    /// # Returns
+    ///
+    /// An empty directory with no registered provider states.
     fn new() -> Self {
         Self { entries: Vec::new() }
     }
 
     /// Drops expired entries before retaining the new state.
+    ///
+    /// # Parameters
+    ///
+    /// - `state`: Live diagnostics state to register weakly.
     pub(in crate::diagnostics) fn register(&mut self, state: &Arc<RedisDiagnosticsState>) {
         self.entries.retain(|entry| entry.strong_count() > 0);
         self.entries.push(Arc::downgrade(state));
     }
 
     /// Upgrades live states and removes entries that can no longer be upgraded.
+    ///
+    /// # Returns
+    ///
+    /// Strong references to states that remain alive.
     pub(in crate::diagnostics) fn live(&mut self) -> Vec<Arc<RedisDiagnosticsState>> {
         let mut live = Vec::new();
         self.entries.retain(|entry| {
@@ -47,6 +60,10 @@ impl RedisDiagnosticsDirectory {
 }
 
 /// Returns the lazily initialized process-wide directory.
+///
+/// # Returns
+///
+/// The shared directory protected by its process-wide mutex.
 pub(in crate::diagnostics) fn directory() -> &'static Mutex<RedisDiagnosticsDirectory> {
     static DIRECTORY: OnceLock<Mutex<RedisDiagnosticsDirectory>> = OnceLock::new();
     DIRECTORY.get_or_init(|| Mutex::new(RedisDiagnosticsDirectory::new()))
@@ -72,7 +89,7 @@ mod tests {
     }
 
     #[test]
-    fn registration_bounds_released_weak_entries_without_sampling() {
+    fn test_registration_bounds_released_weak_entries_without_sampling() {
         let mut directory = RedisDiagnosticsDirectory::new();
 
         for _ in 0..1_000 {
@@ -89,7 +106,7 @@ mod tests {
     }
 
     #[test]
-    fn registration_and_live_keep_only_states_that_remain_alive() {
+    fn test_registration_and_live_keep_only_states_that_remain_alive() {
         let mut directory = RedisDiagnosticsDirectory::new();
         let first = state("directory_first");
         let second = state("directory_second");

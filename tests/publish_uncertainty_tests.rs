@@ -196,13 +196,13 @@ fn message() -> OutboundMessage {
 }
 
 #[test]
-fn opening_connection_failure_has_no_admission() {
+fn test_opening_connection_failure_has_no_admission() {
     let error = bus("redis://127.0.0.1:1/").publish(message()).unwrap_err();
     assert_eq!(error.publish_effect(), PublishEffect::NotAccepted);
 }
 
 #[test]
-fn explicit_redis_rejection_has_no_admission() {
+fn test_explicit_redis_rejection_has_no_admission() {
     let server = ScriptedRedis::start(vec![Step::reply("XADD", b"-WRONGTYPE wrong kind\r\n")]).unwrap();
     let error = bus(server.url()).publish(message()).unwrap_err();
     assert_eq!(error.publish_effect(), PublishEffect::NotAccepted);
@@ -211,7 +211,7 @@ fn explicit_redis_rejection_has_no_admission() {
 }
 
 #[test]
-fn type_conversion_failure_after_query_is_uncertain() {
+fn test_type_conversion_failure_after_query_is_uncertain() {
     let server = ScriptedRedis::start(vec![Step::reply("XADD", b"*1\r\n:42\r\n")]).unwrap();
     let error = bus(server.url()).publish(message()).unwrap_err();
     assert_eq!(error.publish_effect(), PublishEffect::MayHaveBeenAccepted);
@@ -220,7 +220,7 @@ fn type_conversion_failure_after_query_is_uncertain() {
 }
 
 #[test]
-fn query_disconnect_is_uncertain() {
+fn test_query_disconnect_is_uncertain() {
     let server = ScriptedRedis::start(vec![Step::disconnect("XADD", false)]).unwrap();
     let error = bus(server.url()).publish(message()).unwrap_err();
     assert_eq!(error.publish_effect(), PublishEffect::MayHaveBeenAccepted);
@@ -452,18 +452,18 @@ fn applied_xadd_reply_loss(policy: DuplicateRiskPolicy) -> Result<(), Box<dyn st
 }
 
 #[test]
-fn applied_xadd_lost_reply_forbid_has_one_record() -> Result<(), Box<dyn std::error::Error>> {
+fn test_applied_xadd_lost_reply_forbid_has_one_record() -> Result<(), Box<dyn std::error::Error>> {
     applied_xadd_reply_loss(DuplicateRiskPolicy::Forbid)
 }
 
 #[test]
-fn applied_xadd_lost_reply_allow_duplicates_does_not_blindly_retry() -> Result<(), Box<dyn std::error::Error>> {
+fn test_applied_xadd_lost_reply_allow_duplicates_does_not_blindly_retry() -> Result<(), Box<dyn std::error::Error>> {
     applied_xadd_reply_loss(DuplicateRiskPolicy::AllowDuplicates)
 }
 
 #[cfg(feature = "async")]
 #[test]
-fn async_query_stages_preserve_admission_evidence() -> Result<(), Box<dyn std::error::Error>> {
+fn test_async_query_stages_preserve_admission_evidence() -> Result<(), Box<dyn std::error::Error>> {
     use qubit_event_bus_redis::r#async::AsyncRedisEventBusProvider;
     use qubit_spi::AsyncServiceProvider;
     futures_lite::future::block_on(async {
@@ -487,7 +487,7 @@ fn async_query_stages_preserve_admission_evidence() -> Result<(), Box<dyn std::e
 
 #[cfg(feature = "async")]
 #[test]
-fn async_applied_xadd_reply_loss_covers_both_duplicate_policies() -> Result<(), Box<dyn std::error::Error>> {
+fn test_async_applied_xadd_reply_loss_covers_both_duplicate_policies() -> Result<(), Box<dyn std::error::Error>> {
     use qubit_event_bus::AsyncEventBus;
     use qubit_event_bus::codec::CodecRegistry;
     use qubit_event_bus::facade::EventBusFacadeConfig;
@@ -592,7 +592,7 @@ impl EventCodec<DeadLetterEvent<Vec<u8>>> for DeadBytesCodec {
 }
 
 #[test]
-fn applied_dlq_xadd_lost_reply_stops_and_preserves_durable_source() -> Result<(), Box<dyn std::error::Error>> {
+fn test_applied_dlq_xadd_lost_reply_stops_and_preserves_durable_source() -> Result<(), Box<dyn std::error::Error>> {
     use qubit_event_bus::EventBus;
     use qubit_event_bus::codec::CodecRegistry;
     use qubit_event_bus::facade::EventBusFacadeConfig;
@@ -697,7 +697,7 @@ fn applied_dlq_xadd_lost_reply_stops_and_preserves_durable_source() -> Result<()
 }
 
 #[test]
-fn invalid_xadd_id_reply_does_not_claim_acceptance() {
+fn test_invalid_xadd_id_reply_does_not_claim_acceptance() {
     let server = ScriptedRedis::start(vec![Step::reply("XADD", b"+OK\r\n")]).unwrap();
     let error = bus(server.url())
         .publish(message())
@@ -709,7 +709,7 @@ fn invalid_xadd_id_reply_does_not_claim_acceptance() {
 
 #[cfg(feature = "async")]
 #[test]
-fn async_applied_dlq_reply_loss_preserves_durable_source() -> Result<(), Box<dyn std::error::Error>> {
+fn test_async_applied_dlq_reply_loss_preserves_durable_source() -> Result<(), Box<dyn std::error::Error>> {
     use qubit_event_bus::AsyncEventBus;
     use qubit_event_bus::codec::CodecRegistry;
     use qubit_event_bus::facade::EventBusFacadeConfig;

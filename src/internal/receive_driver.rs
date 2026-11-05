@@ -86,8 +86,14 @@ impl ReceiveDriver {
     /// Persists a new scan deadline only after claim and own-pending phases
     /// have both reached their end, preserving recovery duty on partial work.
     ///
-    /// `now` is the completion instant; `Some` returns the next due instant and
-    /// consumes the completion signal. `None` leaves the previous deadline.
+    /// # Parameters
+    ///
+    /// - `now`: Completion instant of the recovery round.
+    ///
+    /// # Returns
+    ///
+    /// The next due instant when a complete round was signaled. `None` leaves
+    /// the previous deadline unchanged.
     pub(crate) fn complete_recovery_round(&mut self, now: Instant) -> Option<Instant> {
         if !self.completed_round {
             return None;

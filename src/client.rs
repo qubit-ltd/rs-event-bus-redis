@@ -142,6 +142,11 @@ impl Client {
     ///
     /// Returns an error if diagnostics were already attached or the process ID
     /// space is exhausted; it performs no Redis network I/O.
+    ///
+    /// # Parameters
+    ///
+    /// - `mode`: Adapter mode exposed in diagnostics snapshots.
+    /// - `namespace`: Validated namespace associated with this client.
     pub(crate) fn attach_diagnostics(
         &mut self,
         mode: RedisProviderMode,
@@ -166,6 +171,10 @@ impl Client {
         self.diagnostics.as_deref()
     }
     /// Reserves a short-command slot before I/O.
+    ///
+    /// # Parameters
+    ///
+    /// - `class`: Admission lane requested for the operation.
     ///
     /// # Returns
     ///
@@ -237,6 +246,10 @@ impl Client {
     /// Standalone connections reuse the idle pool; Sentinel operations resolve
     /// the current master afresh. Network setup runs outside the pool mutex.
     ///
+    /// # Parameters
+    ///
+    /// - `class`: Admission class for this short Redis operation.
+    ///
     /// # Returns
     ///
     /// A lease owning its command permit until drop, with short socket waits
@@ -301,6 +314,10 @@ impl Client {
     /// admission but does not guarantee cancellation of an already sent Redis
     /// request.
     ///
+    /// # Parameters
+    ///
+    /// - `class`: Admission class for this short Redis operation.
+    ///
     /// # Returns
     ///
     /// A permit-owning connection generation; Sentinel leases use generation
@@ -363,6 +380,11 @@ impl Client {
     }
     /// Opens controlled standalone or freshly discovered Sentinel transport.
     ///
+    /// # Parameters
+    ///
+    /// - `max_response_bytes`: Optional response-size cap for dedicated
+    ///   receiver sockets.
+    ///
     /// # Returns
     ///
     /// A newly connected socket with finite short-command read/write waits.
@@ -400,6 +422,11 @@ impl Client {
     }
     /// Opens bounded async standalone or Sentinel transport on the host
     /// executor.
+    ///
+    /// # Parameters
+    ///
+    /// - `max_response_bytes`: Optional response-size cap for dedicated
+    ///   receiver sockets.
     ///
     /// # Returns
     ///

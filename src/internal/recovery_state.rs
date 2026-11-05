@@ -8,8 +8,6 @@
 //! Per-subscription pending-entry cursors and active-delivery tracking.
 
 use std::collections::HashSet;
-use std::sync::Arc;
-use std::sync::Mutex;
 use std::time::Instant;
 
 use redis::streams::StreamId;
@@ -35,38 +33,6 @@ pub(crate) struct RecoveryState {
     /// A terminal claim response has been observed, so the next receive may
     /// continue with this consumer's pending entries.
     claim_phase_complete: bool,
-}
-
-/// Marks recovery due if an in-progress receive is cancelled or unwinds.
-pub(crate) struct RecoveryGuard {
-    /// Shared receiver state; this guard never retains its mutex across I/O.
-    state: Arc<Mutex<RecoveryState>>,
-    /// Cleared only after a receive returns normally.
-    armed: bool,
-}
-
-impl RecoveryGuard {
-    /// Arms cancellation recovery after a receive future has actually been
-    /// polled. The guard owns an `Arc`, not a mutex lock.
-    pub(crate) fn new(state: Arc<Mutex<RecoveryState>>) -> Self {
-        Self { state, armed: true }
-    }
-
-    /// Prevents normal completion from forcing an extra recovery round.
-    pub(crate) fn disarm(&mut self) {
-        self.armed = false;
-    }
-}
-
-impl Drop for RecoveryGuard {
-    /// Conservatively forces the next scan after cancellation or unwind.
-    fn drop(&mut self) {
-        if self.armed
-            && let Ok(mut state) = self.state.lock()
-        {
-            state.force_recovery();
-        }
-    }
 }
 
 impl RecoveryState {
@@ -95,6 +61,10 @@ impl RecoveryState {
     ///
     /// `now` is the start of a receive; no state is changed by inspection. The
     /// generation must be supplied when that receive finishes its scan.
+    ///
+    /// # Parameters
+    ///
+    /// - `now`: Start instant of the receive being scheduled.
     pub(crate) fn recovery_schedule(&self, now: Instant) -> (bool, Option<Instant>, u64) {
         (
             self.force_recovery || self.next_recovery_at.is_none_or(|next| now >= next),
@@ -117,6 +87,10 @@ impl RecoveryState {
 
     /// Persists a terminal claim response unless a retry or cancellation
     /// forced a new scan while that Redis command was in flight.
+    ///
+    /// # Parameters
+    ///
+    /// - `observed_generation`: Recovery generation captured before the claim.
     pub(crate) fn mark_claim_complete(&mut self, observed_generation: u64) {
         if self.force_generation == observed_generation {
             self.claim_phase_complete = true;
@@ -136,6 +110,11 @@ impl RecoveryState {
     /// `next` is calculated from the completion time, so normal short calls do
     /// not continuously defer recovery. `observed_generation` prevents this
     /// scan from clearing a retry or cancellation raised during its I/O.
+    ///
+    /// # Parameters
+    ///
+    /// - `next`: Next scheduled scan instant calculated at round completion.
+    /// - `observed_generation`: Recovery generation captured before this scan.
     pub(crate) fn complete_recovery_at(&mut self, next: Instant, observed_generation: u64) {
         self.next_recovery_at = Some(next);
         self.claim_phase_complete = false;

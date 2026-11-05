@@ -19,6 +19,8 @@ use redis::streams::StreamKey;
 use redis::streams::StreamRangeReply;
 use redis::streams::StreamReadReply;
 
+pub(crate) use crate::internal::PendingEntry;
+
 /// Parses an XAUTOCLAIM reply and records Redis 6.2's nil tombstone markers.
 ///
 /// # Parameters
@@ -186,19 +188,6 @@ fn parse_pair(value: Value) -> Result<(Value, Value), RedisError> {
     ))
 }
 
-/// One row returned by the detailed XPENDING command.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) struct PendingEntry {
-    /// Redis stream entry ID.
-    pub(crate) id: String,
-    /// Consumer that currently owns the pending delivery.
-    pub(crate) owner: String,
-    /// Idle duration reported by Redis, in milliseconds.
-    pub(crate) idle_ms: u64,
-    /// Number of times Redis delivered this entry.
-    pub(crate) times_delivered: u64,
-}
-
 /// Parses rows returned by the detailed XPENDING command.
 ///
 /// # Parameters
@@ -243,6 +232,17 @@ pub(crate) fn parse_pending_entries(value: Value) -> Result<Vec<PendingEntry>, R
 
 /// Returns a delivery count only when the pending detail matches its expected
 /// ID and owner.
+///
+/// # Parameters
+///
+/// - `entry`: Detailed pending row returned by Redis.
+/// - `expected_id`: Entry ID expected by the caller.
+/// - `consumer`: Consumer expected to own the pending entry.
+///
+/// # Returns
+///
+/// A non-zero delivery count when both identity checks match; otherwise
+/// `None`.
 pub(crate) fn trusted_attempt(entry: &PendingEntry, expected_id: &str, consumer: &str) -> Option<NonZeroU32> {
     if entry.id != expected_id || entry.owner != consumer || entry.times_delivered == 0 {
         return None;

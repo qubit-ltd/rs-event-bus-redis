@@ -16,7 +16,14 @@ use super::fields_visitor::FieldsVisitor;
 use crate::wire_fields::WireFields;
 use crate::wire_limits::WireLimits;
 
-/// Supplies the limits and shared rejection marker to the field visitor.
+/// Supplies decode limits and a shared rejection marker to the field visitor.
+///
+/// The marker lets the caller distinguish a byte-budget violation from other
+/// deserialization errors without retaining an error string.
+///
+/// # Type Parameters
+///
+/// - `'a`: Lifetime of the shared rejection marker used during decoding.
 pub(super) struct FieldsSeed<'a> {
     /// Inclusive byte limits applied to decoded wire fields.
     pub(super) limits: WireLimits,
@@ -24,11 +31,18 @@ pub(super) struct FieldsSeed<'a> {
     pub(super) exceeded: &'a Cell<bool>,
 }
 impl<'de> DeserializeSeed<'de> for FieldsSeed<'_> {
+    /// The decoded version-one wire record.
     type Value = WireFields;
     /// Constructs fields directly while sharing a typed limit-failure marker.
     ///
+    /// # Type Parameters
+    ///
+    /// - `'de`: Lifetime of data borrowed from the deserializer.
+    /// - `D`: Deserializer implementation supplying the wire object.
+    ///
     /// # Parameters
     ///
+    /// - `self`: Seed carrying limits and the shared rejection marker.
     /// - `deserializer`: Source containing the top-level wire object.
     ///
     /// # Returns

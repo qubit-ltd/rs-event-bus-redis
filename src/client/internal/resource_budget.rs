@@ -11,19 +11,11 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 
-use super::command_permit::CommandLane;
+use super::command_class::CommandClass;
+use super::command_lane::CommandLane;
 use super::command_permit::CommandPermit;
 use super::receiver_permit::ReceiverPermit;
 use crate::error::RedisProviderError;
-
-/// Classifies a short Redis command by its admission priority.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum CommandClass {
-    /// Publishing, subscription setup, and other ordinary short commands.
-    General,
-    /// Terminal acknowledgement; may use a reserved or general slot.
-    Settlement,
-}
 
 /// Counts application operations; cancelled Redis requests may still complete.
 pub(crate) struct ResourceBudget {
@@ -86,6 +78,11 @@ impl ResourceBudget {
     }
     /// Acquires a short-operation slot without waiting or issuing I/O.
     ///
+    /// # Parameters
+    ///
+    /// - `self`: Shared budget whose counter may admit the operation.
+    /// - `class`: Priority lane requested for the operation.
+    ///
     /// # Returns
     ///
     /// A permit retaining this shared budget until operation completion or
@@ -116,6 +113,10 @@ impl ResourceBudget {
     }
     /// Acquires a receiver slot immediately; setup failures release it through
     /// Drop.
+    ///
+    /// # Parameters
+    ///
+    /// - `self`: Shared budget whose receiver counter may admit the lease.
     ///
     /// # Returns
     ///

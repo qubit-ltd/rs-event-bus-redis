@@ -13,9 +13,9 @@ use std::env::args;
 use std::error::Error;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::mpsc::channel;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
+use std::sync::mpsc::channel;
 use std::time::Duration;
 
 use qubit_codec::ValueBytesCodecDescriptor;
@@ -24,9 +24,9 @@ use qubit_codec::ValueBytesCodecRegistry;
 use qubit_codec::ValueCodecId;
 use qubit_codec::ValueCodecRegistration;
 use qubit_codec::ValueCodecRegistrationSource;
-use qubit_event_bus::DeliveryError;
 use qubit_event_bus::AsyncEventBus;
 use qubit_event_bus::AsyncEventBusRegistry;
+use qubit_event_bus::DeliveryError;
 use qubit_event_bus::EventBus;
 use qubit_event_bus::EventBusConfig;
 use qubit_event_bus::EventBusRegistry;
@@ -46,19 +46,19 @@ use qubit_model_id::HasModelId;
 use qubit_model_id::ModelId;
 use qubit_model_id::ModelIdBuf;
 use qubit_spi::ProviderSelection;
-use qubit_task::handler::TaskRunOutcome;
 use qubit_task::CancellationMode;
 use qubit_task::TaskContext;
+use qubit_task::TaskExecutionService;
+use qubit_task::TaskExecutionServiceBuilder;
 use qubit_task::TaskHandler;
 use qubit_task::TaskHandlerDescriptor;
-use qubit_task::model::ResourceCapacity;
-use qubit_task::TaskExecutionServiceBuilder;
-use qubit_task::event::TaskEvent;
 use qubit_task::TaskRequest;
 use qubit_task::TaskSummary;
+use qubit_task::event::TaskEvent;
+use qubit_task::handler::TaskRunOutcome;
+use qubit_task::model::ResourceCapacity;
 use qubit_task::model::TaskOutput;
 use qubit_task::model::TaskState;
-use qubit_task::TaskExecutionService;
 use qubit_task::store::SqliteTaskStore;
 use qubit_task::store::TaskFuture;
 
@@ -111,7 +111,11 @@ impl qubit_id::IdGenerator for TaskIds {
 struct TypedHandler;
 
 impl TaskHandler<TaskNotificationPayload> for TypedHandler {
-    fn run<'a>(&'a self, value: TaskNotificationPayload, _context: TaskContext) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
+    fn run<'a>(
+        &'a self,
+        value: TaskNotificationPayload,
+        _context: TaskContext,
+    ) -> TaskFuture<'a, qubit_task::handler::TaskRunResult> {
         Box::pin(async move {
             assert_eq!(value.0, 7);
             Ok(TaskRunOutcome::Succeeded(TaskOutput::default()))
@@ -124,17 +128,13 @@ async fn create_task_service(
     bus: Arc<AsyncEventBus>,
 ) -> Result<TaskExecutionService, Box<dyn Error>> {
     let codecs = Arc::new(ValueBytesCodecRegistry::from_registrations([&TASK_CODEC])?);
-    let mut builder = TaskExecutionServiceBuilder::new(
-        store,
-        codecs,
-        Arc::new(TaskIds(AtomicU64::new(1))),
-    )
-    .capacity(ResourceCapacity {
-        cpu_slots: 1,
-        ..ResourceCapacity::default()
-    })
-    .event_bus(bus)
-    .notification_shutdown_timeout(Duration::from_secs(3));
+    let mut builder = TaskExecutionServiceBuilder::new(store, codecs, Arc::new(TaskIds(AtomicU64::new(1))))
+        .capacity(ResourceCapacity {
+            cpu_slots: 1,
+            ..ResourceCapacity::default()
+        })
+        .event_bus(bus)
+        .notification_shutdown_timeout(Duration::from_secs(3));
     builder.handlers_mut().register::<TaskNotificationPayload, _>(
         TaskHandlerDescriptor {
             kind_id: "example.task_notifications".into(),
@@ -153,12 +153,7 @@ async fn create_task_service(
 /// the facade, or codec/configuration/discovery/provider errors. Construction
 /// performs no Redis IO; intentionally omitting the codec exercises publication
 /// failure.
-fn create_bus(
-    url: &str,
-    namespace: &str,
-    codec: bool,
-    tls_ca_path: Option<&str>,
-) -> Result<EventBus, Box<dyn Error>> {
+fn create_bus(url: &str, namespace: &str, codec: bool, tls_ca_path: Option<&str>) -> Result<EventBus, Box<dyn Error>> {
     let mut codecs = CodecRegistry::new();
     if codec {
         codecs.register::<TaskEvent>(Arc::new(TaskEventJsonCodec(ContentType::new("application/json")?)))?;
@@ -188,7 +183,8 @@ async fn create_async_bus(
     let mut options: ProviderOptions = [
         ("redis.url".into(), url.into()),
         ("redis.namespace".into(), namespace.into()),
-    ].into();
+    ]
+    .into();
     if let Some(tls_ca_path) = tls_ca_path {
         options.insert("redis.tls_ca_cert_path".into(), tls_ca_path.into());
     }
@@ -213,15 +209,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let tls_ca_path = arguments.next();
     let database_dir = tempfile::tempdir()?;
     let store = Arc::new(SqliteTaskStore::open(database_dir.path().join("tasks.sqlite"))?);
-    let bus = create_bus(
-        &url,
-        "task-notification-fixture",
-        true,
-        tls_ca_path.as_deref(),
-    )?;
-    let async_bus = Arc::new(
-        create_async_bus(&url, "task-notification-fixture", tls_ca_path.as_deref()).await?,
-    );
+    let bus = create_bus(&url, "task-notification-fixture", true, tls_ca_path.as_deref())?;
+    let async_bus = Arc::new(create_async_bus(&url, "task-notification-fixture", tls_ca_path.as_deref()).await?);
     let topic = Topic::<TaskEvent>::new("task.lifecycle")?;
     let projection = Arc::new(Mutex::new(None::<TaskEvent>));
     let consumer_projection = projection.clone();
@@ -239,7 +228,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let applied = current.as_ref().is_none_or(|previous| {
                 previous.task_id == event.task_id && event.state_version > previous.state_version
             });
-            if applied { *current = Some(event.clone()); }
+            if applied {
+                *current = Some(event.clone());
+            }
             let _ = sender.send((event, applied));
             Ok::<(), DeliveryError>(())
         },
@@ -261,7 +252,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
             tokio::task::yield_now().await;
         }
-    }).await??;
+    })
+    .await??;
     let id = summary.id;
     let event_task_id = id;
     let mut lifecycle = Vec::new();
@@ -304,8 +296,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
     subscription.cancel()?;
     let _ = bus.shutdown(ShutdownMode::Immediate)?;
 
-    assert_eq!(task_service.get(id).await?.ok_or("task disappeared")?.state, TaskState::Succeeded,
-        "task lifecycle publication cannot roll back committed task state");
+    assert_eq!(
+        task_service.get(id).await?.ok_or("task disappeared")?.state,
+        TaskState::Succeeded,
+        "task lifecycle publication cannot roll back committed task state"
+    );
     println!("task notifications: durable lifecycle, duplicate/stale projection, business state passed");
     Ok(())
 }

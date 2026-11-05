@@ -19,6 +19,11 @@ impl<'de> Deserialize<'de> for Skip {
     /// Consumes one value without retaining it; malformed or deeply nested
     /// input remains an error.
     ///
+    /// # Type Parameters
+    ///
+    /// - `'de`: Lifetime of data borrowed from the deserializer.
+    /// - `D`: Deserializer implementation supplying the JSON value.
+    ///
     /// # Parameters
     ///
     /// - `deserializer`: Source that provides a single JSON value.
