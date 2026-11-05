@@ -117,4 +117,32 @@ The full CI failure was diagnosed from the complete log and reproduced at the no
 - RBR-003: historical claim corrected in both languages; current standalone coverage passed its configured gates and reports/source inventory are persisted.
 - T4: full validation and coverage evidence are recorded. Full CI is **not green** because its package suite is blocked by RBR-001; standalone coverage and audit passed, while loom is not configured and was skipped.
 
-The design and implementation-plan source files remain outside commits and preserved in the original provider checkout.
+The design and implementation-plan source files were later removed from the provider checkout after the user explicitly authorized deletion.
+
+## Follow-up: registry closure and final validation (2026-11-05)
+
+The user accepted RBR-001, RBR-003, RBR-004, RBR-005, and RBR-006 for implementation, retained the current-workspace constraint, authorized required dependency releases, and authorized temporary access to the existing Docker daemon. The accepted releases resolved the earlier registry blocker: `qubit-event-bus 0.21.0` and `qubit-redis 2.0.0-rc.1` were published; after correcting the Redis package README and CI package selectors, `qubit-redis 2.0.0-rc.2` was published as the current package version. `cargo +1.94.0 info qubit-event-bus@0.21.0 --registry crates-io` and `cargo +1.94.0 info qubit-redis@2.0.0-rc.2 --registry crates-io` both exited 0.
+
+The provider now resolves both production and development Redis dependencies through the registry under the Rust import alias `redis`, pins `qubit-redis = 2.0.0-rc.2`, and resolves the event-bus facade from the registry. The root lockfile, fuzz lockfile, and four downstream fixture lockfiles were refreshed. The feature-matrix updater now uses the Cargo package name `qubit-redis`. `ci/check-package-candidate.sh` was repaired to read Cargo metadata JSON from stdout separately from download chatter on stderr and to validate the package name from the normalized archive manifest.
+
+Necessary CI baseline repairs were also made without changing validation thresholds: documented Rust parameters and associated types; renamed style-invalid test functions and updated child-process filters; moved test modules to the accepted source layout; extracted `PendingEntry`, `RecoveryGuard`, command lane/class, and wire helper types to style-compliant files; and constrained the Redis error-classification unit-test module to Redis-enabled features. Four fixture locks that still referenced the old Git package identity were refreshed. No user changes were overwritten.
+
+| Command | Result |
+| --- | --- |
+| `bash .infra/bin/align-ci.sh` (after final source and package-name fixes) | exit 0 |
+| `bash .infra/bin/ci-check.sh` (registry Redis rc.1) | exit 0 after diagnosing and fixing two failures: feature-disabled unit-test import and stale `cargo update -p redis` matrix package name |
+| `bash .infra/bin/ci-check.sh` (registry Redis rc.2) | exit 0; full workspace tests, Docker-backed integration and Markdown example tests, feature matrix, package archive verification, fuzz smoke, advisory audit, and coverage completed |
+| CI coverage thresholds (rc.2) | passed: functions 95.32% (530/556), lines 96.12% (5,182/5,391), regions 94.98% (8,025/8,449) |
+| `cargo +1.94.0 check --locked --workspace --all-targets --all-features` (rc.2) | exit 0 after lock refresh |
+| Four fixture `cargo +1.94.0 check --manifest-path ...` commands followed by `cargo +1.94.0 check --locked --manifest-path ...` | exit 0 for async-smol, async-tokio, business-consumer, and task-notifications fixtures |
+| `bash ci/check-package-candidate.sh` (rc.1, then rc.2) | exit 0 on both final candidate runs |
+| `RUSTUP_TOOLCHAIN=1.94.0 make test` in the Redis fork at rc.2 | exit 0: TCP no-features 255/255; TCP RESP2 1,286/1,286; TCP RESP3 1,286/1,286; TLS 1,303/1,303; native-TLS 1,022/1,022; UNIX RESP2 and RESP3 920/920 each; redis-test 73/73 and 75/75 |
+| `cargo +1.94.0 publish --dry-run --locked --allow-dirty --manifest-path redis/Cargo.toml` (Redis fork rc.2) | exit 0; package archive verified |
+| `cargo +1.94.0 publish --locked --manifest-path redis/Cargo.toml` | exit 0; published `qubit-redis 2.0.0-rc.2` |
+| `git diff --check` in provider and Redis fork worktrees | exit 0 after removing one trailing blank line and one Makefile trailing space |
+
+The registry-consumer helper was attempted twice for provider `0.7.0` and exited 1 because `qubit-event-bus-redis 0.7.0` is not published on crates.io. This task authorized publishing the external dependencies, not publishing the target provider crate, so no provider release was attempted. The source-candidate package check and full package archive verification passed against the final registry dependencies. The Docker socket ACL was temporarily granted for the requested integration checks and removed afterward; `getfacl -cp /var/run/docker.sock` confirmed no per-user ACL remained.
+
+The planning documents were deleted from the target checkout only after the user's explicit `y` authorization. Their requested paths were `/data/working/qubit/rust-common/rs-event-bus-redis/doc/design-20261104T160908541Z-85e4ecfb.md` and `/data/working/qubit/rust-common/rs-event-bus-redis/doc/implementation-plan-20261104T160908541Z-85e4ecfb.md`; both are confirmed absent.
+
+Current RBR status: RBR-001's dependency/package-candidate blocker is resolved by publishing the compatible core and Redis dependencies and passing the normalized package validation. RBR-003's accepted implementation and CI/coverage requirements are green. RBR-004, RBR-005, and RBR-006 were implemented within their selected scope; the registry consumer itself remains pre-publication-only because the target provider release was outside this task's publishing authorization.
