@@ -1,6 +1,6 @@
 # Redis Streams 用户指南
 
-**读者：** 使用当前 sibling source checkout 的 Rust 服务开发者；manifest 版本为 provider 0.7.0、core 0.21 和 SPI 0.14。Registry 可用性见下文。
+**读者：** 使用当前 sibling source checkout 的 Rust 服务开发者；manifest 版本为 provider 0.7.0、core 0.21 和 SPI 0.14。当前发布安装证据见[安装与验证状态](design.zh_CN.md#安装与验证状态)。
 
 [English](user_guide.md) · [README](../README.zh_CN.md) · [API 文档](https://docs.rs/qubit-event-bus-redis)
 
@@ -19,10 +19,9 @@ qubit-spi = "0.14"
 qubit-event-bus = { path = "../rs-event-bus" }
 ```
 
-这些路径适用于 sibling checkout；应按 consumer manifest 所在位置调整。patch 必须放在应用 workspace 根清单中。provider 的 registry core 依赖不会因应用直接依赖 path 版本而自动替换，因此两个依赖 path 和 patch path 必须指向同一个 core checkout。2026-11-04 registry 查询时，crates.io 尚无 `qubit-event-bus-redis 0.7.0` 和 `qubit-event-bus 0.21.0`。本示例用于本地源码集成，不能作为 registry 安装示例。升级现有服务前，请先按迁移指南检查版本变化和恢复步骤。
+这些路径适用于 sibling checkout；应按 consumer manifest 所在位置调整。patch 必须放在应用 workspace 根清单中。provider 的 registry core 依赖不会因应用直接依赖 path 版本而自动替换，因此两个依赖 path 和 patch path 必须指向同一个 core checkout。本示例用于本地源码集成。升级现有服务前，请先按迁移指南检查版本变化和恢复步骤。
 
 当前 Cargo 清单中的 Redis 导入名为 `redis`，包名为 `qubit-redis`，精确固定到 `=2.0.0-rc.2`，来源为 registry。
-2026-11-06 执行 `bash ci/check-package-candidate.sh` 后，归档提取、清单校验、no-default-features/sync-discovery/async-discovery/default 检查及 metadata 校验均通过。这证明源码候选包通过当前构建与依赖图检查，不代表已发布，也不代表运行时验收通过。
 
 Registry 验证有两种模式。默认 `source-candidate` 会将输入的 provider/core 版本与当前源码清单比较；`published` 跳过此比较，但仍要求精确稳定版本、registry 来源、唯一 core 包身份及正确的 provider→core 依赖边。两种模式都会执行 prepare、manifest 检查、生成锁文件、feature 构建和 metadata 校验。示例：`bash ci/check-registry-consumer.sh --mode published --provider-version X.Y.Z --core-version X.Y.Z --spi-version X.Y.Z`。
 
@@ -551,7 +550,7 @@ Redis 持久化和复制由部署负责。`Accepted` 只证明 XADD 被接受，
 
 ## 12. 从 provider 0.6 升级
 
-当前源码 manifest 版本为 provider 0.7.0/core 0.21。截至 2026-11-04 registry 查询，crates.io 尚无 `qubit-event-bus-redis 0.7.0` 和 `qubit-event-bus 0.21.0`，因此该源码组合并非已发布的 registry 组合。`RedisSubscriptionProfile` 根据明确的 `StartPosition` 构造 durable 订阅选项；创建新订阅时使用它，并保留预期的消费组。核心 codec 注册现在会拒绝重复载荷类型并返回 `Result`；要传播错误，使用 `?`，确需替换时才调用 `replace`。`InboundMessage` 增加可选 provider attempt 元数据，但 `into_parts` tuple 保持原样。保留 wire 版本 1 数据和现有消费组；发布前应验证 pending 记录，并按上文分别采集 provider 快照与 Redis PEL/内存。[迁移指南](migration.zh_CN.md)列出完整变更。
+当前源码 manifest 版本为 provider 0.7.0/core 0.21。2026-11-04 registry 查询只是历史观察，不能证明当前 registry 可用性；当前发布安装证据见[安装与验证状态](design.zh_CN.md#安装与验证状态)。`RedisSubscriptionProfile` 根据明确的 `StartPosition` 构造 durable 订阅选项；创建新订阅时使用它，并保留预期的消费组。核心 codec 注册现在会拒绝重复载荷类型并返回 `Result`；要传播错误，使用 `?`，确需替换时才调用 `replace`。`InboundMessage` 增加可选 provider attempt 元数据，但 `into_parts` tuple 保持原样。保留 wire 版本 1 数据和现有消费组；发布前应验证 pending 记录，并按上文分别采集 provider 快照与 Redis PEL/内存。[迁移指南](migration.zh_CN.md)列出完整变更。
 
 
 参阅[设计说明](design.zh_CN.md)、[覆盖率证据](coverage-review.zh_CN.md)和[工作负载基准](connection-reuse-benchmark.zh_CN.md)。性能、覆盖率须以各自测量为证；本指南没有宣称新的吞吐量或最终覆盖率结果。

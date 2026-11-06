@@ -1,6 +1,6 @@
 # Redis Streams User Guide
 
-**For:** Rust service developers using the current sibling-source checkout, whose manifest versions are provider 0.7.0, core 0.21, and SPI 0.14. Registry availability is recorded below.
+**For:** Rust service developers using the current sibling-source checkout, whose manifest versions are provider 0.7.0, core 0.21, and SPI 0.14. See the [installation and validation status](design.md#installation-and-validation-status) for the current release-installation evidence.
 
 [简体中文](user_guide.zh_CN.md) · [README](../README.md) · [API docs](https://docs.rs/qubit-event-bus-redis)
 
@@ -19,10 +19,9 @@ qubit-spi = "0.14"
 qubit-event-bus = { path = "../rs-event-bus" }
 ```
 
-These paths are for sibling checkouts; adjust them to the consumer manifest's location. Put the patch in the application workspace root manifest. The provider's registry core dependency is not replaced by the application's direct path dependency, so both dependency paths and the patch path must point to the same core checkout. Registry query on 2026-11-04 found neither `qubit-event-bus-redis 0.7.0` nor `qubit-event-bus 0.21.0` on crates.io. Treat this example as a local source integration, not a registry installation. Consult the migration guide before upgrading an existing deployment.
+These paths are for sibling checkouts; adjust them to the consumer manifest's location. Put the patch in the application workspace root manifest. The provider's registry core dependency is not replaced by the application's direct path dependency, so both dependency paths and the patch path must point to the same core checkout. This example demonstrates local source integration. Consult the migration guide before upgrading an existing deployment.
 
 The current Cargo manifest imports Redis as `redis`, uses package `qubit-redis` at exact version `=2.0.0-rc.2`, and resolves it from the registry.
-The 2026-11-06 `bash ci/check-package-candidate.sh` run passed archive extraction, manifest validation, no-default-features/sync-discovery/async-discovery/default checks, and metadata validation. This validates the packaged source candidate; it is not a published release or a runtime acceptance result.
 
 Registry verification has two modes. `source-candidate` is the default and compares requested provider/core versions with this source manifest. `published` skips that comparison, but still requires exact stable versions, registry sources, a single core package identity, and the provider-to-core dependency edge. Both modes run prepare, manifest validation, lockfile generation, feature builds, and metadata verification. Example: `bash ci/check-registry-consumer.sh --mode published --provider-version X.Y.Z --core-version X.Y.Z --spi-version X.Y.Z`.
 
@@ -551,7 +550,7 @@ With typed `qubit-task` notifications, consumers should deduplicate by `TaskId` 
 
 ## 12. Upgrade from provider 0.6
 
-The current source manifest is provider 0.7.0 with core 0.21. As of the 2026-11-04 registry check, neither `qubit-event-bus-redis 0.7.0` nor `qubit-event-bus 0.21.0` is available on crates.io, so this pairing is not a published release combination. `RedisSubscriptionProfile` builds durable subscription options from an explicit `StartPosition`; use it for new subscriptions and preserve the intended consumer group. Core codec registration now rejects duplicate payload types and returns `Result`; handle it with `?` or use `replace` deliberately. `InboundMessage` carries optional provider-attempt metadata without changing its existing `into_parts` tuple. Keep stored wire version 1 data and consumer groups; test retained pending entries before rollout. Start collecting provider snapshots and Redis PEL/memory separately as described above. The [migration guide](migration.md) covers the complete version-specific changes.
+The current source manifest is provider 0.7.0 with core 0.21. The 2026-11-04 registry query is a historical observation and does not establish current registry availability; current release-installation evidence is summarized in the [installation and validation status](design.md#installation-and-validation-status). `RedisSubscriptionProfile` builds durable subscription options from an explicit `StartPosition`; use it for new subscriptions and preserve the intended consumer group. Core codec registration now rejects duplicate payload types and returns `Result`; handle it with `?` or use `replace` deliberately. `InboundMessage` carries optional provider-attempt metadata without changing its existing `into_parts` tuple. Keep stored wire version 1 data and consumer groups; test retained pending entries before rollout. Start collecting provider snapshots and Redis PEL/memory separately as described above. The [migration guide](migration.md) covers the complete version-specific changes.
 
 
 See [design](design.md), [coverage evidence](coverage-review.md), and [workload benchmark](connection-reuse-benchmark.md). Performance/coverage results require their own measured evidence; this guide makes no new throughput or final coverage claim.

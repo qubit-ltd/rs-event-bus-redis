@@ -104,10 +104,13 @@ wire 限额内且完整有效的未知 `u64` 整数版本会报错并保留 PEL�
 
 Accept/Reject 确认 Redis PEL，Retry 只释放本地占用并保留 PEL。`XREADGROUP >` 返回的新消息携带 `provider_attempt = Some(1)`。每条准备交付的恢复记录会先额外执行一次精确 ID 的 `XPENDING` 明细查询；只有恰好一条明细的 ID 与预期记录匹配、owner 为当前 consumer，且非零次数可由 SPI 的 `u32` 表示时，才报告投递次数。查询失败、空结果、格式错误、次数为零或不可表示、以及 owner/ID 不匹配时，次数保持未知（`None`）。因此每条恢复消息多一次 Redis 命令，新消息路径不增加查询。关闭不 ACK，不删除消费组或 stream。可选 `XADD MAXLEN ~` 会丢失未读/pending 历史；未读记录被裁剪不一定返回 Gap。至少一次投递要求业务幂等，claim idle 阈值应匹配 handler 时长。
 
-当前 Cargo 清单中的 Redis 导入名为 `redis`，包名为 `qubit-redis`，精确固定到 `=2.0.0-rc.2`，来源为 registry。
-2026-11-06 执行 `bash ci/check-package-candidate.sh` 后，归档提取、清单校验、no-default-features/sync-discovery/async-discovery/default 检查及 metadata 校验均通过。这证明源码候选包通过当前构建与依赖图检查，不代表已发布，也不代表运行时验收通过。
+## 安装与验证状态
 
-Registry consumer 验证有两种模式：默认 `source-candidate` 将版本与当前源码清单比较；`published` 跳过此比较，但保留精确版本、registry 来源、依赖边和唯一 core 身份校验。2026-11-03 检查时，历史组合 `0.7.0 / 0.20.1 / 0.14.0` 无法解析，因为 crates.io 没有 `qubit-event-bus-redis 0.7.0`。这是缺少证据，不是兼容性结论。
+- **本地源码集成：** 上文的 sibling path dependency 与 core patch 示例说明如何集成 provider `0.7.0`、core `0.21` 和 SPI `0.14` 的源码 checkout；它不验证 registry 安装。
+- **源码候选包：** 2026-11-06 执行 `bash ci/check-package-candidate.sh` 后，归档提取、清单校验、no-default-features/sync-discovery/async-discovery/default 检查及 metadata 校验均通过。这验证了源码候选包及其依赖图，不代表已发布包或运行时行为。详见[2026-11-06 实施证据](implementation-evidence-20261106T032751350Z-1e227263.md)。
+- **正式发布安装：** 当前版本尚无正式发布安装验收结论。这描述现有证据范围，不表示该版本当前一定存在或不存在于 registry。
+
+当前 Cargo 清单中的 Redis 导入名为 `redis`，包名为 `qubit-redis`，精确固定到 `=2.0.0-rc.2`，来源为 registry。Registry consumer 验证有两种模式：默认 `source-candidate` 将版本与当前源码清单比较；`published` 跳过此比较，但保留精确版本、registry 来源、依赖边和唯一 core 身份校验。2026-11-03 的 `0.7.0 / 0.20.1 / 0.14.0` 查询只是历史观察，不能证明当前 registry 可用性或兼容性。
 
 独立 fixture 执行器为 feature tree、构建和程序执行分别设置 120 秒、600 秒和 120 秒期限；每个 fixture/阶段都保存 stdout/stderr 日志，从 Cargo JSON 定位可执行文件，并仅在 Linux 上终止命令自己的进程组后回收 leader。该平台范围与仓库当前 Ubuntu CI 一致。
 

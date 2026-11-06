@@ -11,8 +11,8 @@
 
 ## 安装
 
-当前源码尚未完成 registry 兼容性验证。若要使用当前源码，请将 sibling
-checkout 配置为 path dependency：
+下面的示例展示如何通过 sibling path dependency 集成本地源码。当前发布安装状态见
+[安装与验证状态](doc/design.zh_CN.md#安装与验证状态)。
 
 <!-- current-source-dependencies -->
 ```toml
@@ -27,12 +27,9 @@ qubit-event-bus = { path = "../rs-event-bus" }
 
 此 patch 必须放在应用 workspace 根清单中。provider 的 registry core 依赖不会因应用直接依赖 path 版本而自动替换；若应用位于其他目录，请调整两个依赖 path 和 patch path，使其指向同一个 core checkout。
 
-默认启用 `sync`、`async` 和 `discovery`。待 registry 包可用后，如需只保留一种 SPI 并使用自动发现，可在 `qubit-event-bus-redis` 上设置 `default-features = false`，选择 `features = ["sync", "discovery"]` 或 `features = ["async", "discovery"]`。只在 `qubit-event-bus` 上启用 discovery 不会注册 Redis provider。`XAUTOCLAIM` 恢复需要 Redis 6.2 或更高版本。
-
-**Registry 状态（2026-11-06 检查）：** 源码候选包验证已通过，详见下文。标记的安装示例仍是本地源码 checkout 示例，不代表已有对应的已发布版本。
-
 当前 Cargo 清单中的 Redis 导入名为 `redis`，包名为 `qubit-redis`，精确固定到 `=2.0.0-rc.2`，来源为 registry。
-2026-11-06 执行 `bash ci/check-package-candidate.sh` 后，归档提取、清单校验、no-default-features/sync-discovery/async-discovery/default 检查及 metadata 校验均通过。这证明源码候选包通过当前构建与依赖图检查，不代表已发布，也不代表运行时验收通过。
+
+默认启用 `sync`、`async` 和 `discovery`。如需只保留一种 SPI 并使用自动发现，可在 `qubit-event-bus-redis` 上设置 `default-features = false`，选择 `features = ["sync", "discovery"]` 或 `features = ["async", "discovery"]`。只在 `qubit-event-bus` 上启用 discovery 不会注册 Redis provider。`XAUTOCLAIM` 恢复需要 Redis 6.2 或更高版本。
 
 
 ## 快速开始

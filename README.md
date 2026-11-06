@@ -11,8 +11,9 @@
 
 ## Installation
 
-This checkout has not completed registry compatibility validation. To use the
-current source, add the sibling checkouts as path dependencies:
+The example below shows local source integration using sibling path
+dependencies. The current published-install status is summarized in the
+[installation and validation status](doc/design.md#installation-and-validation-status).
 
 <!-- current-source-dependencies -->
 ```toml
@@ -27,12 +28,9 @@ qubit-event-bus = { path = "../rs-event-bus" }
 
 Put the patch in the application workspace root manifest. The provider's registry core dependency is not replaced by the application's direct path dependency; adjust both dependency paths and the patch path to the same core checkout if your application lives elsewhere.
 
-The default features enable `sync`, `async`, and `discovery`. Once registry packages are available, keep one SPI by setting `default-features = false` on `qubit-event-bus-redis` and selecting `features = ["sync", "discovery"]` or `features = ["async", "discovery"]`. Enabling discovery only on `qubit-event-bus` does not register the Redis provider. Redis 6.2 or later is required for `XAUTOCLAIM` recovery.
-
-**Registry status (checked 2026-11-06):** source candidate verification passed as described below. The marked installation example remains a local source-checkout example; it does not claim a published release is available.
-
 The current Cargo manifest imports Redis as `redis`, uses package `qubit-redis` at exact version `=2.0.0-rc.2`, and resolves it from the registry.
-The 2026-11-06 `bash ci/check-package-candidate.sh` run passed archive extraction, manifest validation, no-default-features/sync-discovery/async-discovery/default checks, and metadata validation. This validates the packaged source candidate; it is not a published release or a runtime acceptance result.
+
+The default features enable `sync`, `async`, and `discovery`. To keep one SPI, set `default-features = false` on `qubit-event-bus-redis` and select `features = ["sync", "discovery"]` or `features = ["async", "discovery"]`. Enabling discovery only on `qubit-event-bus` does not register the Redis provider. Redis 6.2 or later is required for `XAUTOCLAIM` recovery.
 
 
 ## Quick Start
