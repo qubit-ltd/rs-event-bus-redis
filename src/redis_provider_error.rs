@@ -29,7 +29,7 @@ use thiserror::Error;
 /// assert_eq!(error.to_string(), "invalid Redis provider configuration: invalid redis.url");
 /// ```
 #[must_use]
-#[derive(Debug, Error)]
+#[derive(Clone, Debug, Error)]
 pub enum RedisProviderError {
     /// A required option is missing or a supplied setting violates validation.
     #[error("invalid Redis provider configuration: {0}")]

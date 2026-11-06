@@ -34,6 +34,8 @@ pub struct BlackholeRedis {
     sockets: Arc<Mutex<Vec<TcpStream>>>,
     #[cfg(feature = "async")]
     accepted: Arc<AtomicUsize>,
+    #[cfg(feature = "async")]
+    setup_commands: Arc<AtomicUsize>,
     commands: Arc<AtomicUsize>,
     worker: Option<JoinHandle<()>>,
     #[cfg(feature = "async")]
@@ -51,12 +53,14 @@ impl BlackholeRedis {
         let stop = Arc::new(AtomicBool::new(false));
         let sockets = Arc::new(Mutex::new(Vec::new()));
         let accepted = Arc::new(AtomicUsize::new(0));
+        let setup_commands = Arc::new(AtomicUsize::new(0));
         let commands = Arc::new(AtomicUsize::new(0));
         let setup_reply = Arc::new(AtomicBool::new(setup_reply));
         let thread_setup_reply = Arc::clone(&setup_reply);
         let thread_stop = Arc::clone(&stop);
         let thread_sockets = Arc::clone(&sockets);
         let thread_accepted = Arc::clone(&accepted);
+        let thread_setup_commands = Arc::clone(&setup_commands);
         let thread_commands = Arc::clone(&commands);
         let worker = spawn(move || {
             let mut workers = Vec::new();
@@ -72,14 +76,21 @@ impl BlackholeRedis {
                             .push(stream.try_clone().expect("clone socket"));
                         thread_accepted.fetch_add(1, Ordering::SeqCst);
                         let commands = Arc::clone(&thread_commands);
+                        let setup_commands = Arc::clone(&thread_setup_commands);
                         let setup_reply = Arc::clone(&thread_setup_reply);
+                        let stop = Arc::clone(&thread_stop);
                         workers.push(spawn(move || {
                             let mut reader = BufReader::new(stream);
                             while let Ok(Some(command)) = read_command(&mut reader) {
                                 if command == "CLIENT" || command == "AUTH" || command == "SELECT" {
-                                    if setup_reply.load(Ordering::SeqCst) {
-                                        let _ = reader.get_mut().write_all(b"+OK\r\n");
+                                    setup_commands.fetch_add(1, Ordering::SeqCst);
+                                    while !setup_reply.load(Ordering::SeqCst) && !stop.load(Ordering::SeqCst) {
+                                        sleep(Duration::from_millis(1));
                                     }
+                                    if stop.load(Ordering::SeqCst) {
+                                        break;
+                                    }
+                                    let _ = reader.get_mut().write_all(b"+OK\r\n");
                                 } else {
                                     commands.fetch_add(1, Ordering::SeqCst);
                                     if let Some(reply) = reply {
@@ -103,6 +114,8 @@ impl BlackholeRedis {
             sockets,
             #[cfg(feature = "async")]
             accepted,
+            #[cfg(feature = "async")]
+            setup_commands,
             commands,
             worker: Some(worker),
             #[cfg(feature = "async")]
@@ -122,6 +135,11 @@ impl BlackholeRedis {
     #[cfg(feature = "async")]
     pub fn connections(&self) -> usize {
         self.accepted.load(Ordering::SeqCst)
+    }
+    /// Returns the number of Redis setup commands received by socket workers.
+    #[cfg(feature = "async")]
+    pub fn setup_commands(&self) -> usize {
+        self.setup_commands.load(Ordering::SeqCst)
     }
     /// Returns application command count.
     pub fn commands(&self) -> usize {

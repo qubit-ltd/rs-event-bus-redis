@@ -15,6 +15,8 @@ mod cache_state;
 mod command_class;
 mod command_lane;
 mod command_permit;
+#[cfg(feature = "async")]
+mod initialization_round;
 #[cfg(feature = "sync")]
 mod pooled_connection;
 mod receiver_permit;

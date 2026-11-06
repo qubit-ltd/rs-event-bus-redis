@@ -183,6 +183,116 @@ fn test_async_cancelled_cold_setup_leaves_cache_empty() {
     });
 }
 
+#[cfg(feature = "async")]
+#[test]
+fn test_async_cold_setup_failure_is_shared_and_retryable() {
+    let server = BlackholeRedis::start(false, Some(b"$3\r\n1-0\r\n"));
+    let bus = block_on(
+        AsyncRedisEventBusProvider
+            .create_configured(&EventBusConfig::default().with_provider_options(options(server.url(), 16))),
+    )
+    .expect("provider");
+    let mut first = bus.publish(message());
+    let mut second = bus.publish(message());
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while server.connections() == 0 && Instant::now() < deadline {
+        assert!(block_on(poll_once(&mut first)).is_none());
+        sleep(Duration::from_millis(1));
+    }
+    assert_eq!(server.connections(), 1, "first call opened the cold socket");
+    let second_ready = block_on(poll_once(&mut second));
+    assert!(
+        second_ready.is_none(),
+        "second call completed before setup failure: {second_ready:?}"
+    );
+    let (first_error, second_error) = block_on(futures_lite::future::zip(first, second));
+    assert_error(first_error.expect_err("setup timeout is shared"), "transport", true);
+    assert_error(second_error.expect_err("setup timeout is shared"), "transport", true);
+    assert_eq!(
+        server.connections(),
+        1,
+        "one connection attempt serves the failed round"
+    );
+    assert_eq!(server.commands(), 0, "failed setup never sends XADD");
+
+    server.enable_setup_replies();
+    let _ = block_on(bus.publish(message())).expect("a new round recovers after setup replies resume");
+    assert_eq!(server.connections(), 2, "a later call retries initialization");
+    assert_eq!(server.commands(), 1, "only the recovered call publishes");
+}
+
+#[cfg(feature = "async")]
+#[test]
+fn test_async_cold_success_is_shared_with_same_round() {
+    let server = BlackholeRedis::start(false, Some(b"$3\r\n1-0\r\n"));
+    let mut settings = options(server.url(), 16);
+    settings.insert("redis.connect_timeout_ms".into(), "10000".into());
+    let bus = block_on(
+        AsyncRedisEventBusProvider.create_configured(&EventBusConfig::default().with_provider_options(settings)),
+    )
+    .expect("provider");
+    let (first, second) = block_on(async {
+        let mut first = bus.publish(message());
+        let mut second = bus.publish(message());
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while server.setup_commands() == 0 && Instant::now() < deadline {
+            assert!(poll_once(&mut first).await.is_none());
+            sleep(Duration::from_millis(1));
+        }
+        assert_eq!(server.connections(), 1, "first call opened the cold socket");
+        assert!(server.setup_commands() > 0, "fixture received setup command");
+        assert!(
+            poll_once(&mut second).await.is_none(),
+            "second call joined pending setup"
+        );
+        server.enable_setup_replies();
+        futures_lite::future::zip(first, second).await
+    });
+    let _ = first.expect("first call shares successful setup");
+    let _ = second.expect("second call shares successful setup");
+    assert_eq!(server.connections(), 1, "one successful initializer serves the round");
+    assert_eq!(server.commands(), 2, "both admitted calls publish once");
+}
+
+#[cfg(feature = "async")]
+#[test]
+fn test_async_old_failure_waiter_keeps_result_after_new_round_succeeds() {
+    let server = BlackholeRedis::start(false, Some(b"$3\r\n1-0\r\n"));
+    let bus = block_on(
+        AsyncRedisEventBusProvider
+            .create_configured(&EventBusConfig::default().with_provider_options(options(server.url(), 16))),
+    )
+    .expect("provider");
+    let mut old_leader = bus.publish(message());
+    let mut old_waiter = bus.publish(message());
+    let old_leader_result = block_on(async {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while server.connections() == 0 && Instant::now() < deadline {
+            assert!(poll_once(&mut old_leader).await.is_none());
+            sleep(Duration::from_millis(1));
+        }
+        assert_eq!(server.connections(), 1, "old round opened its socket");
+        assert!(
+            poll_once(&mut old_waiter).await.is_none(),
+            "old waiter joined the pending round"
+        );
+        loop {
+            if let Some(result) = poll_once(&mut old_leader).await {
+                break result;
+            }
+            sleep(Duration::from_millis(1));
+        }
+    });
+    assert_error(old_leader_result.expect_err("old round times out"), "transport", true);
+
+    server.enable_setup_replies();
+    let _ = block_on(bus.publish(message())).expect("new round succeeds");
+    let old_waiter_error = block_on(old_waiter).expect_err("old waiter keeps old failure");
+    assert_error(old_waiter_error, "transport", true);
+    assert_eq!(server.connections(), 2, "new round retries and succeeds");
+    assert_eq!(server.commands(), 1, "only the new successful call publishes");
+}
+
 /// Converts a local fixture URL into the configured Sentinel endpoint.
 fn sentinel_options(url: &str) -> ProviderOptions {
     let mut options = options("redis://127.0.0.1:1/", 64);

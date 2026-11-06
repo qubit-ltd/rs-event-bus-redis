@@ -255,6 +255,41 @@ fn test_async_setup_timeout_counts_one_failed_connection_attempt() {
     assert_eq!(snapshot(instance_id).general_in_flight(), 0);
 }
 
+#[cfg(feature = "async")]
+#[test]
+fn test_async_shared_setup_failure_releases_each_admission_once() {
+    let server = BlackholeRedis::start(false, None);
+    let namespace = "diagnostics-async-shared-setup-failure";
+    let mut settings = options(server.url(), 16);
+    settings.insert("redis.namespace".into(), namespace.into());
+    let previous_id = latest_instance_id();
+    let bus = block_on(
+        AsyncRedisEventBusProvider.create_configured(&EventBusConfig::default().with_provider_options(settings)),
+    )
+    .expect("provider");
+    let instance_id = new_instance_id(previous_id, namespace);
+    let (first, second) = block_on(async {
+        let mut first = bus.publish(message());
+        let mut second = bus.publish(message());
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while server.connections() == 0 && Instant::now() < deadline {
+            assert!(poll_once(&mut first).await.is_none());
+            sleep(Duration::from_millis(1));
+        }
+        assert_eq!(server.connections(), 1);
+        assert!(poll_once(&mut second).await.is_none());
+        futures_lite::future::zip(first, second).await
+    });
+    assert_error(first.expect_err("first shared setup error"), "transport", true);
+    assert_error(second.expect_err("second shared setup error"), "transport", true);
+    let snapshot = snapshot(instance_id);
+    assert_eq!(snapshot.connection_attempts(), 1);
+    assert_eq!(snapshot.connection_failures(), 1);
+    assert_eq!(snapshot.general_in_flight(), 0);
+    assert_eq!(server.connections(), 1);
+    assert_eq!(server.commands(), 0);
+}
+
 /// Configures two independent Sentinel nodes whose discovery replies are
 /// withheld.
 fn two_sentinel_nodes(first: &BlackholeRedis, second: &BlackholeRedis, namespace: &str) -> ProviderOptions {
