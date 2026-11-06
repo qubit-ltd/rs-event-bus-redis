@@ -31,6 +31,22 @@ fn test_skipping_future_layout_keeps_json_recursion_guard() {
 }
 
 #[test]
+fn test_bounded_decoder_classifies_future_layout_before_v1_field_validation() {
+    let future = br#"{"version":2,"payload":{"compressed":true},"headers_json":{"future":false}}"#;
+    assert!(matches!(
+        decode(
+            future,
+            WireLimits {
+                wire: 4096,
+                payload: 1,
+                headers: 1
+            }
+        ),
+        Err(RedisProviderError::UnsupportedWireVersion)
+    ));
+}
+
+#[test]
 fn test_bounded_decoder_rejects_oversize_headers_before_inner_json_validation() {
     let wire = br#"{"version":1,"event_id":"event","timestamp_ms":0,"headers_json":"not JSON","content_type":"text/plain","payload":[]}"#;
     assert!(matches!(

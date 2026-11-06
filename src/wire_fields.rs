@@ -48,11 +48,15 @@ type WireMessageParts = (
 
 /// Versioned event fields stored in one Redis Stream record.
 ///
-/// The payload remains a byte vector, while headers are represented as JSON so
-/// the record can be round-tripped independently of a Rust process. Version 1
-/// carries encoded payloads and treats a fully valid unknown version as a
-/// protocol error. JSON syntax and Serde's recursion protection are checked
-/// before the version is returned; version 1 field validation runs afterward.
+/// This is the concrete Rust layout for version 1 Redis stream fields. The
+/// payload is a byte vector and headers are represented as JSON. Its derived
+/// [`Deserialize`] implementation requires this layout directly; it does not
+/// perform the provider's version-first classification or enforce configured
+/// wire, payload, or header size limits. The provider's internal decoder first
+/// validates JSON and reads the version, then applies bounded version 1 field
+/// decoding. A complete version 1-shaped value with an unknown version can be
+/// deserialized as this type, but [`WireFields::into_parts`] rejects it. An
+/// arbitrary future layout need not deserialize as `WireFields` at all.
 ///
 /// # Examples
 ///

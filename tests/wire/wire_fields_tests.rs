@@ -155,6 +155,20 @@ fn test_unknown_wire_version_is_rejected() {
 }
 
 #[test]
+fn test_public_wire_deserialize_uses_concrete_version_one_layout() {
+    let future = br#"{"version":2,"payload":{"compressed":true},"headers_json":{"future":false}}"#;
+    assert!(from_slice::<WireFields>(future).is_err());
+
+    let mut fields = WireFields::from_outbound(&message(&[], Headers::new())).unwrap();
+    fields.version = 2;
+    let decoded: WireFields = from_slice(&to_vec(&fields).unwrap()).unwrap();
+    assert!(matches!(
+        decoded.into_parts(TopicAddress::new("events").unwrap()),
+        Err(qubit_event_bus_redis::error::RedisProviderError::UnsupportedWireVersion)
+    ));
+}
+
+#[test]
 fn test_wire_decoder_rejects_malformed_fields() -> Result<(), Box<dyn Error>> {
     let valid = WireFields {
         version: 1,
