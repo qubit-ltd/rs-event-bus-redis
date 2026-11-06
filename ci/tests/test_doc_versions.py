@@ -18,12 +18,16 @@ class DocumentationVersionTests(unittest.TestCase):
             'qubit-spi = "0.14"\n',
             encoding="utf-8",
         )
+        english += "\n" + module.REDIS_SOURCE_CLAIMS["en"]
+        chinese += "\n" + module.REDIS_SOURCE_CLAIMS["zh"]
         (root / "README.md").write_text(english, encoding="utf-8")
         (root / "README.zh_CN.md").write_text(chinese, encoding="utf-8")
         guide = root / "doc"
         guide.mkdir(exist_ok=True)
         (guide / "user_guide.md").write_text(english, encoding="utf-8")
         (guide / "user_guide.zh_CN.md").write_text(chinese, encoding="utf-8")
+        (guide / "design.md").write_text(english, encoding="utf-8")
+        (guide / "design.zh_CN.md").write_text(chinese, encoding="utf-8")
 
     @staticmethod
     def source_block(core="0.21", provider="0.7.0", spi="0.14"):
@@ -32,7 +36,8 @@ class DocumentationVersionTests(unittest.TestCase):
             "```toml\n[dependencies]\n"
             f'qubit-event-bus = {{ version = "{core}", path = "../rs-event-bus" }}\n'
             f'qubit-event-bus-redis = {{ version = "{provider}", path = "../rs-event-bus-redis" }}\n'
-            f'qubit-spi = "{spi}"\n```.\n'
+            f'qubit-spi = "{spi}"\n\n[patch.crates-io]\n'
+            'qubit-event-bus = { path = "../rs-event-bus" }\n```.\n'
         )
 
     def test_matching_bilingual_source_versions_pass_and_ignore_history(self):
@@ -65,6 +70,41 @@ class DocumentationVersionTests(unittest.TestCase):
             root = Path(temp)
             self.write_inputs(root, self.source_block(), self.source_block(spi="0.13"))
             self.assertTrue(any("README" in issue for issue in module.check(root)))
+
+    def test_source_install_requires_root_core_patch(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            block = self.source_block().replace(
+                '\n[patch.crates-io]\nqubit-event-bus = { path = "../rs-event-bus" }',
+                "",
+            )
+            self.write_inputs(root, block, block)
+            self.assertTrue(any("patch.crates-io" in issue for issue in module.check(root)))
+
+    def test_source_install_rejects_patch_to_different_core(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            block = self.source_block().replace(
+                'qubit-event-bus = { path = "../rs-event-bus" }\n```.',
+                'qubit-event-bus = { path = "../other-core" }\n```.',
+            )
+            self.write_inputs(root, block, block)
+            self.assertTrue(any("patch path must match" in issue for issue in module.check(root)))
+
+    def test_current_redis_source_statement_checks_package_version_and_source(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            block = self.source_block()
+            self.write_inputs(root, block, block)
+            readme = root / "README.md"
+            readme.write_text(
+                readme.read_text(encoding="utf-8").replace(
+                    "qubit-redis` at exact version `=2.0.0-rc.2`, and resolves it from the registry",
+                    "redis` at exact version `=2.0.0-rc.1`, and resolves it from Git",
+                ),
+                encoding="utf-8",
+            )
+            self.assertTrue(any("README.md" in issue for issue in module.check(root)))
 
     def test_cargo_multiline_inline_dependency_tables_are_parsed(self):
         with tempfile.TemporaryDirectory() as temp:

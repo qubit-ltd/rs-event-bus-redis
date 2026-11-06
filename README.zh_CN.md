@@ -20,13 +20,19 @@ checkout 配置为 path dependency：
 qubit-event-bus = { version = "0.21", path = "../rs-event-bus", features = ["discovery"] }
 qubit-event-bus-redis = { version = "0.7.0", path = "../rs-event-bus-redis" }
 qubit-spi = "0.14"
+
+[patch.crates-io]
+qubit-event-bus = { path = "../rs-event-bus" }
 ```
+
+此 patch 必须放在应用 workspace 根清单中。provider 的 registry core 依赖不会因应用直接依赖 path 版本而自动替换；若应用位于其他目录，请调整两个依赖 path 和 patch path，使其指向同一个 core checkout。
 
 默认启用 `sync`、`async` 和 `discovery`。待 registry 包可用后，如需只保留一种 SPI 并使用自动发现，可在 `qubit-event-bus-redis` 上设置 `default-features = false`，选择 `features = ["sync", "discovery"]` 或 `features = ["async", "discovery"]`。只在 `qubit-event-bus` 上启用 discovery 不会注册 Redis provider。`XAUTOCLAIM` 恢复需要 Redis 6.2 或更高版本。
 
-**Registry 状态（2026-11-04 查询）：** 当前源码清单版本为 provider 0.7.0/core 0.21/SPI 0.14.0。crates.io 尚无 `qubit-event-bus-redis 0.7.0` 和 `qubit-event-bus 0.21.0`；`redis 2.0.0-rc.1` 及当时最新的 `2.0.0-rc.2` 也没有源码 fork 所需的响应限额 API。因此 registry 安装和已发布组合兼容性均未验证，当前源码组合在 registry 中不可用。上面的 path 示例只适用于 sibling source checkout。
+**Registry 状态（2026-11-06 检查）：** 源码候选包验证已通过，详见下文。标记的安装示例仍是本地源码 checkout 示例，不代表已有对应的已发布版本。
 
-源码清单将 Redis client 固定到 Qubit `qubit-ltd/redis-rs` fork 提交 `a668891e9fcfed32f8905c2fd729fa05c1732aa5`（redis-rs 2.0.0-rc.1），该 fork 支持有界响应读取。Cargo 打包规范化会移除 Git 来源，只保留精确 registry 版本，因此候选包仍须使用提供等价 API 的 registry client。2026-11-04 运行 `bash ci/check-package-candidate.sh` 时，在 package 阶段因 crates.io 缺少 `qubit-event-bus ^0.21` 而退出。源码检查也确认 registry 的 Redis 2.0.0-rc.1 和 2.0.0-rc.2 均没有响应限额 API。候选归档和运行行为尚未验证；解除该检查阻塞需要 registry 提供 core 0.21，以及具有等价响应预算能力的 client。
+当前 Cargo 清单中的 Redis 导入名为 `redis`，包名为 `qubit-redis`，精确固定到 `=2.0.0-rc.2`，来源为 registry。
+2026-11-06 执行 `bash ci/check-package-candidate.sh` 后，归档提取、清单校验、no-default-features/sync-discovery/async-discovery/default 检查及 metadata 校验均通过。这证明源码候选包通过当前构建与依赖图检查，不代表已发布，也不代表运行时验收通过。
 
 
 ## 快速开始

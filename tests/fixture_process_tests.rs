@@ -12,6 +12,7 @@ mod support;
 use std::error::Error;
 #[cfg(target_os = "linux")]
 use std::fs::File;
+use std::io::Read;
 use std::process::Command;
 use std::process::Stdio;
 use std::thread;
@@ -28,8 +29,116 @@ use nix::sys::signal::killpg;
 #[cfg(target_os = "linux")]
 use nix::unistd::Pid;
 use support::fixture_process::run_logged;
+use support::redis_server::wait_until_ready;
 
 const CHILD_MODE: &str = "QUBIT_FIXTURE_PROCESS_CHILD";
+type ReadinessEndpoint = (
+    String,
+    std::sync::mpsc::Receiver<()>,
+    std::sync::mpsc::Sender<()>,
+    thread::JoinHandle<()>,
+);
+
+#[test]
+fn test_readiness_blackhole_is_bounded() -> Result<(), Box<dyn Error>> {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+    listener.set_nonblocking(true)?;
+    let address = listener.local_addr()?;
+    let (accepted_tx, accepted_rx) = std::sync::mpsc::channel();
+    let (stop_tx, stop_rx) = std::sync::mpsc::channel();
+    let server = thread::spawn(move || {
+        let mut stream = loop {
+            if stop_rx.try_recv().is_ok() {
+                return;
+            }
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("accept failed: {error}"),
+            }
+        };
+        stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let mut request = [0_u8; 14];
+        stream.read_exact(&mut request).unwrap();
+        accepted_tx.send(()).unwrap();
+        let _ = stop_rx.recv_timeout(Duration::from_secs(2));
+        drop(stream);
+    });
+
+    let started = Instant::now();
+    let result = wait_until_ready(&format!("redis://{address}/"), Duration::from_millis(300));
+    let accepted = accepted_rx.recv_timeout(Duration::from_secs(2));
+    let elapsed = started.elapsed();
+    stop_tx.send(())?;
+    server.join().unwrap();
+    accepted?;
+    assert!(result.is_err(), "a silent endpoint must not be ready");
+    assert!(elapsed < Duration::from_secs(2));
+    Ok(())
+}
+
+#[test]
+fn test_readiness_non_pong_is_bounded() -> Result<(), Box<dyn Error>> {
+    assert_readiness_reply_is_bounded(b"-NOPE\r\n")
+}
+
+#[test]
+fn test_readiness_accepts_pong() -> Result<(), Box<dyn Error>> {
+    let (url, requests, stop, server) = readiness_endpoint(b"+PONG\r\n")?;
+    let result = wait_until_ready(&url, Duration::from_millis(300));
+    let request = requests.recv_timeout(Duration::from_secs(2));
+    let _ = stop.send(());
+    server.join().unwrap();
+    result?;
+    request?;
+    Ok(())
+}
+
+fn assert_readiness_reply_is_bounded(reply: &'static [u8]) -> Result<(), Box<dyn Error>> {
+    let (url, requests, stop, server) = readiness_endpoint(reply)?;
+    let started = Instant::now();
+    let result = wait_until_ready(&url, Duration::from_millis(300));
+    let request = requests.recv_timeout(Duration::from_secs(2));
+    let elapsed = started.elapsed();
+    let _ = stop.send(());
+    server.join().unwrap();
+    request?;
+    assert!(result.is_err(), "a non-PONG endpoint must not be ready");
+    assert!(elapsed < Duration::from_secs(2));
+    Ok(())
+}
+
+fn readiness_endpoint(reply: &'static [u8]) -> Result<ReadinessEndpoint, Box<dyn Error>> {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+    listener.set_nonblocking(true)?;
+    let address = listener.local_addr()?;
+    let (requests_tx, requests_rx) = std::sync::mpsc::channel();
+    let (stop_tx, stop_rx) = std::sync::mpsc::channel();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = loop {
+            if stop_rx.try_recv().is_ok() {
+                return;
+            }
+            match listener.accept() {
+                Ok(connection) => break connection,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("accept failed: {error}"),
+            }
+        };
+        use std::io::Read;
+        use std::io::Write;
+        stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let mut request = [0_u8; 14];
+        stream.read_exact(&mut request).unwrap();
+        requests_tx.send(()).unwrap();
+        stream.write_all(reply).unwrap();
+    });
+    Ok((format!("redis://{address}/"), requests_rx, stop_tx, server))
+}
 
 #[test]
 // The grandchild modes intentionally let descendants outlive their leader so

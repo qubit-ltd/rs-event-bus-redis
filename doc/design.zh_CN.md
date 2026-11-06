@@ -86,7 +86,7 @@ adapter 按实际操作阶段分类失败，不额外定义两状态 outcome enu
 | 隔离未知/可能部分执行 | `outcome_unknown` | `Some(false)`，先检查源记录/PEL/owner |
 | 准入拒绝 | `resource_limit` | `Some(true)`，该操作没有发出命令 |
 | 发布字节超限 | `payload_too_large` / `wire_too_large` | `Some(false)`，不发送 XADD |
-| wire 限额内的未知版本 | `unsupported_wire_version` | `Some(false)`，保留 PEL |
+| wire 限额内且完整有效的未知版本 | `unsupported_wire_version` | `Some(false)`，保留 PEL；无效或嵌套过深的 JSON 会隔离 |
 
 订阅创建时，首次 `BUSYGROUP` 是明确的已有组结果；显式使用 `Earliest` 或 `At` 时仍按 `existing_group_start_position_ignored` 策略处理。发送 `XGROUP CREATE` 后发生超时或传输错误，则首次结果未知；adapter 仍按原规则重试一次。如果重试返回 `BUSYGROUP`，`New` 和显式 `resume` 沿用已有游标；显式 `Earliest` 或 `At` 配合 `reject` 时返回 `operation=subscribe`、`kind=outcome_unknown`、`retryable=Some(false)`。provider 不推断首次请求一定创建了组，不移动游标、不 ACK、也不删除任何对象。恢复前检查 `XINFO GROUPS` 和 `XPENDING`；仅当业务接受已有游标时使用 `resume`，若需新回放位置则选用新的 group。
 
@@ -94,9 +94,9 @@ adapter 按实际操作阶段分类失败，不额外定义两状态 outcome enu
 
 ## Wire v1 与隔离
 
-wire 保持为 stream 的 `wire` 字段中的版本 1 JSON，保存 byte-array 编码 payload 和元数据。发布先检查原始 payload 长度，通过 Write sink 限制外层 wire 和中间 headers JSON，不先构造无限增长的最终 String。provider 编码借用调用方 event ID、content type、schema ID、ordering key 和 payload，不复制任意长度的元数据；只分配受限的 headers JSON 和完整 wire String。公开的 `WireFields::from_outbound` 便捷转换是另一条路径，不应用 provider 配置限额。接收借用 Redis wire 原始字节，先限额再解析 UTF-8/JSON，先读取小版本结构，再读取 typed v1 字段并检查解码 payload 长度；版本 1 还通过常量空间计数器扫描结构深度，包括被忽略的字段：最多接受 127 层容器，拒绝第 128 层；保留 Serde 递归限制。未知版本在 v1 字段形状和深度检查前返回。版本探针忽略字段的 scratch 可随嵌套增长，但已先执行 wire 字节限额；不能因此将整个 decoder 描述为常量空间。
+wire 保持为 stream 的 `wire` 字段中的版本 1 JSON，保存 byte-array 编码 payload 和元数据。发布先检查原始 payload 长度，通过 Write sink 限制外层 wire 和中间 headers JSON，不先构造无限增长的最终 String。provider 编码借用调用方 event ID、content type、schema ID、ordering key 和 payload，不复制任意长度的元数据；只分配受限的 headers JSON 和完整 wire String。公开的 `WireFields::from_outbound` 便捷转换是另一条路径，不应用 provider 配置限额。接收先限制完整序列化 wire 字节，再解析并校验完整 JSON 文档，同时选择版本。Serde JSON 递归保护适用于所有版本和被忽略字段；无效或嵌套过深的 JSON 属于格式错误。只有完整有效的未知版本才会在不应用版本 1 字段布局的情况下返回 UnsupportedWireVersion。之后版本 1 再进行有界 typed 解码，并应用 payload 与 headers 限额。版本探针忽略字段的 scratch 可随嵌套增长，但已先执行 wire 字节限额；不能因此将整个 decoder 描述为常量空间。
 
-wire 限额内的未知 `u64` 整数版本报错并保留 PEL。wire、payload 或 headers 配置容量超限时返回 `receive_limit_exceeded`，源记录保留在 PEL 中，不确认也不隔离；其余确定性格式错误仍会隔离、ACK 并返回 Gap。此外，专用 receiver 连接会在构造 Redis 响应值前，把完整 RESP 响应帧限制为 `redis.max_wire_bytes + 65,536` 字节；普通连接沿用现有 parser 策略。这只是响应帧上限，不是进程 RSS 上限。receiver 响应帧超限时，provider 会关闭连接、释放 receiver 准入，以 `receive_response_too_large` 停止订阅，并保留可能产生的 PEL 记录。操作人员应先检查 `XPENDING`；由于 provider 未能可靠读取完整记录 ID 和 wire 数据，是否删除或隔离须人工决策。
+wire 限额内且完整有效的未知 `u64` 整数版本会报错并保留 PEL；即使声明未知版本，无效或嵌套过深的 JSON 仍会隔离。wire、payload 或 headers 配置容量超限时返回 `receive_limit_exceeded`，源记录保留在 PEL 中，不确认也不隔离；其余确定性格式错误仍会隔离、ACK 并返回 Gap。此外，专用 receiver 连接会在构造 Redis 响应值前，把完整 RESP 响应帧限制为 `redis.max_wire_bytes + 65,536` 字节；普通连接沿用现有 parser 策略。这只是响应帧上限，不是进程 RSS 上限。receiver 响应帧超限时，provider 会关闭连接、释放 receiver 准入，以 `receive_response_too_large` 停止订阅，并保留可能产生的 PEL 记录。操作人员应先检查 `XPENDING`；由于 provider 未能可靠读取完整记录 ID 和 wire 数据，是否删除或隔离须人工决策。
 
 隔离 Lua 在检查源/目标类型及当前 PEL owner 后，于 Redis 内读取 wire、复制隔离记录，再执行 XACK。重复 `wire` 字段按最后一个值生效，与 Redis owned parser 一致。脚本执行中不能插入其他命令，但后续失败不会回滚已复制记录。回复丢失或部分失败可能产生重复隔离副本，须通过 `source_stream`、`group`、`source_id` 关联。OwnershipChanged 不确认其他 owner 的记录，源记录缺失不伪造 payload；tombstone 清除及隔离成功返回 Gap。隔离流保留由运维负责。
 
@@ -104,7 +104,8 @@ wire 限额内的未知 `u64` 整数版本报错并保留 PEL。wire、payload �
 
 Accept/Reject 确认 Redis PEL，Retry 只释放本地占用并保留 PEL。`XREADGROUP >` 返回的新消息携带 `provider_attempt = Some(1)`。每条准备交付的恢复记录会先额外执行一次精确 ID 的 `XPENDING` 明细查询；只有恰好一条明细的 ID 与预期记录匹配、owner 为当前 consumer，且非零次数可由 SPI 的 `u32` 表示时，才报告投递次数。查询失败、空结果、格式错误、次数为零或不可表示、以及 owner/ID 不匹配时，次数保持未知（`None`）。因此每条恢复消息多一次 Redis 命令，新消息路径不增加查询。关闭不 ACK，不删除消费组或 stream。可选 `XADD MAXLEN ~` 会丢失未读/pending 历史；未读记录被裁剪不一定返回 Gap。至少一次投递要求业务幂等，claim idle 阈值应匹配 handler 时长。
 
-源码清单将 `redis` 包固定到 Qubit 维护的 `qubit-ltd/redis-rs` 提交 `a668891e9fcfed32f8905c2fd729fa05c1732aa5`，基于 redis-rs 2.0.0-rc.1 并提供响应帧大小限制 API。应用只需依赖 `qubit-event-bus-redis`，无须添加本地 Cargo patch 或直接依赖 fork。Cargo package 规范化会移除 Git 来源，只保留 `=2.0.0-rc.1`。诊断用 no-verify `.crate` 确认了该来源变化，但独立包验证无法从 crates.io 解析 `qubit-event-bus ^0.21`。独立 registry probe 还发现 Redis 2.0.0-rc.1 和当前最新的 2.0.0-rc.2 都没有 `ConnectionConfig`；registry 包因此缺少响应帧限额所需 API。取得具备等价响应预算能力的 registry client 前，不应发布该 provider。
+当前 Cargo 清单中的 Redis 导入名为 `redis`，包名为 `qubit-redis`，精确固定到 `=2.0.0-rc.2`，来源为 registry。
+2026-11-06 执行 `bash ci/check-package-candidate.sh` 后，归档提取、清单校验、no-default-features/sync-discovery/async-discovery/default 检查及 metadata 校验均通过。这证明源码候选包通过当前构建与依赖图检查，不代表已发布，也不代表运行时验收通过。
 
 Registry consumer 验证有两种模式：默认 `source-candidate` 将版本与当前源码清单比较；`published` 跳过此比较，但保留精确版本、registry 来源、依赖边和唯一 core 身份校验。2026-11-03 检查时，历史组合 `0.7.0 / 0.20.1 / 0.14.0` 无法解析，因为 crates.io 没有 `qubit-event-bus-redis 0.7.0`。这是缺少证据，不是兼容性结论。
 

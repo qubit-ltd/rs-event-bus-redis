@@ -287,14 +287,23 @@ impl AsyncEventBusSpi for AsyncRedisEventBus {
                     .get_async_connection(CommandClass::General)
                     .await
                     .map_err(|error| spi_error("subscribe", Some(&topic), error))?;
-                cmd("XGROUP")
+                let retry_result: Result<(), RedisError> = cmd("XGROUP")
                     .arg("CREATE")
                     .arg(&key)
                     .arg(&group)
                     .arg(start)
                     .arg("MKSTREAM")
                     .query_async(&mut retry_connection)
-                    .await
+                    .await;
+                if retry_result
+                    .as_ref()
+                    .is_err_and(|error| error.is_io_error() || error.is_timeout())
+                {
+                    self.client
+                        .invalidate_async_connection(retry_connection.generation)
+                        .await;
+                }
+                retry_result
             } else {
                 result
             };

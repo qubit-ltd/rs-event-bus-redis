@@ -47,11 +47,14 @@ use crate::wire::WireFields;
 ///
 /// # Errors
 ///
-/// Returns `UnsupportedVersion` for an unknown numeric version within the wire
-/// budget and `LimitExceeded` when wire, payload, or header limits are
-/// exceeded. Limit failures leave the source entry pending; deterministic
-/// malformed data returns a stable poison reason. The original wire bytes are
-/// never cloned into a String.
+/// Returns `UnsupportedVersion` for a fully valid unknown numeric version
+/// within the wire budget and `LimitExceeded` when wire, payload, or header
+/// limits are exceeded. The decoder validates JSON syntax and applies Serde's
+/// recursion guard before returning an unsupported version; malformed or
+/// excessively nested input follows the existing poison policy. Limit failures
+/// leave the source entry pending; deterministic malformed data returns a
+/// stable poison reason. The original wire bytes are never cloned into a
+/// String.
 pub(crate) fn decode_entry(
     subscription_id: Id,
     topic: &TopicAddress,

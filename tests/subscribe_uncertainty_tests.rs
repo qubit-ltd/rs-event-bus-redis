@@ -28,12 +28,24 @@ use futures_lite::future::block_on;
 use qubit_event_bus::EventBusConfig;
 use qubit_event_bus::SpiError;
 use qubit_event_bus::model::ConsumerGroup;
+#[cfg(feature = "async")]
+use qubit_event_bus::model::ContentType;
+#[cfg(feature = "async")]
+use qubit_event_bus::model::EventId;
+#[cfg(feature = "async")]
+use qubit_event_bus::model::Headers;
 use qubit_event_bus::model::ProviderOptions;
 use qubit_event_bus::model::StartPosition;
 use qubit_event_bus::model::SubscriberId;
 use qubit_event_bus::model::SubscriptionDurability;
+#[cfg(feature = "async")]
+use qubit_event_bus::spi::EncodedPayload;
+#[cfg(feature = "async")]
+use qubit_event_bus::spi::OutboundMessage;
 use qubit_event_bus::spi::SpiSubscriptionRequest;
 use qubit_event_bus::spi::TopicAddress;
+#[cfg(feature = "async")]
+use qubit_event_bus::spi::TransportPayload;
 #[cfg(feature = "async")]
 use qubit_event_bus_redis::r#async::AsyncRedisEventBusProvider;
 #[cfg(feature = "sync")]
@@ -49,6 +61,111 @@ use redis::streams::StreamInfoGroupsReply;
 use redis::streams::StreamPendingCountReply;
 use support::controlled_redis::proxy::ControlledRedis;
 use support::redis_server::RedisServer;
+#[cfg(feature = "async")]
+use support::scripted_redis::ScriptedRedis;
+#[cfg(feature = "async")]
+use support::scripted_redis::Step;
+
+#[cfg(feature = "async")]
+fn async_publish_message() -> Result<OutboundMessage, Box<dyn Error>> {
+    Ok(OutboundMessage::new(
+        TopicAddress::new("events")?,
+        EventId::new("recovery-publish")?,
+        std::time::SystemTime::now(),
+        Headers::new(),
+        None,
+        None,
+        TransportPayload::Encoded(EncodedPayload::new(
+            std::sync::Arc::from(b"payload".to_vec()),
+            ContentType::new("application/octet-stream")?,
+            None,
+        )),
+    ))
+}
+
+#[cfg(feature = "async")]
+#[test]
+fn test_async_second_xgroup_disconnect_recovers_next_publish() -> Result<(), Box<dyn Error>> {
+    let server = ScriptedRedis::start(vec![
+        Step::disconnect("XGROUP", false),
+        Step::disconnect("XGROUP", false),
+        Step::reply("XADD", b"$3\r\n1-0\r\n"),
+    ])?;
+    let namespace = "second-xgroup-disconnect-recovery";
+    let bus = block_on(
+        AsyncRedisEventBusProvider
+            .create_configured(&EventBusConfig::default().with_provider_options(options(server.url(), namespace))),
+    )
+    .map_err(|failure| failure.into_error())?;
+    let subscribe_result = block_on(bus.subscribe(request(
+        StartPosition::Earliest,
+        "group-second-disconnect",
+        ProviderOptions::new(),
+    )));
+    assert!(subscribe_result.is_err(), "both scripted XGROUP requests disconnect");
+    // The two scripted steps are consumed only after the endpoint has parsed
+    // both XGROUP requests. The next SPI operation must issue one XADD.
+    assert_eq!(server.finish_allow_remaining().len(), 2);
+    let connections_after_subscribe = server.connection_count();
+    assert!(
+        connections_after_subscribe >= 3,
+        "receiver and command generations are distinct"
+    );
+
+    let publish_result = block_on(bus.publish(async_publish_message()?));
+    assert!(
+        publish_result.is_ok(),
+        "next publish should use a live command connection: {publish_result:?}"
+    );
+    let commands = server.finish();
+    assert_eq!(commands.iter().filter(|command| command[0] == "XGROUP").count(), 2);
+    assert_eq!(commands.iter().filter(|command| command[0] == "XADD").count(), 1);
+    assert!(
+        server.connection_count() > connections_after_subscribe,
+        "publish reconnects after the dead retry generation"
+    );
+    Ok(())
+}
+
+#[cfg(feature = "async")]
+#[test]
+fn test_async_second_xgroup_timeout_does_not_reuse_timed_out_connection() -> Result<(), Box<dyn Error>> {
+    let server = ScriptedRedis::start(vec![
+        Step::disconnect("XGROUP", false),
+        Step::delayed_reply("XGROUP", b"+OK\r\n", Duration::from_millis(300)),
+        Step::reply("XADD", b"$3\r\n1-0\r\n"),
+    ])?;
+    let mut provider_options = options(server.url(), "second-xgroup-timeout-recovery");
+    provider_options.insert("redis.command_timeout_ms".into(), "100".into());
+    let bus = block_on(
+        AsyncRedisEventBusProvider
+            .create_configured(&EventBusConfig::default().with_provider_options(provider_options)),
+    )
+    .map_err(|failure| failure.into_error())?;
+    let subscribe_result = block_on(bus.subscribe(request(
+        StartPosition::Earliest,
+        "group-second-timeout",
+        ProviderOptions::new(),
+    )));
+    assert!(
+        subscribe_result.is_err(),
+        "the delayed retry reply exceeds the command timeout"
+    );
+    let xgroups = server.finish_allow_remaining();
+    assert_eq!(xgroups.len(), 2);
+    let connections_after_subscribe = server.connection_count();
+
+    let publish_result = block_on(bus.publish(async_publish_message()?));
+    assert!(
+        publish_result.is_ok(),
+        "timeout invalidation permits a fresh publish connection: {publish_result:?}"
+    );
+    let commands = server.finish();
+    assert_eq!(commands.iter().filter(|command| command[0] == "XGROUP").count(), 2);
+    assert_eq!(commands.iter().filter(|command| command[0] == "XADD").count(), 1);
+    assert!(server.connection_count() > connections_after_subscribe);
+    Ok(())
+}
 
 const WAIT: Duration = Duration::from_secs(5);
 

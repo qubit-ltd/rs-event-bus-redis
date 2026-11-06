@@ -189,6 +189,11 @@ impl ScriptedRedis {
         self.state.commands.lock().expect("commands lock").clone()
     }
 
+    /// Returns the number of TCP connections accepted by this endpoint.
+    pub fn connection_count(&self) -> usize {
+        self.state.connections.lock().expect("connections lock").len()
+    }
+
     /// Returns a snapshot of observed command arguments after checking all
     /// steps.
     ///

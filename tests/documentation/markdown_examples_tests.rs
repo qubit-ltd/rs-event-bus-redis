@@ -270,6 +270,123 @@ fn manifest(root: &Path, tag: &str) -> String {
     )
 }
 
+/// Builds an isolated consumer from the README's real marked TOML block.
+///
+/// Only the documented sibling paths are relocated to absolute checkouts; no
+/// dependency, feature, or patch entry is added by the test.
+fn source_install_manifest(root: &Path, core_root: &Path) -> Result<String, Box<dyn Error>> {
+    let readme = fs::read_to_string(root.join("README.md"))?;
+    let marked = readme
+        .split_once("<!-- current-source-dependencies -->")
+        .ok_or("README is missing current-source-dependencies marker")?
+        .1;
+    let toml = marked
+        .split_once("```toml\n")
+        .ok_or("README marker is not followed by a TOML block")?
+        .1
+        .split_once("\n```")
+        .ok_or("README install TOML block is not closed")?
+        .0;
+    let provider_path = to_string(&root.to_string_lossy())?;
+    let core_path = to_string(&core_root.to_string_lossy())?;
+    let relocated = toml
+        .replace("path = \"../rs-event-bus-redis\"", &format!("path = {provider_path}"))
+        .replace("path = \"../rs-event-bus\"", &format!("path = {core_path}"));
+    Ok(format!(
+        "[package]\nname = \"source-install-consumer\"\nversion = \"0.0.0\"\nedition = \"2024\"\npublish = false\n\n[workspace]\n\n{relocated}\n"
+    ))
+}
+
+/// Checks the source install contract without resolving dependencies.
+fn source_install_has_matching_core_patch(manifest: &str) -> bool {
+    let Some((dependencies, patch)) = manifest.split_once("[patch.crates-io]") else {
+        return false;
+    };
+    let direct_path = core_path_from(dependencies, "qubit-event-bus = { version =");
+    let patch_path = core_path_from(patch, "qubit-event-bus = { path =");
+    direct_path.is_some() && direct_path == patch_path
+}
+
+fn core_path_from<'section>(section: &'section str, prefix: &str) -> Option<&'section str> {
+    section
+        .lines()
+        .find(|line| line.trim_start().starts_with(prefix))
+        .and_then(|line| line.split_once("path = \"")?.1.split_once('"').map(|(path, _)| path))
+}
+
+/// Confirms the documented source installation resolves one shared core crate
+/// and compiles its real README automatic-discovery consumer.
+#[test]
+fn test_source_install_manifest_has_one_core_identity() -> Result<(), Box<dyn Error>> {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let core_root = std::env::var_os("QUBIT_EVENT_BUS_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root.parent().expect("sibling facade parent").join("rs-event-bus"));
+    let temp = TempDir::new()?;
+    let project = temp.path();
+    let install_manifest = source_install_manifest(&root, &core_root)?;
+    assert!(source_install_has_matching_core_patch(&install_manifest));
+    let missing_patch = install_manifest.replacen("[patch.crates-io]", "[removed.patch]", 1);
+    assert!(
+        !source_install_has_matching_core_patch(&missing_patch),
+        "a source install without the root core patch must fail before Cargo runs"
+    );
+    fs::write(project.join("Cargo.toml"), install_manifest)?;
+    fs::create_dir(project.join("src"))?;
+    let readme = rust_blocks(&root.join("README.md"))?;
+    fs::write(project.join("src/main.rs"), code(&readme, "readme-sync-discovery"))?;
+
+    let target = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root.join("target"));
+    let log = target.join("markdown-documentation/source-install-metadata");
+    fs::create_dir_all(log.parent().expect("metadata log parent"))?;
+    let metadata = run_command(
+        Command::new("cargo")
+            .args(["+1.94.0", "metadata", "--format-version", "1", "--manifest-path"])
+            .arg(project.join("Cargo.toml")),
+        &log,
+        Duration::from_secs(120),
+    )?;
+    let metadata: serde_json::Value = serde_json::from_str(&metadata)?;
+    let packages = metadata["packages"].as_array().ok_or("metadata packages missing")?;
+    let core_ids: Vec<_> = packages
+        .iter()
+        .filter(|package| package["name"] == "qubit-event-bus")
+        .filter_map(|package| package["id"].as_str())
+        .collect();
+    assert_eq!(core_ids.len(), 1, "metadata must contain one core package identity");
+    let nodes = metadata["resolve"]["nodes"]
+        .as_array()
+        .ok_or("metadata resolve graph missing")?;
+    let package_id = |name: &str| {
+        packages
+            .iter()
+            .find(|package| package["name"] == name)
+            .and_then(|package| package["id"].as_str())
+    };
+    let consumer_id = package_id("source-install-consumer").ok_or("consumer package missing")?;
+    let provider_id = package_id("qubit-event-bus-redis").ok_or("provider package missing")?;
+    let depends_on_core = |id: &str| {
+        nodes
+            .iter()
+            .find(|node| node["id"] == id)
+            .and_then(|node| node["deps"].as_array())
+            .is_some_and(|deps| deps.iter().any(|dep| dep["pkg"] == core_ids[0]))
+    };
+    assert!(depends_on_core(consumer_id), "consumer must resolve the shared core");
+    assert!(depends_on_core(provider_id), "provider must resolve the shared core");
+
+    let build_log = target.join("markdown-documentation/source-install-build");
+    let mut build = Command::new("cargo");
+    build
+        .args(["+1.94.0", "check", "--locked", "--manifest-path"])
+        .arg(project.join("Cargo.toml"))
+        .env("CARGO_TARGET_DIR", &target);
+    run_command(&mut build, &build_log, Duration::from_secs(600))?;
+    Ok(())
+}
+
 /// Runs each current fragment/program, then checks Redis rather than trusting
 /// output alone.
 ///

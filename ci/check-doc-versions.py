@@ -11,6 +11,18 @@ DOCUMENT_PAIRS = (
     ("README.md", "README.zh_CN.md"),
     ("doc/user_guide.md", "doc/user_guide.zh_CN.md"),
 )
+CURRENT_DOCUMENTS = (
+    "README.md",
+    "README.zh_CN.md",
+    "doc/user_guide.md",
+    "doc/user_guide.zh_CN.md",
+    "doc/design.md",
+    "doc/design.zh_CN.md",
+)
+REDIS_SOURCE_CLAIMS = {
+    "en": "The current Cargo manifest imports Redis as `redis`, uses package `qubit-redis` at exact version `=2.0.0-rc.2`, and resolves it from the registry.",
+    "zh": "当前 Cargo 清单中的 Redis 导入名为 `redis`，包名为 `qubit-redis`，精确固定到 `=2.0.0-rc.2`，来源为 registry。",
+}
 DEPENDENCIES = ("qubit-event-bus-redis", "qubit-event-bus", "qubit-spi")
 
 
@@ -18,7 +30,7 @@ class DocumentationError(Exception):
     pass
 
 
-def extract_dependencies(path: Path) -> dict[str, str]:
+def extract_dependencies(path: Path) -> tuple[dict[str, str], str, str]:
     text = path.read_text(encoding="utf-8")
     if text.count(MARKER) != 1:
         raise DocumentationError(f"{path}: expected exactly one {MARKER} marker")
@@ -40,7 +52,20 @@ def extract_dependencies(path: Path) -> dict[str, str]:
         if not isinstance(version, str):
             raise DocumentationError(f"{path}: missing version for {name}")
         result[name] = version
-    return result
+    provider = dependencies["qubit-event-bus-redis"]
+    core = dependencies["qubit-event-bus"]
+    patch = block.get("patch", {}).get("crates-io", {}).get("qubit-event-bus")
+    if not isinstance(provider, dict) or not isinstance(provider.get("path"), str):
+        raise DocumentationError(f"{path}: provider dependency must use a source path")
+    if not isinstance(core, dict) or not isinstance(core.get("path"), str):
+        raise DocumentationError(f"{path}: core dependency must use a source path")
+    if not isinstance(patch, dict) or not isinstance(patch.get("path"), str):
+        raise DocumentationError(f"{path}: [patch.crates-io] must patch qubit-event-bus by path")
+    if patch["path"] != core["path"]:
+        raise DocumentationError(
+            f"{path}: qubit-event-bus patch path must match its direct dependency path"
+        )
+    return result, provider["path"], core["path"]
 
 
 def manifest_dependencies(manifest_path: Path) -> dict[str, str]:
@@ -84,19 +109,31 @@ def check(root: Path) -> list[str]:
         english_path = root / english_name
         chinese_path = root / chinese_name
         try:
-            english = extract_dependencies(english_path)
-            chinese = extract_dependencies(chinese_path)
+            english, english_provider_path, english_core_path = extract_dependencies(english_path)
+            chinese, chinese_provider_path, chinese_core_path = extract_dependencies(chinese_path)
         except (OSError, DocumentationError) as error:
             issues.append(str(error))
             continue
         if english != chinese:
             issues.append(f"{english_name} and {chinese_name}: marked dependency versions differ")
+        if (english_provider_path, english_core_path) != (chinese_provider_path, chinese_core_path):
+            issues.append(f"{english_name} and {chinese_name}: marked dependency paths differ")
         for path, dependencies in ((english_path, english), (chinese_path, chinese)):
             for name, version in expected.items():
                 if dependencies.get(name) != version:
                     issues.append(
                         f"{path}: {name} version {dependencies.get(name)!r} does not match Cargo.toml {version!r}"
                     )
+    for path in CURRENT_DOCUMENTS:
+        document = root / path
+        claim = REDIS_SOURCE_CLAIMS["zh" if path.endswith("zh_CN.md") else "en"]
+        try:
+            text = document.read_text(encoding="utf-8")
+        except OSError as error:
+            issues.append(str(error))
+            continue
+        if claim not in text:
+            issues.append(f"{document}: current qubit-redis version/source statement is missing or incorrect")
     return issues
 
 

@@ -50,7 +50,9 @@ type WireMessageParts = (
 ///
 /// The payload remains a byte vector, while headers are represented as JSON so
 /// the record can be round-tripped independently of a Rust process. Version 1
-/// carries encoded payloads and treats an unknown version as a protocol error.
+/// carries encoded payloads and treats a fully valid unknown version as a
+/// protocol error. JSON syntax and Serde's recursion protection are checked
+/// before the version is returned; version 1 field validation runs afterward.
 ///
 /// # Examples
 ///
@@ -226,12 +228,11 @@ impl WireFields {
     ///
     /// # Errors
     ///
-    /// Returns `UnsupportedWireVersion` for a valid numeric version other than
-    /// 1, a size error when wire/payload bytes exceed their budget, and an
-    /// operation error for malformed JSON or version 1 fields. Version 1
-    /// rejects structural nesting of 128 containers, including ignored
-    /// fields; Serde's default recursion limit also remains enabled.
-    /// Unknown versions return before version 1 depth and payload checks.
+    /// Returns `UnsupportedWireVersion` only after the complete JSON document
+    /// and Serde's recursion guard have passed for a numeric version other
+    /// than 1. A size error is returned when wire/payload bytes exceed their
+    /// budget, and an operation error for malformed JSON or version 1 fields.
+    /// Version 1 field validation runs only after version selection.
     /// Decoding performs no external I/O.
     #[cfg(any(feature = "sync", feature = "async"))]
     pub(crate) fn decode_wire(encoded: &str, limits: WireLimits) -> Result<Self, RedisProviderError> {

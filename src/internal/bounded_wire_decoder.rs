@@ -5,8 +5,8 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-//! Two-pass version selection and bounded typed wire construction, without a
-//! JSON AST.
+//! Full-JSON version selection followed by bounded typed version-one
+//! construction, without a JSON AST.
 
 use std::cell::Cell;
 
@@ -46,10 +46,14 @@ use crate::error::RedisProviderError;
 use crate::wire_fields::WireFields;
 use crate::wire_limits::WireLimits;
 
-/// Parses version first, preserving future records without interpreting their
-/// layout. These parser limits cover the decoded wire record, payload, and
-/// headers; they do not cap the client's RESP frame allocation. The dedicated
-/// receiver applies a separate limit to the complete RESP response frame.
+/// Enforces the wire-byte limit, validates the complete JSON value and reads
+/// its version, then constructs bounded version-one fields. Serde's JSON
+/// recursion guard applies during the first pass for every version, including
+/// ignored future fields. A valid unknown version is preserved without
+/// interpreting its version-one layout. These parser limits cover the decoded
+/// wire record, payload, and headers; they do not cap the client's RESP frame
+/// allocation. The dedicated receiver applies a separate limit to the complete
+/// RESP response frame.
 ///
 /// # Parameters
 ///
@@ -63,6 +67,9 @@ use crate::wire_limits::WireLimits;
 /// # Errors
 ///
 /// Returns a sanitized malformed JSON, unsupported version, or limit error.
+/// Invalid or excessively nested JSON is malformed even when its version is
+/// unknown; only a fully valid document with an unsupported version is
+/// returned as unsupported.
 pub(crate) fn decode(encoded: &[u8], limits: WireLimits) -> Result<WireFields, RedisProviderError> {
     if encoded.len() > limits.wire {
         return Err(RedisProviderError::LimitExceeded);
