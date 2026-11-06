@@ -37,7 +37,7 @@ qubit-event-bus = { path = "../rs-event-bus" }
 
 ## 快速开始
 
-订单服务可在启动时选择 `redis-streams` provider，注册 payload codec，再通过类型化 facade 发布和消费。下面的完整同步程序展示了整条路径：handler 收到订单后报告结果，服务随后取消订阅并优雅关闭总线。
+订单服务可在启动时选择 `redis-streams` provider，注册 payload codec，再通过类型化 facade 发布和消费。下面的完整同步程序展示了整条路径：handler 会报告每个事件 ID 和载荷；发布端只有收到本次事件的 ID 后才报告成功。程序可能先处理已有 pending 事件；整个等待过程共用五秒期限。Redis 确认不代表应用数据库事务已经提交。
 
 **运行条件：** 使用 Redis 6.2 或更高版本；若 Redis 不在 `redis://127.0.0.1/`，请设置 `REDIS_URL`。程序默认使用唯一 namespace `orders-readme-sync`；如需隔离演示数据，可将 `REDIS_NAMESPACE` 设为一个新值。`billing` 是持久消费组：首次创建时，`Earliest` 会从保留数据的开头读取；后续运行通过显式设置 `redis.existing_group_start=resume` 沿用 Redis 保存的游标，不会回退或重放已确认的记录。此前尚未结算的记录仍可能先于本次新事件送达。
 
@@ -120,16 +120,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .build(),
         ),
         move |delivery| {
-            sender.send(delivery.payload().clone()).map_err(|source| {
+            sender.send((delivery.event().id().clone(), delivery.payload().clone())).map_err(|source| {
                 qubit_event_bus::DeliveryError::Handler {
                     source: Box::new(source),
                 }
             })
         },
     )?;
-    bus.publish(PublishRequest::new(topic, "order-42".to_owned())?)?;
-    let received = receiver.recv_timeout(Duration::from_secs(5))?;
-    println!("consumed order event: {received}");
+    let request = PublishRequest::new(topic, "order-42".to_owned())?;
+    let expected_id = request.envelope().id().clone();
+    bus.publish(request)?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let received = loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Err("timed out waiting for this run's event".into());
+        }
+        let (event_id, payload) = receiver.recv_timeout(remaining)?;
+        if event_id == expected_id {
+            break payload;
+        }
+        println!("recovered earlier event: {}", event_id.as_str());
+    };
+    println!("consumed order event: {received}; event_id={}", expected_id.as_str());
 
     subscription.cancel()?;
     let report = bus.shutdown(ShutdownMode::Graceful {
@@ -143,7 +156,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 <!-- END DOC EXAMPLE -->
 
-程序成功时会打印 `consumed order event: order-42`，并在优雅关闭完成后退出。生产环境的 handler 应先提交应用自己的账单变更，再返回成功；这里的打印仅用于入门验证，不代表数据库事务已提交。进程退出后，Redis 仍会保留 stream 数据和消费组。[用户指南](doc/user_guide.zh_CN.md) 介绍异步执行、Sentinel、恢复及运维检查。仓库中的完整示例也可通过 `cargo run --example sync_orders -- redis://127.0.0.1/ local-sync-orders` 和 `cargo run --example async_orders -- redis://127.0.0.1/ local-async-orders` 运行。
+程序成功时会打印 `consumed order event: order-42; event_id=…`，并在优雅关闭完成后退出。生产环境的 handler 应先提交应用自己的账单变更，再返回成功；这里的打印仅用于入门验证，不代表数据库事务已提交。进程退出后，Redis 仍会保留 stream 数据和消费组。[用户指南](doc/user_guide.zh_CN.md) 介绍异步执行、Sentinel、恢复及运维检查。仓库中的完整示例也可通过 `cargo run --example sync_orders -- redis://127.0.0.1/ local-sync-orders` 和 `cargo run --example async_orders -- redis://127.0.0.1/ local-async-orders` 运行。
 ## 为什么需要这个项目
 
 event-bus SPI 允许应用更换传输实现，而不改业务 handler。Redis Streams 保留消息记录和消费组确认状态，帮助服务实例断连后继续消费。自动发现也省去了启动阶段手动注册 provider 的代码。

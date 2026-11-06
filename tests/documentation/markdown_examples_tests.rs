@@ -15,15 +15,28 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 use std::process::Stdio;
+use std::sync::Arc;
 use std::thread::sleep;
 use std::time::Duration;
 use std::time::Instant;
+use std::time::SystemTime;
 
+use qubit_event_bus::model::ContentType;
+use qubit_event_bus::model::EventId;
+use qubit_event_bus::model::Headers;
+use qubit_event_bus::spi::EncodedPayload;
+use qubit_event_bus::spi::OutboundMessage;
+use qubit_event_bus::spi::TopicAddress;
+use qubit_event_bus::spi::TransportPayload;
 use qubit_event_bus_redis::naming::group_name;
 use qubit_event_bus_redis::naming::stream_key;
+use qubit_event_bus_redis::wire::WireFields;
 use redis::Client;
 use redis::Value;
 use redis::cmd;
+use redis::streams::StreamRangeReply;
+use redis::streams::StreamReadReply;
+use serde_json::from_str;
 use serde_json::to_string;
 use tempfile::TempDir;
 
@@ -314,6 +327,65 @@ fn core_path_from<'section>(section: &'section str, prefix: &str) -> Option<&'se
         .and_then(|line| line.split_once("path = \"")?.1.split_once('"').map(|(path, _)| path))
 }
 
+/// Seeds one same-payload legacy event into the README consumer group's PEL.
+///
+/// The old consumer first receives the event normally; XCLAIM's IDLE option
+/// makes it immediately eligible for the README provider's recovery scan.
+fn seed_old_pending(connection: &mut redis::Connection, namespace: &str) -> Result<(), Box<dyn Error>> {
+    let stream = stream_key(namespace, "orders.created");
+    let group = group_name(namespace, "orders.created", "billing-worker", Some("billing"));
+    let old = WireFields::from_outbound(&OutboundMessage::new(
+        TopicAddress::new("orders.created")?,
+        EventId::new("legacy-order-42")?,
+        SystemTime::now(),
+        Headers::new(),
+        None,
+        None,
+        TransportPayload::Encoded(EncodedPayload::new(
+            Arc::from(&b"order-42"[..]),
+            ContentType::new("text/plain")?,
+            None,
+        )),
+    ))?;
+    let wire = to_string(&old)?;
+    let old_stream_id: String = cmd("XADD")
+        .arg(&stream)
+        .arg("*")
+        .arg("wire")
+        .arg(wire)
+        .query(connection)?;
+    let _: () = cmd("XGROUP")
+        .arg("CREATE")
+        .arg(&stream)
+        .arg(&group)
+        .arg("0-0")
+        .query(connection)?;
+    let received: Option<StreamReadReply> = cmd("XREADGROUP")
+        .arg("GROUP")
+        .arg(&group)
+        .arg("readme-old-consumer")
+        .arg("STREAMS")
+        .arg(&stream)
+        .arg(">")
+        .query(connection)?;
+    assert_eq!(
+        received.map(|reply| reply.keys.into_iter().map(|key| key.ids.len()).sum::<usize>()),
+        Some(1),
+        "old README event must enter the PEL before the program starts"
+    );
+    let claimed: Value = cmd("XCLAIM")
+        .arg(&stream)
+        .arg(&group)
+        .arg("readme-old-consumer")
+        .arg(0)
+        .arg(&old_stream_id)
+        .arg("IDLE")
+        .arg(60_000)
+        .query(connection)?;
+    assert!(matches!(claimed, Value::Array(ref rows) if rows.len() == 1));
+    Ok(())
+}
+
 /// Confirms the documented source installation resolves one shared core crate
 /// and compiles its real README automatic-discovery consumer.
 #[test]
@@ -538,7 +610,7 @@ fn test_markdown_fragments_and_programs_publish_settle_and_close() -> Result<(),
             let namespace = format!("markdown-{id}");
             let binary = target.join("debug").join(format!("markdown-consumer{}", EXE_SUFFIX));
             let output = run_command(
-                Command::new(binary)
+                Command::new(&binary)
                     .env("REDIS_URL", redis.url())
                     .env("REDIS_NAMESPACE", &namespace),
                 &evidence.join(format!("{id}-run")),
@@ -580,6 +652,68 @@ fn test_markdown_fragments_and_programs_publish_settle_and_close() -> Result<(),
                 "{id} shutdown must finish settlement; actual PEL: {pending:?}"
             );
             println!("validated Markdown {guide} block {tag}: consumed {expected}, PEL empty, shutdown complete");
+            if guide.starts_with("README") {
+                let recovery_namespace = format!("{namespace}-old-pending");
+                seed_old_pending(&mut observer, &recovery_namespace)?;
+                let recovery_output = run_command(
+                    Command::new(&binary)
+                        .env("REDIS_URL", redis.url())
+                        .env("REDIS_NAMESPACE", &recovery_namespace),
+                    &evidence.join(format!("{id}-old-pending-run")),
+                    Duration::from_secs(15),
+                )?;
+                assert!(
+                    recovery_output.contains("recovered earlier event: legacy-order-42"),
+                    "{id} must observe the seeded old pending event before succeeding: {recovery_output}"
+                );
+                let recovery_stream = stream_key(&recovery_namespace, "orders.created");
+                let recovery_group =
+                    group_name(&recovery_namespace, "orders.created", "billing-worker", Some("billing"));
+                let records: StreamRangeReply = cmd("XRANGE")
+                    .arg(&recovery_stream)
+                    .arg("-")
+                    .arg("+")
+                    .query(&mut observer)?;
+                assert_eq!(records.ids.len(), 2, "{id} must retain the legacy and new records");
+                let decoded: Vec<WireFields> = records
+                    .ids
+                    .iter()
+                    .map(|record| {
+                        let wire = redis::from_redis_value::<String>(
+                            record.map.get("wire").expect("stream record has wire field").clone(),
+                        )?;
+                        Ok(from_str(&wire)?)
+                    })
+                    .collect::<Result<_, Box<dyn Error>>>()?;
+                let old_event = decoded
+                    .iter()
+                    .find(|fields| fields.event_id == "legacy-order-42")
+                    .expect("old wire event remains in source stream");
+                let new_event = decoded
+                    .iter()
+                    .find(|fields| fields.event_id != "legacy-order-42")
+                    .expect("new wire event remains in source stream");
+                assert_eq!(new_event.payload, b"order-42");
+                assert_ne!(old_event.event_id, new_event.event_id);
+                assert!(
+                    recovery_output.contains(&format!(
+                        "consumed order event: order-42; event_id={}",
+                        new_event.event_id
+                    )),
+                    "{id} success must identify the new wire EventId: {recovery_output}"
+                );
+                let pending: Value = cmd("XPENDING")
+                    .arg(&recovery_stream)
+                    .arg(&recovery_group)
+                    .query(&mut observer)?;
+                assert!(
+                    matches!(pending, Value::Array(ref values) if matches!(values.first(), Some(Value::Int(0)))),
+                    "{id} must settle both recovered and new records; actual PEL: {pending:?}"
+                );
+                println!(
+                    "validated Markdown {guide} block {tag}: observed old EventId, succeeded on new EventId, source retained, PEL empty"
+                );
+            }
         }
     }
     Ok(())

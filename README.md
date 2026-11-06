@@ -37,7 +37,7 @@ The 2026-11-06 `bash ci/check-package-candidate.sh` run passed archive extractio
 
 ## Quick Start
 
-An order service can select the `redis-streams` provider during startup, register the payload codec, and use the typed facade to publish and consume. The program below is the complete synchronous path: its handler reports the consumed order, then the service cancels the subscription and gracefully shuts down the bus.
+An order service can select the `redis-streams` provider during startup, register the payload codec, and use the typed facade to publish and consume. The program below is the complete synchronous path: its handler reports each event ID and payload, while the publisher reports success only after receiving this run's event ID. Existing pending events may be handled first. The five-second deadline covers the whole wait, and a Redis acknowledgement does not prove that an application database transaction committed.
 
 **Prerequisites:** run Redis 6.2 or newer and set `REDIS_URL` if it is not at `redis://127.0.0.1/`. Each run uses the single namespace `orders-readme-sync` by default; set `REDIS_NAMESPACE` to a fresh value for an isolated run. `billing` is a durable consumer group. On its first creation, `Earliest` reads retained stream entries from the beginning. On later runs, the explicit `redis.existing_group_start=resume` option keeps the group's saved cursor; it does not rewind or replay acknowledged entries. Existing pending entries may be delivered before this run's new event.
 
@@ -120,16 +120,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .build(),
         ),
         move |delivery| {
-            sender.send(delivery.payload().clone()).map_err(|source| {
+            sender.send((delivery.event().id().clone(), delivery.payload().clone())).map_err(|source| {
                 qubit_event_bus::DeliveryError::Handler {
                     source: Box::new(source),
                 }
             })
         },
     )?;
-    bus.publish(PublishRequest::new(topic, "order-42".to_owned())?)?;
-    let received = receiver.recv_timeout(Duration::from_secs(5))?;
-    println!("consumed order event: {received}");
+    let request = PublishRequest::new(topic, "order-42".to_owned())?;
+    let expected_id = request.envelope().id().clone();
+    bus.publish(request)?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let received = loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Err("timed out waiting for this run's event".into());
+        }
+        let (event_id, payload) = receiver.recv_timeout(remaining)?;
+        if event_id == expected_id {
+            break payload;
+        }
+        println!("recovered earlier event: {}", event_id.as_str());
+    };
+    println!("consumed order event: {received}; event_id={}", expected_id.as_str());
 
     subscription.cancel()?;
     let report = bus.shutdown(ShutdownMode::Graceful {
@@ -143,7 +156,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 <!-- END DOC EXAMPLE -->
 
-A successful run prints `consumed order event: order-42` and exits only after graceful shutdown completes. Production handlers should commit the application's billing change before returning success; the printed line is an exercise signal, not proof of a database transaction. Redis retains stream data and groups after exit. The [user guide](doc/user_guide.md) covers async execution, Sentinel, recovery, and operational checks. The repository's complete examples are also available with `cargo run --example sync_orders -- redis://127.0.0.1/ local-sync-orders` and `cargo run --example async_orders -- redis://127.0.0.1/ local-async-orders`.
+A successful run prints `consumed order event: order-42; event_id=…` and exits only after graceful shutdown completes. Production handlers should commit the application's billing change before returning success; the printed line is an exercise signal, not proof of a database transaction. Redis retains stream data and groups after exit. The [user guide](doc/user_guide.md) covers async execution, Sentinel, recovery, and operational checks. The repository's complete examples are also available with `cargo run --example sync_orders -- redis://127.0.0.1/ local-sync-orders` and `cargo run --example async_orders -- redis://127.0.0.1/ local-async-orders`.
 
 ## Why This Project Exists
 
