@@ -359,7 +359,7 @@ redis.sentinel.tls_client_key_path=/etc/redis/sentinel-client-key.pem
 
 若 Sentinel 使用明文、只有主节点使用 TLS，则不设置 `redis.sentinel.tls`（或设为 `false`），并让 `redis.url` 使用 `rediss://...`。除非 Sentinel 服务明确配置为信任该身份，否则不要把主节点证书复用为 Sentinel 证书。每个 PEM 文件都必须非空且不超过 1 MiB。provider 创建实例时读取并解析证书；读取或格式错误只返回通用 TLS 配置错误，不暴露路径、证书内容或底层库详情。替换证书后需重建 provider 实例，既有实例不会自动重载。TLS 故障不会改变 `XADD` 结果未知时的处理规则，也不会自动重放命令。
 
-启用 Sentinel 时，`redis.sentinel.nodes` 和 `redis.sentinel.service_name` 必须同时设置。此时 Redis URL 仍须是合法 URL，但不会用于查找 master。Sentinel 连接不进入 standalone 空闲池；解析通过有等待预算的 `SENTINEL get-master-addr-by-name` 和候选节点 `ROLE` 探测完成。每次解析对最多 16 个节点各尝试一次，优先使用上次成功的节点。同步 standalone 短命令最多复用 `redis.max_idle_connections` 条空闲连接；异步 standalone 发布与结算共享 multiplexed 命令连接。并发冷启动共用一次初始化；代际检查防止旧连接的失败清除新连接。Sentinel 路径不缓存 master socket；ROLE 验证后仍可能发生切换并拒绝命令，provider 不会透明重放 XADD。接收器使用独立连接，阻塞读取不会占用短命令通道。
+启用 Sentinel 时，`redis.sentinel.nodes` 和 `redis.sentinel.service_name` 必须同时设置。此时 Redis URL 仍须是合法 URL，但不会用于查找 master。Sentinel 连接不进入 standalone 空闲池；解析通过有等待预算的 `SENTINEL get-master-addr-by-name` 和候选节点 `ROLE` 探测完成。每次解析对最多 16 个节点各尝试一次，优先使用上次成功的节点。同步 standalone 短命令最多复用 `redis.max_idle_connections` 条空闲连接；异步 standalone 发布与结算共享 multiplexed 命令连接。同一冷初始化轮次中的调用共享成功或失败；失败后，后续调用可以重试。初始化 future 被取消时，该轮仍在等待的调用可以用自己的初始化 future 接手。不使用后台初始化任务或失败冷却期，连接超时也不提供端到端时限保证。代际检查防止旧连接的失败清除新连接。Sentinel 路径不缓存 master socket；ROLE 验证后仍可能发生切换并拒绝命令，provider 不会透明重放 XADD。接收器使用独立连接，阻塞读取不会占用短命令通道。
 
 凭据应放在服务运行环境中。provider options 保存环境变量名称；`RedisEventBusConfig` 的 `Debug` 会隐藏 URL、凭据和 TLS 文件路径。不要把明文密钥放入 provider options、URL、命令行参数或日志。TLS 保护传输并验证服务端身份，但不会改变 Redis 的持久化、复制、投递或业务幂等语义。
 
@@ -484,7 +484,7 @@ claim、pending、attempt 明细和 tombstone 维护命令通过 receiver 专用
 
 默认 1MiB payload 限额按编码字节计量，8MiB wire 限额计入完整 JSON，包括 byte-array 膨胀和元数据。payload 合法不代表任意 headers 都能装入 wire。发布先检查 payload，再通过有界 sink 写出 JSON；中间 headers JSON 也受限。provider 编码借用调用方元数据和 payload，分配的 headers/wire String 都有界；直接调用 `WireFields::from_outbound` 转换不会应用这些 provider 配置限额。接收先检查完整 wire 字节限额，再解析 JSON；完整 JSON 语法和 Serde 递归保护适用于所有版本及被忽略字段。完整有效的未知版本跳过版本 1 字段校验，而无效或嵌套过深的 JSON 按 poison 策略处理。版本 1 随后应用有界字段、payload 和 headers 校验。可读取历史记录超过 wire、payload 或 headers 容量时返回 `receive_limit_exceeded` 并保留 pending；确定性格式错误进入隔离。专用 receiver 的 RESP 帧上限与这些解码记录限额相互独立。
 
-限制约束 provider 后续序列化、解析的追加分配。RESP 字节已由 Redis client 库接收，因此它不是抵御恶意超大 RESP bulk 的硬隔离边界，也不是整个进程的绝对内存上限。应结合可信 Redis/网络、server `maxmemory`、应用并发及源 stream/隔离流保留策略管理资源。隔离流没有自动保留上限。
+解码预算约束 provider 追加的序列化和解析分配。专用 receiver 连接另有 `redis.max_wire_bytes + 65,536` 字节的 RESP 响应帧限制，并在构造响应值前执行。该帧限制不适用于其他连接，也不是进程 RSS 上限。应结合可信 Redis/网络、server `maxmemory`、应用并发及源 stream/隔离流保留策略管理资源。隔离流没有自动保留上限。
 
 ## 11. 怎样维护消费组和处理下游通知
 
