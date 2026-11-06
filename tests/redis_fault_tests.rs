@@ -587,6 +587,7 @@ fn test_sync_attempt_query_failure_delivers_unknown_and_discards_connection() {
         Step::reply("XGROUP", b"+OK\r\n"),
         Step::reply("XAUTOCLAIM", &claimed_record(false)),
         Step::reply("XPENDING", FAULT),
+        Step::reply("XACK", b":1\r\n"),
     ])
     .expect("start RESP endpoint");
     let bus = sync_bus(&server);
@@ -595,6 +596,10 @@ fn test_sync_attempt_query_failure_delivers_unknown_and_discards_connection() {
         panic!("claimed record must be delivered when attempt lookup fails");
     };
     assert_eq!(message.provider_attempt(), None);
+    let token = message.settlement().expect("settlement token remains available");
+    subscription
+        .settle(token, DeliveryDisposition::Accept)
+        .expect("message remains settleable after attempt lookup failure");
     server.finish();
 }
 
@@ -606,6 +611,7 @@ fn test_async_attempt_query_failure_delivers_unknown_and_discards_connection() {
             Step::reply("XGROUP", b"+OK\r\n"),
             Step::reply("XAUTOCLAIM", &claimed_record(false)),
             Step::reply("XPENDING", FAULT),
+            Step::reply("XACK", b":1\r\n"),
         ])
         .expect("start RESP endpoint");
         let bus = async_bus(&server).await;
@@ -614,6 +620,11 @@ fn test_async_attempt_query_failure_delivers_unknown_and_discards_connection() {
             panic!("claimed record must be delivered when attempt lookup fails");
         };
         assert_eq!(message.provider_attempt(), None);
+        let token = message.settlement().expect("settlement token remains available");
+        subscription
+            .settle(token, DeliveryDisposition::Accept)
+            .await
+            .expect("message remains settleable after attempt lookup failure");
         server.finish();
     });
 }

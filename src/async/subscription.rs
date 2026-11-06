@@ -694,22 +694,10 @@ async fn read_entry(
     let id = entry.id.clone();
     let message = match decode_entry(subscription, entry) {
         Ok(message) => message,
-        Err(DecodeFailure::LimitExceeded) => {
-            return Err(spi_error(
-                "receive",
-                &subscription.topic,
-                RedisProviderError::LimitExceeded,
-            ));
-        }
-        Err(DecodeFailure::UnsupportedVersion) => {
-            return Err(SpiError::Operation {
-                provider_id: "redis-streams".into(),
-                operation: "receive",
-                resource: Some(subscription.topic.as_str().into()),
-                kind: "unsupported_wire_version",
-                retryable: Some(false),
-                source: Box::new(RedisProviderError::UnsupportedWireVersion),
-            });
+        Err(failure @ (DecodeFailure::LimitExceeded | DecodeFailure::UnsupportedVersion)) => {
+            return Err(failure
+                .receive_error(&subscription.topic)
+                .expect("non-poison failure has an SPI error"));
         }
         Err(DecodeFailure::Poison(reason)) => {
             if !driver.budget_mut().take_maintenance_evaluation(Instant::now()) {
@@ -737,26 +725,12 @@ async fn read_entry(
                     },
                 )
             })?;
-            return Ok(match outcome {
-                PoisonOutcome::Quarantined => {
-                    if let Some(diagnostics) = subscription.client.diagnostics() {
-                        diagnostics.increment(RedisDiagnosticCounter::QuarantineSucceeded);
-                    }
-                    Some(ReceiveOutcome::Gap(DeliveryGap::new(
-                        "malformed Redis stream entry was quarantined",
-                        Some(1),
-                    )))
-                }
-                PoisonOutcome::SourceGone => Some(ReceiveOutcome::Gap(DeliveryGap::new(
-                    "malformed pending Redis stream entry was removed",
-                    Some(1),
-                ))),
-                PoisonOutcome::TombstoneCleared => Some(ReceiveOutcome::Gap(DeliveryGap::new(
-                    "deleted Redis stream entry was removed from the pending list",
-                    Some(1),
-                ))),
-                PoisonOutcome::OwnershipChanged => None,
-            });
+            if outcome == PoisonOutcome::Quarantined
+                && let Some(diagnostics) = subscription.client.diagnostics()
+            {
+                diagnostics.increment(RedisDiagnosticCounter::QuarantineSucceeded);
+            }
+            return Ok(outcome.receive_outcome());
         }
     };
     let provider_attempt = if recovered {

@@ -9,6 +9,7 @@
 
 mod command_tests;
 mod poison_reason_tests;
+mod receive_decision_tests;
 mod receive_driver_tests;
 mod recovery_scan_budget_tests;
 mod recovery_state_tests;

@@ -583,15 +583,6 @@ fn read_entry(
     let id = entry.id.clone();
     match decode_entry(subscription, entry) {
         Ok(message) => {
-            let marked = lock_state(&subscription.recovery, &subscription.topic, "receive", "recovery lock")?
-                .mark_delivered(id.clone(), subscription.max_unsettled);
-            if !marked {
-                return Err(spi_error(
-                    "receive",
-                    Some(&subscription.topic),
-                    RedisProviderError::Operation("active delivery limit"),
-                ));
-            }
             let provider_attempt = if recovered {
                 let timeout = subscription.client.command_timeout();
                 connection
@@ -633,21 +624,20 @@ fn read_entry(
             } else {
                 message
             };
+            let marked = lock_state(&subscription.recovery, &subscription.topic, "receive", "recovery lock")?
+                .mark_delivered(id, subscription.max_unsettled);
+            if !marked {
+                return Err(spi_error(
+                    "receive",
+                    Some(&subscription.topic),
+                    RedisProviderError::Operation("active delivery limit"),
+                ));
+            }
             Ok(Some(ReceiveOutcome::Message(message)))
         }
-        Err(DecodeFailure::LimitExceeded) => Err(spi_error(
-            "receive",
-            Some(&subscription.topic),
-            RedisProviderError::LimitExceeded,
-        )),
-        Err(DecodeFailure::UnsupportedVersion) => Err(SpiError::Operation {
-            provider_id: "redis-streams".into(),
-            operation: "receive",
-            resource: Some(subscription.topic.as_str().into()),
-            kind: "unsupported_wire_version",
-            retryable: Some(false),
-            source: Box::new(RedisProviderError::UnsupportedWireVersion),
-        }),
+        Err(failure @ (DecodeFailure::LimitExceeded | DecodeFailure::UnsupportedVersion)) => Err(failure
+            .receive_error(&subscription.topic)
+            .expect("non-poison failure has an SPI error")),
         Err(DecodeFailure::Poison(reason)) => {
             if !driver.budget_mut().take_maintenance_evaluation(Instant::now()) {
                 lock_state(&subscription.recovery, &subscription.topic, "receive", "recovery lock")?
@@ -679,26 +669,12 @@ fn read_entry(
                     },
                 )
             })?;
-            match outcome {
-                PoisonOutcome::Quarantined => {
-                    if let Some(diagnostics) = subscription.client.diagnostics() {
-                        diagnostics.increment(RedisDiagnosticCounter::QuarantineSucceeded);
-                    }
-                    Ok(Some(ReceiveOutcome::Gap(DeliveryGap::new(
-                        "malformed Redis stream entry was quarantined",
-                        Some(1),
-                    ))))
-                }
-                PoisonOutcome::SourceGone => Ok(Some(ReceiveOutcome::Gap(DeliveryGap::new(
-                    "malformed pending Redis stream entry was removed",
-                    Some(1),
-                )))),
-                PoisonOutcome::TombstoneCleared => Ok(Some(ReceiveOutcome::Gap(DeliveryGap::new(
-                    "deleted Redis stream entry was removed from the pending list",
-                    Some(1),
-                )))),
-                PoisonOutcome::OwnershipChanged => Ok(None),
+            if outcome == PoisonOutcome::Quarantined
+                && let Some(diagnostics) = subscription.client.diagnostics()
+            {
+                diagnostics.increment(RedisDiagnosticCounter::QuarantineSucceeded);
             }
+            Ok(outcome.receive_outcome())
         }
     }
 }
