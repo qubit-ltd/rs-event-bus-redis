@@ -363,6 +363,35 @@ redis.sentinel.tls_client_key_path=/etc/redis/sentinel-client-key.pem
 
 凭据应放在服务运行环境中。provider options 保存环境变量名称；`RedisEventBusConfig` 的 `Debug` 会隐藏 URL、凭据和 TLS 文件路径。不要把明文密钥放入 provider options、URL、命令行参数或日志。TLS 保护传输并验证服务端身份，但不会改变 Redis 的持久化、复制、投递或业务幂等语义。
 
+### 按职责配置 Redis ACL
+
+应用账号只应拥有其实际订阅的 topic/group 所需命令，以及对应的 key 范围。provider 使用 Redis 客户端的默认 RESP2 协议：配置 password（可同时配置 ACL username）后，连接初始化会执行 `AUTH`，不需要 `HELLO`。数据库选择由 `redis.url` 中的数据库编号控制；仅当编号非零时（例如 URL 以 `/3` 结尾），客户端才会在连接初始化时执行 `SELECT`。客户端还会在新连接上尝试 `CLIENT SETINFO LIB-NAME` 和 `CLIENT SETINFO LIB-VER`，但会忽略命令回复；这只是可选元数据，不是 provider 正常工作的前提。Redis 6.2 不支持 `CLIENT SETINFO`。同步 standalone 空闲连接被复用前，连接池可能用 `PING` 检查连接。
+
+| 账号或操作路径 | 允许的命令 | key 范围 |
+| --- | --- | --- |
+| 发布者 | `XADD`；同步 standalone 空闲连接健康检查还会用到 `PING` | 对配置 topic 的 stream 执行写入。 |
+| 持久订阅与结算 | `XGROUP CREATE`、`XREADGROUP`、`XAUTOCLAIM`、`XPENDING`、`XRANGE`、`XACK`；同步 standalone 空闲连接健康检查还会用到 `PING` | 对 topic stream 读写。这些恢复命令用于不同接收路径，每次 receive 不一定都会执行全部命令。stream 尚不存在时，`XGROUP CREATE` 还需要创建该 key 的权限。 |
+| 畸形记录隔离与 tombstone 修复 | `EVAL`，以及脚本内部的 `TYPE`、`XPENDING`、`XRANGE`、`XADD`、`XACK` | 源 stream 和该消费组专用的隔离 stream。脚本会检查两个 key 的类型、查询并读取源记录、写入隔离副本，再确认源记录。若 ACL key 规则或内部命令规则拒绝访问，仅授权 `EVAL` 仍然不够。 |
+| Sentinel 发现账号 | `SENTINEL get-master-addr-by-name`，以及该连接配置 password 时执行的 `AUTH` | 不访问应用 stream key。Sentinel 凭据应与 master 凭据分开。支持 ACL 子命令规则的 Redis 可授予 `+sentinel|get-master-addr-by-name`；不支持子命令规则的服务器只能用更宽的 `+sentinel` 命令权限，应先核对该版本 ACL 能力。 |
+| Sentinel 返回的 master 账号 | 按应用需要授予发布/订阅命令，另加 master 校验所用的 `ROLE` | 与 standalone 相同的应用 stream 和隔离 key。master 使用 `redis.username_env`、`redis.password_env`，不读取 Sentinel 的凭据变量。 |
+| 运维/观察账号 | 按运维任务授予 `XINFO`、`XLEN`、`XPENDING`、`XRANGE`、`INFO` 等 | 只读检查指定的源 key 和隔离 key。请与应用账号分开管理。 |
+
+可以使用公开 `naming` helper 核对实际 key。下面固定采用 namespace `guide-acl`、topic `events`、subscriber `billing-worker` 和显式 group `billing`：stream key 是 `qubit:stream:9:guide-acl:6:events`，group 名称是 `qubit:group:9:guide-acl:6:events:7:billing`，隔离 key 是 `qubit:poison:9:guide-acl:6:events:43:qubit:group:9:guide-acl:6:events:7:billing`。group 名称只是 stream 命令的参数，本身不是 Redis key。Redis ACL 的 key pattern 使用 glob 匹配，不是逐字匹配；`*`、`?`、方括号表达式和转义符都有模式含义。示例组件不含 glob 元字符。如果 namespace/topic/group 中含有这些字符，ACL pattern 可能匹配额外 key；应限制这类配置值，或仔细审查最终 pattern。添加其他 topic/group 时，可以逐项授权对应 stream 与隔离 key，也可以制定范围明确、经过实际验证的 pattern。
+
+管理员可以按下面的结构为单一 topic/group 创建应用用户。生产密钥应通过受保护的 ACL 管理渠道替换示例占位符；不要把真实密钥直接粘贴到 shell history：
+
+```text
+ACL SETUSER event-worker reset on >replace-with-managed-secret \\
+  ~qubit:stream:9:guide-acl:6:events \\
+  ~qubit:poison:9:guide-acl:6:events:43:qubit:group:9:guide-acl:6:events:7:billing \\
+  +ping +xadd +xgroup|create +xreadgroup +xautoclaim +xpending +xrange +xack \\
+  +eval +type
+```
+
+这里的 `+eval` 和 `+type` 用于畸形记录隔离；只有部署明确不允许这条处理路径时才省略。若 URL 指向非零数据库，还要按 Redis ACL 策略允许客户端初始化时的 `SELECT`。如果 Redis 支持 `CLIENT SETINFO` 且希望记录客户端元数据，可以授予对应的 `setinfo` 子命令；拒绝该命令不会阻止 provider 完成连接初始化。不要用 `+@all` 代替逐项授权。Sentinel 需要单独配置发现权限；master 账号配置应用命令和 `ROLE`；运维观察则使用另一身份。
+
+遇到 `NOPERM` 时，先从 Redis 错误或服务端审计日志确认被拒的命令和 key，再按上表检查对应路径。尤其确认 stream 和隔离 key pattern 都已授权、EVAL 及脚本实际调用的命令均可执行，并核对非零数据库 URL 是否触发了 `SELECT`。Sentinel 模式还要分别验证发现命令，以及使用正确凭据的 master `ROLE` 和 stream 权限。provider 会将 Redis `NOPERM` 归为不可重试的 `authentication` 错误；仅更换密码不能补上缺失的命令或 key 权限。隔离被拒后，用管理员或 observer 账号检查 `XPENDING` 和隔离 stream；脚本失败不能算作隔离成功。Redis Lua 不会在后续 `XACK` 失败时回滚已执行的隔离 `XADD`。
+
 ## 6. 理解投递、重试和清理
 
 provider 将一条 JSON wire record 写入 Redis Stream 的 `wire` 字段。内容包括协议版本、事件 ID、时间戳、headers、可选排序 key、content type、可选 schema ID 和 payload 字节。未知版本会返回 `unsupported_wire_version`，并保留在消费组 pending 列表中，详见下方恢复说明。`XADD` 成功返回 `Accepted`；如果连接在收到回复前中断，调用方无法确定记录是否写入，重试发布可能产生重复事件。
