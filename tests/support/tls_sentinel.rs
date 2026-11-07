@@ -231,12 +231,18 @@ impl TlsSentinel {
                 .query(&mut connection),
             "write replication barrier on TLS master connection",
         )?;
-        let replicas: usize = context(
-            cmd("WAIT").arg(1).arg(5000).query(&mut connection),
-            "WAIT for TLS master replication barrier",
-        )?;
-        if replicas < 1 {
-            return Err(format!("master WAIT barrier reached only {replicas} replicas").into());
+        let replication_deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let replicas: usize = context(
+                cmd("WAIT").arg(1).arg(1000).query(&mut connection),
+                "WAIT for TLS master replication barrier",
+            )?;
+            if replicas >= 1 {
+                break;
+            }
+            if Instant::now() >= replication_deadline {
+                return Err(format!("master WAIT barrier reached only {replicas} replicas").into());
+            }
         }
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {

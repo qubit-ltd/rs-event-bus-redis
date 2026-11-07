@@ -37,6 +37,10 @@ use super::tls::load_certificates;
 use crate::config::RedisEventBusConfig;
 use crate::internal::TransportPolicy;
 
+/// Finite RESP frame budget for Sentinel discovery and non-receiver master
+/// sockets.
+const DISCOVERY_MAX_RESPONSE_BYTES: usize = 1024 * 1024;
+
 /// Probes each configured endpoint once, preferring the last successful node.
 pub(crate) struct SentinelResolver {
     /// Configured Sentinel endpoints with independent ACL credentials.
@@ -161,10 +165,14 @@ impl SentinelResolver {
         for offset in 0..self.endpoints.len() {
             let index = (start + offset) % self.endpoints.len();
             let attempt = (|| {
-                let mut sentinel = open_sync(&self.endpoints[index], self.policy, None)?;
+                let mut sentinel = open_sync(&self.endpoints[index], self.policy, Some(DISCOVERY_MAX_RESPONSE_BYTES))?;
                 let raw = sentinel.req_command(cmd("SENTINEL").arg("get-master-addr-by-name").arg(&self.service))?;
                 let target = self.target(raw)?;
-                let mut connection = open_sync(&target, self.policy, max_response_bytes)?;
+                let mut connection = open_sync(
+                    &target,
+                    self.policy,
+                    Some(max_response_bytes.unwrap_or(DISCOVERY_MAX_RESPONSE_BYTES)),
+                )?;
                 let role = connection.req_command(&cmd("ROLE"))?;
                 if let Value::ServerError(error) = role {
                     return Err(error.into());
@@ -212,12 +220,18 @@ impl SentinelResolver {
         for offset in 0..self.endpoints.len() {
             let index = (start + offset) % self.endpoints.len();
             let attempt = async {
-                let mut sentinel = open_async(&self.endpoints[index], self.policy, None).await?;
+                let mut sentinel =
+                    open_async(&self.endpoints[index], self.policy, Some(DISCOVERY_MAX_RESPONSE_BYTES)).await?;
                 let raw = sentinel
                     .send_packed_command(cmd("SENTINEL").arg("get-master-addr-by-name").arg(&self.service))
                     .await?;
                 let target = self.target(raw)?;
-                let mut connection = open_async(&target, self.policy, max_response_bytes).await?;
+                let mut connection = open_async(
+                    &target,
+                    self.policy,
+                    Some(max_response_bytes.unwrap_or(DISCOVERY_MAX_RESPONSE_BYTES)),
+                )
+                .await?;
                 let role = connection.send_packed_command(&cmd("ROLE")).await?;
                 if let Value::ServerError(error) = role {
                     return Err(error.into());

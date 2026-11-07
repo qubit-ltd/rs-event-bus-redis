@@ -103,6 +103,7 @@ mod durable {
     use qubit_event_bus::model::StartPosition;
     use qubit_event_bus::model::SubscriberId;
     use qubit_event_bus::model::SubscriptionDurability;
+    use qubit_event_bus::spi::DeliveryDisposition;
     use qubit_event_bus::spi::EventBusSpi;
     use qubit_event_bus::spi::ReceiveOutcome;
     use qubit_event_bus::spi::SpiSubscriptionRequest;
@@ -124,6 +125,7 @@ mod durable {
     use crate::support::redis_server::RedisServer;
     use crate::support::scripted_redis::ScriptedRedis;
     use crate::support::scripted_redis::Step;
+    use crate::support::sentinel::SentinelServer;
 
     /// Constructs direct SPI settings with one independently restricted
     /// component.
@@ -176,6 +178,53 @@ mod durable {
         RedisEventBusProvider
             .create_configured(&EventBusConfig::default().with_provider_options(options))
             .unwrap()
+    }
+
+    fn sentinel_receiver_bus(server: &SentinelServer, namespace: &str) -> Arc<dyn EventBusSpi> {
+        let options: ProviderOptions = [
+            (
+                "redis.url".into(),
+                format!(
+                    "redis://127.0.0.1:{}/",
+                    server.master_port().expect("Sentinel master port")
+                ),
+            ),
+            ("redis.namespace".into(), namespace.into()),
+            ("redis.sentinel.nodes".into(), server.endpoints()),
+            ("redis.sentinel.service_name".into(), "qeventbus".into()),
+            ("redis.max_wire_bytes".into(), "4194304".into()),
+            ("redis.max_payload_bytes".into(), "2097152".into()),
+            ("redis.max_headers_bytes".into(), "65536".into()),
+            ("redis.claim_min_idle_ms".into(), "0".into()),
+            ("redis.command_timeout_ms".into(), "1000".into()),
+        ]
+        .into();
+        RedisEventBusProvider
+            .create_configured(&EventBusConfig::default().with_provider_options(options))
+            .unwrap()
+    }
+
+    #[test]
+    fn test_sync_sentinel_receiver_budget_preserves_large_wire() -> Result<(), Box<dyn std::error::Error>> {
+        let server = SentinelServer::start()?;
+        let namespace = "sentinel-receiver-budget-sync";
+        let spi = sentinel_receiver_bus(&server, namespace);
+        let payload_len = 1_100_000;
+        let _ = spi.publish(message(payload_len))?;
+        let mut receiver = spi.subscribe(request_at(501, StartPosition::Earliest))?;
+        let ReceiveOutcome::Message(record) = receiver.receive(Duration::from_secs(5))? else {
+            panic!("receiver must read the large message through Sentinel")
+        };
+        let qubit_event_bus::spi::TransportPayload::Encoded(payload) = record.payload() else {
+            panic!("wire payload remains encoded")
+        };
+        assert_eq!(payload.bytes().len(), payload_len);
+        receiver.settle(
+            record.settlement().ok_or("missing settlement token")?,
+            DeliveryDisposition::Accept,
+        )?;
+        receiver.close()?;
+        Ok(())
     }
 
     fn single_receiver_bus(url: &str, namespace: &str) -> Arc<dyn EventBusSpi> {
@@ -711,6 +760,7 @@ mod async_response_limit {
     use qubit_event_bus::model::StartPosition;
     use qubit_event_bus::model::SubscriberId;
     use qubit_event_bus::model::SubscriptionDurability;
+    use qubit_event_bus::spi::DeliveryDisposition;
     use qubit_event_bus::spi::ReceiveOutcome;
     use qubit_event_bus::spi::SpiSubscriptionRequest;
     use qubit_event_bus::spi::TopicAddress;
@@ -720,6 +770,7 @@ mod async_response_limit {
 
     use crate::support::scripted_redis::ScriptedRedis;
     use crate::support::scripted_redis::Step;
+    use crate::support::sentinel::SentinelServer;
 
     fn request() -> SpiSubscriptionRequest {
         SpiSubscriptionRequest::new(
@@ -732,6 +783,61 @@ mod async_response_limit {
             ProviderOptions::new(),
             TypeId::of::<Vec<u8>>(),
         )
+    }
+
+    #[test]
+    fn test_async_sentinel_receiver_budget_preserves_large_wire() -> Result<(), Box<dyn std::error::Error>> {
+        block_on(async {
+            let server = SentinelServer::start()?;
+            let namespace = "sentinel-receiver-budget-async";
+            let options: ProviderOptions = [
+                (
+                    "redis.url".into(),
+                    format!("redis://127.0.0.1:{}/", server.master_port()?),
+                ),
+                ("redis.namespace".into(), namespace.into()),
+                ("redis.sentinel.nodes".into(), server.endpoints()),
+                ("redis.sentinel.service_name".into(), "qeventbus".into()),
+                ("redis.max_wire_bytes".into(), "4194304".into()),
+                ("redis.max_payload_bytes".into(), "2097152".into()),
+                ("redis.max_headers_bytes".into(), "65536".into()),
+                ("redis.claim_min_idle_ms".into(), "0".into()),
+                ("redis.command_timeout_ms".into(), "1000".into()),
+            ]
+            .into();
+            let spi = AsyncRedisEventBusProvider
+                .create_configured(&EventBusConfig::default().with_provider_options(options))
+                .await?;
+            let payload_len = 1_100_000;
+            let _ = spi.publish(super::message(payload_len)).await?;
+            let mut receiver = spi
+                .subscribe(SpiSubscriptionRequest::new(
+                    Id::new(502),
+                    TopicAddress::new("limits")?,
+                    SubscriberId::new("worker")?,
+                    Some(ConsumerGroup::new("group")?),
+                    SubscriptionDurability::Durable,
+                    StartPosition::Earliest,
+                    ProviderOptions::new(),
+                    TypeId::of::<Vec<u8>>(),
+                ))
+                .await?;
+            let ReceiveOutcome::Message(record) = receiver.receive(Duration::from_secs(5)).await? else {
+                panic!("receiver must read the large message through Sentinel")
+            };
+            let qubit_event_bus::spi::TransportPayload::Encoded(payload) = record.payload() else {
+                panic!("wire payload remains encoded")
+            };
+            assert_eq!(payload.bytes().len(), payload_len);
+            receiver
+                .settle(
+                    record.settlement().ok_or("missing settlement token")?,
+                    DeliveryDisposition::Accept,
+                )
+                .await?;
+            receiver.close().await?;
+            Ok::<_, Box<dyn std::error::Error>>(())
+        })
     }
 
     fn oversized_stream_response(stream: &str) -> Vec<u8> {

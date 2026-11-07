@@ -306,6 +306,228 @@ fn sentinel_options(url: &str) -> ProviderOptions {
     options.insert("redis.sentinel.service_name".into(), "master".into());
     options
 }
+
+/// Builds RESP2 bulk strings with their exact encoded byte length.
+fn sentinel_budget_bulk(bytes: &[u8]) -> Vec<u8> {
+    let mut reply = format!("${}\r\n", bytes.len()).into_bytes();
+    reply.extend_from_slice(bytes);
+    reply.extend_from_slice(b"\r\n");
+    reply
+}
+
+/// Returns a complete Sentinel address reply whose encoded RESP frame exceeds
+/// the fixed discovery budget while remaining structurally valid.
+fn oversized_sentinel_address_reply() -> Vec<u8> {
+    let host = vec![b'a'; 1024 * 1024];
+    let mut reply = b"*2\r\n".to_vec();
+    reply.extend(sentinel_budget_bulk(&host));
+    reply.extend_from_slice(b"$4\r\n6379\r\n");
+    reply
+}
+
+/// Returns a valid master ROLE reply with an oversized replica-list element.
+fn oversized_master_role_reply() -> Vec<u8> {
+    let replica = vec![b'r'; 1024 * 1024];
+    let mut reply = b"*3\r\n$6\r\nmaster\r\n:0\r\n*1\r\n".to_vec();
+    reply.extend(sentinel_budget_bulk(&replica));
+    reply
+}
+
+/// Configures one or more scripted Sentinel endpoint URLs.
+fn sentinel_budget_options(urls: &[&str]) -> ProviderOptions {
+    let mut settings = options("redis://127.0.0.1:1/", 64);
+    let endpoints = urls
+        .iter()
+        .map(|url| {
+            url.strip_prefix("redis://")
+                .expect("scripted Redis URL")
+                .trim_end_matches('/')
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    settings.insert("redis.sentinel.nodes".into(), endpoints);
+    settings.insert("redis.sentinel.service_name".into(), "master".into());
+    settings
+}
+
+#[cfg(feature = "sync")]
+#[test]
+fn test_sync_sentinel_response_budget_rejects_oversized_sentinel_reply() {
+    use crate::support::scripted_redis::ScriptedRedis;
+    use crate::support::scripted_redis::Step;
+
+    let sentinel = ScriptedRedis::start(vec![Step::reply("SENTINEL", &oversized_sentinel_address_reply())])
+        .expect("scripted Sentinel");
+    let bus = RedisEventBusProvider
+        .create_configured(&EventBusConfig::default().with_provider_options(sentinel_budget_options(&[sentinel.url()])))
+        .expect("provider");
+
+    assert!(bus.publish(message()).is_err(), "oversized discovery reply must fail");
+    assert_eq!(sentinel.finish().len(), 1, "no target connection may be opened");
+}
+
+#[cfg(feature = "async")]
+#[test]
+fn test_async_sentinel_response_budget_rejects_oversized_sentinel_reply() {
+    use crate::support::scripted_redis::ScriptedRedis;
+    use crate::support::scripted_redis::Step;
+
+    let sentinel = ScriptedRedis::start(vec![Step::reply("SENTINEL", &oversized_sentinel_address_reply())])
+        .expect("scripted Sentinel");
+    let bus = block_on(AsyncRedisEventBusProvider.create_configured(
+        &EventBusConfig::default().with_provider_options(sentinel_budget_options(&[sentinel.url()])),
+    ))
+    .expect("provider");
+
+    assert!(
+        block_on(bus.publish(message())).is_err(),
+        "oversized discovery reply must fail"
+    );
+    assert_eq!(sentinel.finish().len(), 1, "no target connection may be opened");
+}
+
+#[cfg(feature = "sync")]
+#[test]
+fn test_sync_sentinel_response_budget_rejects_oversized_role_without_xadd() {
+    use crate::support::scripted_redis::ScriptedRedis;
+    use crate::support::scripted_redis::Step;
+
+    let target =
+        ScriptedRedis::start(vec![Step::reply("ROLE", &oversized_master_role_reply())]).expect("scripted target");
+    let sentinel = ScriptedRedis::start(vec![Step::reply(
+        "SENTINEL",
+        format!(
+            "*2\r\n${}\r\n{}\r\n${}\r\n{}\r\n",
+            "127.0.0.1".len(),
+            "127.0.0.1",
+            target
+                .url()
+                .rsplit(':')
+                .next()
+                .expect("port")
+                .trim_end_matches('/')
+                .len(),
+            target.url().rsplit(':').next().expect("port").trim_end_matches('/')
+        )
+        .as_bytes(),
+    )])
+    .expect("scripted Sentinel");
+    let bus = RedisEventBusProvider
+        .create_configured(&EventBusConfig::default().with_provider_options(sentinel_budget_options(&[sentinel.url()])))
+        .expect("provider");
+
+    assert!(bus.publish(message()).is_err(), "oversized ROLE must fail discovery");
+    let commands = target.finish();
+    assert_eq!(commands.len(), 1);
+    assert_eq!(commands[0][0], "ROLE", "XADD must wait for master validation");
+    assert_eq!(sentinel.finish().len(), 1);
+}
+
+#[cfg(feature = "async")]
+#[test]
+fn test_async_sentinel_response_budget_rejects_oversized_role_without_xadd() {
+    use crate::support::scripted_redis::ScriptedRedis;
+    use crate::support::scripted_redis::Step;
+
+    let target =
+        ScriptedRedis::start(vec![Step::reply("ROLE", &oversized_master_role_reply())]).expect("scripted target");
+    let port = target.url().rsplit(':').next().expect("port").trim_end_matches('/');
+    let sentinel_reply = format!("*2\r\n$9\r\n127.0.0.1\r\n${}\r\n{port}\r\n", port.len());
+    let sentinel =
+        ScriptedRedis::start(vec![Step::reply("SENTINEL", sentinel_reply.as_bytes())]).expect("scripted Sentinel");
+    let bus = block_on(AsyncRedisEventBusProvider.create_configured(
+        &EventBusConfig::default().with_provider_options(sentinel_budget_options(&[sentinel.url()])),
+    ))
+    .expect("provider");
+
+    assert!(
+        block_on(bus.publish(message())).is_err(),
+        "oversized ROLE must fail discovery"
+    );
+    let commands = target.finish();
+    assert_eq!(commands.len(), 1);
+    assert_eq!(commands[0][0], "ROLE", "XADD must wait for master validation");
+    assert_eq!(sentinel.finish().len(), 1);
+}
+
+#[cfg(feature = "sync")]
+#[test]
+fn test_sync_sentinel_response_budget_retries_next_node_after_oversized_reply() {
+    use crate::support::scripted_redis::ScriptedRedis;
+    use crate::support::scripted_redis::Step;
+
+    let first = ScriptedRedis::start(vec![Step::reply("SENTINEL", &oversized_sentinel_address_reply())])
+        .expect("first Sentinel");
+    let target = ScriptedRedis::start(vec![
+        Step::reply("ROLE", b"*3\r\n$6\r\nmaster\r\n:0\r\n*0\r\n"),
+        Step::reply("XADD", b"$3\r\n1-0\r\n"),
+    ])
+    .expect("healthy target");
+    let second = ScriptedRedis::start(vec![Step::reply(
+        "SENTINEL",
+        format!(
+            "*2\r\n$9\r\n127.0.0.1\r\n${}\r\n{}\r\n",
+            target
+                .url()
+                .rsplit(':')
+                .next()
+                .expect("port")
+                .trim_end_matches('/')
+                .len(),
+            target.url().rsplit(':').next().expect("port").trim_end_matches('/')
+        )
+        .as_bytes(),
+    )])
+    .expect("second Sentinel");
+    let bus = RedisEventBusProvider
+        .create_configured(
+            &EventBusConfig::default().with_provider_options(sentinel_budget_options(&[first.url(), second.url()])),
+        )
+        .expect("provider");
+
+    assert!(bus.publish(message()).is_ok(), "second node discovery succeeds");
+    assert_eq!(first.finish().len(), 1);
+    assert_eq!(second.finish().len(), 1);
+    let commands = target.finish();
+    assert_eq!(
+        commands.iter().map(|command| command[0].as_str()).collect::<Vec<_>>(),
+        ["ROLE", "XADD"]
+    );
+}
+
+#[cfg(feature = "async")]
+#[test]
+fn test_async_sentinel_response_budget_retries_next_node_after_oversized_reply() {
+    use crate::support::scripted_redis::ScriptedRedis;
+    use crate::support::scripted_redis::Step;
+
+    let first = ScriptedRedis::start(vec![Step::reply("SENTINEL", &oversized_sentinel_address_reply())])
+        .expect("first Sentinel");
+    let target = ScriptedRedis::start(vec![
+        Step::reply("ROLE", b"*3\r\n$6\r\nmaster\r\n:0\r\n*0\r\n"),
+        Step::reply("XADD", b"$3\r\n1-0\r\n"),
+    ])
+    .expect("healthy target");
+    let port = target.url().rsplit(':').next().expect("port").trim_end_matches('/');
+    let reply = format!("*2\r\n$9\r\n127.0.0.1\r\n${}\r\n{port}\r\n", port.len());
+    let second = ScriptedRedis::start(vec![Step::reply("SENTINEL", reply.as_bytes())]).expect("second Sentinel");
+    let bus = block_on(AsyncRedisEventBusProvider.create_configured(
+        &EventBusConfig::default().with_provider_options(sentinel_budget_options(&[first.url(), second.url()])),
+    ))
+    .expect("provider");
+
+    assert!(
+        block_on(bus.publish(message())).is_ok(),
+        "second node discovery succeeds"
+    );
+    assert_eq!(first.finish().len(), 1);
+    assert_eq!(second.finish().len(), 1);
+    let commands = target.finish();
+    assert_eq!(
+        commands.iter().map(|command| command[0].as_str()).collect::<Vec<_>>(),
+        ["ROLE", "XADD"]
+    );
+}
 #[cfg(feature = "sync")]
 #[test]
 fn test_sync_sentinel_setup_blackhole_is_bounded() {
@@ -419,7 +641,7 @@ fn test_sync_block_adds_command_margin_and_next_poll_restores_short_wait() {
     let server = crate::support::redis_server::RedisServer::start().expect("Redis");
     let proxy = ControlledRedis::start(server.url()).expect("proxy");
     let mut settings = options(&proxy.url(), 64);
-    settings.insert("redis.command_timeout_ms".into(), "200".into());
+    settings.insert("redis.command_timeout_ms".into(), "1000".into());
     let bus = RedisEventBusProvider
         .create_configured(&EventBusConfig::default().with_provider_options(settings))
         .expect("provider");
@@ -436,13 +658,13 @@ fn test_sync_block_adds_command_margin_and_next_poll_restores_short_wait() {
         let _ = sender.send(subscription.receive(Duration::ZERO));
     });
     let reached = gate.wait_until_reached(Duration::from_secs(3));
-    let result = receiver.recv_timeout(Duration::from_millis(700));
+    let result = receiver.recv_timeout(Duration::from_millis(1800));
     gate.release();
     worker.join().expect("receive worker");
     assert!(reached, "zero poll must send the short claim query");
     assert_error(
         result
-            .expect("200ms short timeout must beat 700ms watchdog; stale BLOCK budget exceeds 1s")
+            .expect("1s short timeout must beat 1.8s watchdog; stale BLOCK budget exceeds 2s")
             .err()
             .expect("withheld claim reply"),
         "outcome_unknown",
@@ -456,7 +678,7 @@ fn test_async_block_adds_command_margin_and_next_poll_restores_short_wait() {
     let server = crate::support::redis_server::RedisServer::start().expect("Redis");
     let proxy = ControlledRedis::start(server.url()).expect("proxy");
     let mut settings = options(&proxy.url(), 64);
-    settings.insert("redis.command_timeout_ms".into(), "200".into());
+    settings.insert("redis.command_timeout_ms".into(), "1000".into());
     let mut subscription = block_on(async {
         let bus = AsyncRedisEventBusProvider
             .create_configured(&EventBusConfig::default().with_provider_options(settings))
@@ -477,14 +699,14 @@ fn test_async_block_adds_command_margin_and_next_poll_restores_short_wait() {
     let worker = spawn(move || {
         let _ = sender.send(block_on(subscription.receive(Duration::ZERO)));
     });
-    let reached = gate.wait_until_reached(Duration::from_secs(1));
-    let result = receiver.recv_timeout(Duration::from_millis(700));
+    let reached = gate.wait_until_reached(Duration::from_secs(2));
+    let result = receiver.recv_timeout(Duration::from_millis(1800));
     gate.release();
     worker.join().expect("receive worker");
     assert!(reached, "zero poll must send the short claim query");
     assert_error(
         result
-            .expect("200ms short timeout must beat 700ms watchdog; stale BLOCK budget exceeds 1s")
+            .expect("1s short timeout must beat 1.8s watchdog; stale BLOCK budget exceeds 2s")
             .err()
             .expect("withheld claim reply"),
         "outcome_unknown",

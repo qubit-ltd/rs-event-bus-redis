@@ -68,7 +68,7 @@ token 保存 Redis 坐标、receiver 身份和共享进度。终结路径为 Ope
 
 standalone 同步短操作立即获取 RAII 命令名额，连接池锁不跨网络 I/O；每次 checkout 恢复命令 read/write 等待预算，I/O、协议错误或超时后丢弃连接。异步 standalone 短操作共享 multiplexed 连接。同一冷初始化轮次中的调用共享其成功或失败终态；失败结束后，后续调用可以重试。初始化 future 被取消时，该轮仍在等待的调用可以用自己的初始化 future 接手。不使用后台初始化任务或失败冷却期，连接超时也不提供端到端时限保证。单调递增代际使旧失败租约只能清除自身连接；溢出时拒绝，不循环复用。receiver 使用专用连接，响应预算为实际 BLOCK 加命令超时。
 
-Sentinel 每次解析对配置节点各尝试一次，优先探测上次成功节点，查询 `SENTINEL get-master-addr-by-name`，校验 host/port，再验证候选 ROLE=master。Sentinel/master ACL 分开，setup、探测及目标命令均受等待策略约束。master socket 不进入 standalone 连接池/cache。ROLE 后仍可能切换，写入失败后不会透明重放 XADD。
+Sentinel 每次解析对配置节点各尝试一次，优先探测上次成功节点，查询 `SENTINEL get-master-addr-by-name`，校验 host/port，再验证候选 ROLE=master。Sentinel/master ACL 分开，setup、探测及目标命令均受等待策略约束。master socket 不进入 standalone 连接池/cache。ROLE 后仍可能切换，写入失败后不会透明重放 XADD。Sentinel socket 和用于普通短命令的候选 master socket 使用固定 1 MiB RESP 响应帧预算，并在 socket 生命周期内持续生效。receiver master socket 保留自身配置的帧预算，因此合法且大于 1 MiB 的 receiver 预算不会被缩小。这是响应帧上限，不是 RSS 上限，也不限制发布请求体。
 
 短命令总额度分为普通与结算通道；普通命令耗尽时，保留名额仍允许 XACK 准入。receiver 连接不占用短命令名额。同一个已创建 SPI 实例及其 Arc clone 共用命令、receiver 预算，新的 `create_configured` 调用获得独立预算。registry 不会合并各实例预算，Redis 也没有全局 provider 准入上限；provider 不维护无界等待队列。receiver 在 setup 前取得名额，close/drop 释放，token 存活不会延长占用。失败、取消释放本地命令名额，multiplexed driver 或 Redis 仍可能随后完成在途请求。限额不能约束所有 server 任务/socket，也不是整个进程全部 client 的总上限。关闭资源不需要新增 receiver 名额。
 
