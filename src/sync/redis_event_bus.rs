@@ -16,22 +16,13 @@ use qubit_event_bus::model::PublishAcknowledgement;
 use qubit_event_bus::model::PublishEffect;
 use qubit_event_bus::model::StartPosition;
 use qubit_event_bus::model::SubscriptionDurability;
-use qubit_event_bus::spi::DelayedDeliveryCapability;
-use qubit_event_bus::spi::DurabilityCapability;
 use qubit_event_bus::spi::EventBusCapabilities;
 use qubit_event_bus::spi::EventBusSpi;
 use qubit_event_bus::spi::EventSubscriptionSpi;
-use qubit_event_bus::spi::OrderingCapability;
 use qubit_event_bus::spi::OutboundMessage;
-use qubit_event_bus::spi::PayloadModes;
-use qubit_event_bus::spi::PublishGuarantee;
-use qubit_event_bus::spi::PublishVisibility;
-use qubit_event_bus::spi::ReplayCapability;
-use qubit_event_bus::spi::SettlementCapabilities;
 use qubit_event_bus::spi::ShutdownMode;
 use qubit_event_bus::spi::ShutdownOutcome;
 use qubit_event_bus::spi::SpiSubscriptionRequest;
-use qubit_event_bus::spi::SubscriptionModes;
 use qubit_event_bus::spi::TopicAddress;
 use redis::ConnectionLike;
 use redis::RedisError;
@@ -52,6 +43,8 @@ use crate::existing_group_start::ensure_existing_group_start;
 use crate::existing_group_start::parse_existing_group_policy;
 use crate::internal::RecoveryState;
 use crate::internal::WireLimits;
+use crate::internal::redis_capabilities;
+use crate::internal::valid_stream_id;
 use crate::naming::group_name;
 use crate::naming::poison_key;
 use crate::naming::stream_key;
@@ -330,51 +323,6 @@ impl EventBusSpi for RedisEventBus {
     }
 }
 
-/// Validates the two unsigned decimal components of a Redis stream ID.
-///
-/// # Parameters
-///
-/// - `value`: Milliseconds and sequence separated by exactly one dash.
-///
-/// # Returns
-///
-/// `true` only when both non-empty decimal components fit u64. No Redis I/O is
-/// issued.
-#[must_use]
-fn valid_stream_id(value: &str) -> bool {
-    let Some((milliseconds, sequence)) = value.split_once('-') else {
-        return false;
-    };
-    !milliseconds.is_empty()
-        && !sequence.is_empty()
-        && milliseconds.bytes().all(|byte| byte.is_ascii_digit())
-        && sequence.bytes().all(|byte| byte.is_ascii_digit())
-        && milliseconds.parse::<u64>().is_ok()
-        && sequence.parse::<u64>().is_ok()
-}
-
-/// Returns the fixed capability set shared by Redis provider modes.
-///
-/// # Returns
-///
-/// Encoded durable delivery with position replay and accept/retry/reject
-/// settlement.
-#[inline]
-pub(super) const fn redis_capabilities() -> EventBusCapabilities {
-    EventBusCapabilities::new(
-        PayloadModes::Encoded,
-        SettlementCapabilities::AcceptRetryReject,
-        OrderingCapability::None,
-        DelayedDeliveryCapability::None,
-        DurabilityCapability::Durable,
-        SubscriptionModes::DURABLE,
-        true,
-        ReplayCapability::Position,
-        PublishGuarantee::Accepted,
-        PublishVisibility::Opaque,
-    )
-}
-
 /// Wraps a provider failure without retaining raw Redis diagnostics.
 ///
 /// # Parameters
@@ -411,9 +359,12 @@ mod tests {
 
     #[test]
     fn test_stream_id_validation_rejects_malformed_components() {
-        assert!(super::valid_stream_id("123-0"));
+        assert!(crate::internal::valid_stream_id("123-0"));
         for value in ["", "123", "-0", "123-", "a-0", "1-b", "1-2-3"] {
-            assert!(!super::valid_stream_id(value), "accepted malformed ID {value:?}");
+            assert!(
+                !crate::internal::valid_stream_id(value),
+                "accepted malformed ID {value:?}"
+            );
         }
     }
 

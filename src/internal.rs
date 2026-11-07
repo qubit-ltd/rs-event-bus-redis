@@ -29,10 +29,12 @@ pub(crate) mod recovery_scan_budget;
 mod recovery_scan_stage;
 #[path = "internal/recovery_state.rs"]
 mod recovery_state;
+mod redis_capabilities;
 #[path = "internal/settlement_action.rs"]
 mod settlement_action;
 #[path = "internal/settlement_state.rs"]
 mod settlement_state;
+mod valid_stream_id;
 
 pub(crate) use command::read_group_command;
 pub(crate) use decode::decode_entry;
@@ -49,8 +51,10 @@ pub(crate) use recovery_scan_budget::RecoveryScanBudget;
 #[cfg(test)]
 pub(crate) use recovery_scan_stage::RecoveryScanStage;
 pub(crate) use recovery_state::RecoveryState;
+pub(crate) use redis_capabilities::redis_capabilities;
 pub(crate) use settlement_action::SettlementAction;
 pub(crate) use settlement_state::SettlementState;
+pub(crate) use valid_stream_id::valid_stream_id;
 
 /// Shared transport policy rules.
 mod transport_policy;
