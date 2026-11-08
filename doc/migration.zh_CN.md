@@ -179,6 +179,12 @@ facade 死信转发与源 `XACK` 是两个操作，消费者必须容忍重复�
 有界解码、回复丢失和持久恢复测试。
 
 
+## 结算 owner 校验
+
+Accept 和 Reject 现在通过一条原子 `EVAL` 使用 `XPENDING` 检查指定 PEL 项，并且仅在当前 consumer 仍是 owner 时调用 `XACK`。过去只允许 `XACK` 的 ACL 现在还必须允许对源 stream 执行 `EVAL` 和脚本内部的 `XPENDING`。没有直接 `XACK` fallback。命令被拒绝仍会归类为脱敏、不可重试的 `authentication` 错误，PEL 项保持 pending。
+
+旧 token 收到 `settlement_ownership_changed` 时，停止或关闭该订阅，并以新 receiver 恢复相同 namespace/topic/group。当前 PEL owner 随后可重试或结算该项。结果未知后只重试原 Accept 或 Reject：PEL 已空按幂等完成处理，PEL 已属于其他 consumer 则返回 owner 错误。此校验只保护 Redis 确认状态，不会阻止仍在运行的旧 handler 执行外部副作用。
+
 ## 有损 Stream 保留策略
 
 Redis Stream 默认不裁剪。改变保留策略前，先用 `XINFO GROUPS <stream-key>` 列出所有 group，用 `XPENDING <stream-key> <group>` 逐组核对 PEL，并确认未读位置、未来回放需求和审计期限；源 stream 和隔离流的 `XLEN` 分别查看。准确 key 使用 `naming::stream_key`、`naming::group_name`、`naming::poison_key` 生成。任何事项未确认，都维持无限保留。只有业务明确接受历史丢失，才同时配置 `redis.stream_maxlen_approx=<正整数>` 与 `redis.allow_lossy_retention=true`。近似 `XADD MAXLEN ~` 可能删除未读或 pending payload；未读记录丢失不一定出现 Gap。启用后再次检查各组和隔离流，仅按业务与审计策略归档或移除隔离证据。`XADD` 接纳不代表 fsync 或副本持久化保证。完整流程见[人工决策清单](user_guide.zh_CN.md#人工决定保留策略)。

@@ -226,6 +226,13 @@ cargo test --all-features
 
 For formatting, `./.infra/bin/align-ci.sh` applies the project's formatting rules and may rewrite files; `./.infra/bin/ci-check.sh` verifies the CI requirements. A standalone `cargo fmt --check` does not replace these project checks.
 
+Terminal settlement now uses one atomic Redis `EVAL` to verify the pending
+entry is still owned by this consumer before `XACK`. ACLs must allow `EVAL`,
+`XPENDING`, and `XACK` on the source stream. A stale token returns
+`settlement_ownership_changed`; stop that subscription and recover the same
+group with a new receiver. See the [delivery guide](doc/user_guide.md#6-understand-delivery-retry-and-cleanup)
+and [migration guide](doc/migration.md#settlement-owner-check).
+
 ## License
 
 Copyright (c) 2025 - 2026. Haixing Hu. All rights reserved.

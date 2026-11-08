@@ -213,6 +213,11 @@ cargo test --all-features
 
 格式化请运行 `./.infra/bin/align-ci.sh`；它会按项目规则改写文件。`./.infra/bin/ci-check.sh` 用于验证 CI 要求。单独运行 `cargo fmt --check` 不能替代项目的正式格式门禁。
 
+终态结算现在通过一条原子 Redis `EVAL` 在 `XACK` 前校验 PEL 当前仍由本 consumer
+拥有。ACL 需允许对源 stream 执行 `EVAL`、`XPENDING` 和 `XACK`。旧 owner token 会返回
+`settlement_ownership_changed`；停止该订阅，并用新 receiver 恢复同一消费组。详见
+[投递指南](doc/user_guide.zh_CN.md#6-理解投递重试和清理)和[迁移指南](doc/migration.zh_CN.md#结算-owner-校验)。
+
 ## 许可证
 
 Copyright (c) 2025 - 2026. Haixing Hu. All rights reserved.

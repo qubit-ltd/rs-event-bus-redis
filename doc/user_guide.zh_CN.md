@@ -370,7 +370,7 @@ redis.sentinel.tls_client_key_path=/etc/redis/sentinel-client-key.pem
 | 账号或操作路径 | 允许的命令 | key 范围 |
 | --- | --- | --- |
 | 发布者 | `XADD`；同步 standalone 空闲连接健康检查还会用到 `PING` | 对配置 topic 的 stream 执行写入。 |
-| 持久订阅与结算 | `XGROUP CREATE`、`XREADGROUP`、`XAUTOCLAIM`、`XPENDING`、`XRANGE`、`XACK`；同步 standalone 空闲连接健康检查还会用到 `PING` | 对 topic stream 读写。这些恢复命令用于不同接收路径，每次 receive 不一定都会执行全部命令。stream 尚不存在时，`XGROUP CREATE` 还需要创建该 key 的权限。 |
+| 持久订阅与结算 | `XGROUP CREATE`、`XREADGROUP`、`XAUTOCLAIM`、`XPENDING`、`XRANGE`、`EVAL`（结算脚本调用 `XPENDING` 和 `XACK`）；同步 standalone 空闲连接健康检查还会用到 `PING` | 对 topic stream 读写。终态结算通过一条原子 EVAL 在 XACK 前校验当前 PEL owner。恢复命令用于不同接收路径，每次 receive 不一定都会执行全部命令。stream 尚不存在时，`XGROUP CREATE` 还需要创建该 key 的权限。 |
 | 畸形记录隔离与 tombstone 修复 | `EVAL`，以及脚本内部的 `TYPE`、`XPENDING`、`XRANGE`、`XADD`、`XACK` | 源 stream 和该消费组专用的隔离 stream。脚本会检查两个 key 的类型、查询并读取源记录、写入隔离副本，再确认源记录。若 ACL key 规则或内部命令规则拒绝访问，仅授权 `EVAL` 仍然不够。 |
 | Sentinel 发现账号 | `SENTINEL get-master-addr-by-name`，以及该连接配置 password 时执行的 `AUTH` | 不访问应用 stream key。Sentinel 凭据应与 master 凭据分开。支持 ACL 子命令规则的 Redis 可授予 `+sentinel|get-master-addr-by-name`；不支持子命令规则的服务器只能用更宽的 `+sentinel` 命令权限，应先核对该版本 ACL 能力。 |
 | Sentinel 返回的 master 账号 | 按应用需要授予发布/订阅命令，另加 master 校验所用的 `ROLE` | 与 standalone 相同的应用 stream 和隔离 key。master 使用 `redis.username_env`、`redis.password_env`，不读取 Sentinel 的凭据变量。 |
@@ -398,13 +398,15 @@ provider 将一条 JSON wire record 写入 Redis Stream 的 `wire` 字段。内�
 
 | 操作 | Redis 行为 | 对应用的影响 |
 | --- | --- | --- |
-| `Accept` | 执行 `XACK` | 从消费组 pending 列表移除消息。 |
-| `Reject` | 执行 `XACK` | 结束这次投递；不会创建死信 stream。 |
+| `Accept` | 一条 `EVAL`：检查指定 PEL 项 owner，再执行 `XACK` | 只有当前 consumer 仍拥有该项时才移除消息。owner 已变化时返回不可重试的 `settlement_ownership_changed`；停止该订阅，并用新 receiver 恢复消费组。 |
+| `Reject` | 一条 `EVAL`：检查指定 PEL 项 owner，再执行 `XACK` | 只有当前 consumer 仍拥有该项时才结束投递；不会创建死信 stream。 |
 | `Retry` | 保留 pending 状态 | 当前 consumer 可重新读取，超过 idle threshold 后也可被认领。 |
 | 关闭或 drop | 不会隐式执行 `XACK` | 未结算消息仍可恢复。 |
 | 取消异步 receive | 不会隐式执行 `XACK` | 已读记录留在 PEL 中，供后续读取或认领。 |
 
 Redis 提供至少一次投递，因此 handler 应具备幂等性。新消息经 `XREADGROUP >` 读取时，`delivery.context().provider_attempt()` 为 `Some(1)`。每条 pending 或 `XAUTOCLAIM` 恢复消息交付前，provider 会针对该 ID 查询 Redis `XPENDING` 明细；只有恰好一条明细的 ID 和当前 consumer owner 都匹配，且非零次数可由 SPI 的 `u32` 表示时，才报告 Redis 投递次数。查询失败、无结果、格式错误、次数为零或不可表示、以及校验不匹配时均为 `None`。每条恢复消息因此多一次 Redis 命令，新消息不增加查询。facade 本地重试次数请读取 `retry_attempt`。如果 handler 运行时间超过 `redis.claim_min_idle_ms`，另一个 consumer 可能在原 handler 仍执行时认领同一事件。idle threshold 应覆盖常见和最慢的处理时间；重复代价高时，应用还应按业务 ID 去重。
+
+终态结算会原子检查 Redis 当前 consumer owner。如果 owner 已改变，关闭或停止受影响的订阅，再以相同 namespace/topic/group 和新 receiver 恢复 PEL。此校验只保护 Redis 确认状态，不会阻止旧 handler 对外部数据库或服务产生副作用。结算回复未知时只重试原终态意图；PEL 已为空仍按幂等成功处理，PEL 已归其他 consumer 时返回 `settlement_ownership_changed`。
 
 每个订阅的未结算消息达到 `redis.max_unsettled_per_subscription` 后会暂停接收新记录。结算或 retry 后会释放容量。该设置限制进程内的投递压力，不会限制 Redis stream 增长。
 

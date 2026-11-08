@@ -372,7 +372,7 @@ Give the application account only the commands and keys for its configured topic
 | Account/path | Commands to allow | Key access |
 | --- | --- | --- |
 | Publisher | `XADD`; plus `PING` for synchronous standalone idle-connection health checks | Write the configured topic stream. |
-| Durable subscriber and settlement | `XGROUP CREATE`, `XREADGROUP`, `XAUTOCLAIM`, `XPENDING`, `XRANGE`, `XACK`; plus `PING` for synchronous standalone idle-connection health checks | Read/write the topic stream. These recovery commands run on different receive paths; one receive does not necessarily issue all of them. `XGROUP CREATE` also needs permission to create the stream when absent. |
+| Durable subscriber and settlement | `XGROUP CREATE`, `XREADGROUP`, `XAUTOCLAIM`, `XPENDING`, `XRANGE`, `EVAL` (settlement script calls `XPENDING` and `XACK`); plus `PING` for synchronous standalone idle-connection health checks | Read/write the topic stream. Terminal settlement uses one atomic EVAL that checks the current PEL owner before XACK. Recovery commands run on different receive paths; one receive does not necessarily issue all of them. `XGROUP CREATE` also needs permission to create the stream when absent. |
 | Malformed-record quarantine and tombstone repair | `EVAL`, and the script's internal `TYPE`, `XPENDING`, `XRANGE`, `XADD`, `XACK` commands | The source stream and its group-specific quarantine stream. The script checks both key types, inspects/reads the source, writes the quarantine record, and acknowledges the source entry. Granting only `EVAL` is insufficient if ACL key or command rules deny an internal operation. |
 | Sentinel discovery account | `SENTINEL get-master-addr-by-name` and `AUTH` when that connection uses a password | No application stream keys. Keep Sentinel credentials separate from master credentials. On servers with ACL subcommand rules, grant `+sentinel|get-master-addr-by-name`; where subcommand rules are unavailable, `+sentinel` grants the broader Sentinel command and should be reviewed against that server's ACL capabilities. |
 | Discovered master account | The publisher/subscriber commands required by the application, plus `ROLE` for master validation | The same application stream and quarantine keys as standalone mode. The master uses `redis.username_env` and `redis.password_env`, not the Sentinel credential variables. |
@@ -400,13 +400,15 @@ The provider stores one JSON wire record under the `wire` stream field. It conta
 
 | Action | Redis behavior | Application consequence |
 | --- | --- | --- |
-| `Accept` | `XACK` | Removes the message from the group's pending list. |
-| `Reject` | `XACK` | Terminates delivery; no dead-letter stream is created. |
+| `Accept` | One `EVAL`: exact-ID `XPENDING` owner check, then `XACK` | Removes the message only if this consumer still owns it. A changed owner returns non-retryable `settlement_ownership_changed`; stop that subscription and recover the group with a new receiver. |
+| `Reject` | One `EVAL`: exact-ID `XPENDING` owner check, then `XACK` | Terminates delivery only if this consumer still owns it; no dead-letter stream is created. |
 | `Retry` | Leaves the message pending | It can be read again by this consumer or claimed after the idle threshold. |
 | Close or drop | No implicit `XACK` | Unsettled messages remain recoverable. |
 | Cancel async receive | No implicit `XACK` | A consumed record remains in Redis PEL for a later receive/claim. |
 
 Redis Streams provide at-least-once delivery, so make handlers idempotent. A slow handler can exceed `redis.claim_min_idle_ms`; another consumer may claim the same pending event while the first handler is still running. Choose an idle threshold that fits handler latency and retain business-level deduplication where duplicates are costly.
+
+Settlement verifies the current Redis consumer owner atomically. If ownership changed, close or stop the affected subscription and resume with the same namespace/topic/group so the current owner can recover the PEL entry. This check protects Redis acknowledgement state only: it does not fence an old handler's external database or service side effects. If a settlement reply is unknown, retry only the identical terminal intent; an empty PEL remains idempotent success, while a PEL now owned by another consumer returns `settlement_ownership_changed`.
 
 Each subscription stops receiving new entries while its unsettled count reaches `redis.max_unsettled_per_subscription`. Settling or retrying an entry frees capacity. This bounds in-process delivery pressure; it does not limit Redis stream growth.
 

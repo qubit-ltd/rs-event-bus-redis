@@ -205,6 +205,12 @@ Run provider feature-matrix, conformance, bounded-decoder, lost-reply, and durab
 recovery tests against the configured Redis version before deployment.
 
 
+## Settlement owner check
+
+Accept and Reject now use one atomic `EVAL` that checks the exact pending entry with `XPENDING` and calls `XACK` only while this consumer is still its owner. ACLs that previously allowed only `XACK` must also allow `EVAL` and script-internal `XPENDING` on the source stream. There is no direct `XACK` fallback. A denied command remains a sanitized, non-retryable `authentication` error and leaves the PEL entry pending.
+
+If an old token receives `settlement_ownership_changed`, stop or close that subscription and resume the same namespace/topic/group with a new receiver. The current PEL owner can then retry or settle the entry. After an unknown result, retry only the original Accept or Reject: an empty PEL is idempotent completion, while a PEL now owned by another consumer returns the ownership error. This check protects Redis acknowledgement state only; it does not fence external side effects from an old handler that is still running.
+
 ## Lossy stream retention
 
 Redis streams are not trimmed by default. Before changing retention, inventory every group with `XINFO GROUPS <stream-key>`, check each PEL with `XPENDING <stream-key> <group>`, confirm unread positions, future replay needs and audit deadlines, and inspect source/quarantine `XLEN` separately. Derive the exact keys with `naming::stream_key`, `naming::group_name` and `naming::poison_key`. Keep unlimited retention while any item is unconfirmed. Only if the application explicitly accepts historical loss, configure both `redis.stream_maxlen_approx=<positive integer>` and `redis.allow_lossy_retention=true`. Approximate `XADD MAXLEN ~` may remove unread or pending payloads; a missed unread record need not produce a Gap. Recheck the groups and quarantine after rollout; archive or remove quarantined evidence only under the business and audit policy. An accepted `XADD` is not an fsync or replication guarantee. See the [manual checklist](user_guide.md#decide-retention-manually).

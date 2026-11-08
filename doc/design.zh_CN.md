@@ -38,9 +38,9 @@ SPI 成功创建时分配进程内唯一且不复用的 ID。client 强引用诊
 
 token 保存 Redis 坐标、receiver 身份和共享进度。终结路径为 Open → AckPending(原终结意图) → Applied(原意图)；Retry 则从 Open 直接在本地进入 Applied(Retry)，不执行 ACK。再次请求已提交的相同意图会直接成功，冲突请求不执行 I/O。
 
-新终结意图在取得连接和命令名额后才固定。XACK 可能发送前通过短临界区进入 AckPending，不持有标准 mutex 跨 await 或网络操作。结果未知或取消保留原意图，仅允许相同 Accept/Reject 重试。合法 XACK 整数回复 0 和 1 都允许完成同意图结算。本地提交先锁进度、再锁恢复状态，在没有 await 的临界区更新进度和活跃名额；锁失败不会虚报成功。
+新终结意图在取得连接和命令名额后才固定。结算 EVAL 可能发送前通过短临界区进入 AckPending，不持有标准 mutex 跨 await 或网络操作。单 key EVAL 先用 XPENDING 检查指定 PEL 行 owner，仅匹配时调用 XACK。结果未知或取消保留原意图，仅允许相同 Accept/Reject 重试。合法 EVAL 整数回复 0 和 1 都允许完成同意图结算；-1 返回不可重试的 `settlement_ownership_changed`，保留 AckPending 和活跃名额。本地提交先锁进度、再锁恢复状态，在没有 await 的临界区更新进度和活跃名额；锁失败不会虚报成功。
 
-首个 XACK 尝试收到完整 Redis 顶层拒绝可以恢复 Open。此前已有未知结果时，后续拒绝不能证明前一次 ACK 未执行，因此不会重新开放 token。嵌套 RESP 错误、畸形回复也不构成明确未执行证据。close/drop 释放 receiver 资源，不伪造 Retry 或重建 PEL。意图只约束当前 token/receiver 生命周期，不跨重启持久化，也不对其他 consumer 提供 fencing。
+首个 EVAL 尝试收到完整 Redis 顶层拒绝可以恢复 Open。此前已有未知结果时，后续拒绝不能证明前一次结算未执行，因此不会重新开放 token。嵌套 RESP 错误、畸形回复也不构成明确未执行证据。PEL 为空仍按幂等完成处理；owner 已变化时拒绝结算。该 Redis owner 校验不会阻止仍在运行的旧 handler 产生外部副作用，也不覆盖 consumer 名称 ABA。close/drop 释放 receiver 资源，不伪造 Retry 或重建 PEL。意图只约束当前 token/receiver 生命周期，不跨重启持久化，也不对其他 consumer 提供 fencing。
 
 ## 接收调度与恢复
 
