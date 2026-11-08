@@ -63,7 +63,7 @@ The CI mirror's source formatter changes were copied back where needed. The fina
 - Commits: `9dd06ae fix: verify Redis pending owner before settlement`; `1436765 docs: explain Redis settlement ownership safeguards`.
 - Both commits were fast-forward integrated into the original `dev-starfish` branch, then fast-forward merged and pushed to existing `dev`, `main`, and `dev-starfish` branches.
 - The task worktree was removed after confirming it was clean and fully integrated. The original checkout remains on `dev-starfish` with only the two protected timestamped plan/design documents untracked.
-- Disposable validation mirror and task-created test artifacts were removed after verification. Raw logs were retained in `/tmp` through this evidence update; they are disposable once the repository synchronization is complete.
+- Disposable validation mirror and task-created test artifacts were removed after verification. After extracting their command results into this record, the task-created raw logs, temporary adapter patch, ACL temp directories, and Redis 6.2/7.2 source/build directories under `/tmp` were removed.
 
 ## Cross-version settlement ACL follow-up
 
