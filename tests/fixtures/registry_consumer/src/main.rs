@@ -13,18 +13,12 @@ fn main() {
     #[cfg(all(feature = "sync", feature = "discovery"))]
     {
         let registry = EventBusRegistry::discover().expect("sync discovery failed");
-        assert!(registry
-            .provider_ids()
-            .iter()
-            .any(|id| id.as_str() == "redis-streams"));
+        assert!(registry.provider_ids().iter().any(|id| id.as_str() == "redis-streams"));
     }
 
     #[cfg(all(feature = "async", feature = "discovery"))]
     {
         let registry = AsyncEventBusRegistry::discover().expect("async discovery failed");
-        assert!(registry
-            .provider_ids()
-            .iter()
-            .any(|id| id.as_str() == "redis-streams"));
+        assert!(registry.provider_ids().iter().any(|id| id.as_str() == "redis-streams"));
     }
 }
