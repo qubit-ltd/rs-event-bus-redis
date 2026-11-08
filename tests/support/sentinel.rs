@@ -10,6 +10,7 @@
 use std::error::Error;
 use std::fs;
 use std::net::TcpListener;
+use std::process::Child;
 use std::process::Command;
 use std::process::Stdio;
 use std::thread::sleep;
@@ -25,6 +26,7 @@ use tempfile::TempDir;
 /// Owns the Redis and Sentinel containers used by a failover test.
 pub struct SentinelServer {
     container_ids: Vec<String>,
+    children: Vec<Child>,
     directories: Vec<TempDir>,
     sentinel_ports: Vec<u16>,
     master_port: u16,
@@ -40,8 +42,13 @@ impl SentinelServer {
     /// configuration-write, container-start, output-decoding, or readiness
     /// errors. Owned partial state is cleaned on failure.
     pub fn start() -> Result<Self, Box<dyn Error>> {
+        Self::start_docker().or_else(|_| Self::start_local())
+    }
+
+    fn start_docker() -> Result<Self, Box<dyn Error>> {
         let mut server = Self {
             container_ids: Vec::new(),
+            children: Vec::new(),
             directories: Vec::new(),
             sentinel_ports: Vec::new(),
             master_port: free_port()?,
@@ -118,6 +125,82 @@ impl SentinelServer {
                 "--sentinel",
             ])?;
             server.container_ids.push(id);
+            server.directories.push(directory);
+            server.sentinel_ports.push(port);
+        }
+        server.wait_for_quorum()?;
+        Ok(server)
+    }
+
+    fn start_local() -> Result<Self, Box<dyn Error>> {
+        let mut server = Self {
+            container_ids: Vec::new(),
+            children: Vec::new(),
+            directories: Vec::new(),
+            sentinel_ports: Vec::new(),
+            master_port: free_port()?,
+            replica_port: free_port()?,
+        };
+        let master_dir = TempDir::new()?;
+        server.children.push(start_local_redis([
+            "--port",
+            &server.master_port.to_string(),
+            "--bind",
+            "127.0.0.1",
+            "--dir",
+            master_dir.path().to_str().ok_or("invalid temporary path")?,
+            "--appendonly",
+            "yes",
+            "--logfile",
+            master_dir
+                .path()
+                .join("redis.log")
+                .to_str()
+                .ok_or("invalid temporary path")?,
+        ])?);
+        server.directories.push(master_dir);
+
+        let replica_dir = TempDir::new()?;
+        server.children.push(start_local_redis([
+            "--port",
+            &server.replica_port.to_string(),
+            "--bind",
+            "127.0.0.1",
+            "--dir",
+            replica_dir.path().to_str().ok_or("invalid temporary path")?,
+            "--replicaof",
+            "127.0.0.1",
+            &server.master_port.to_string(),
+            "--logfile",
+            replica_dir
+                .path()
+                .join("redis.log")
+                .to_str()
+                .ok_or("invalid temporary path")?,
+        ])?);
+        server.directories.push(replica_dir);
+
+        for _ in 0..3 {
+            let port = free_port()?;
+            let directory = TempDir::new()?;
+            let config = format!(
+                "port {port}\nbind 127.0.0.1\ndir {}\nsentinel monitor qeventbus 127.0.0.1 {} 2\nsentinel down-after-milliseconds qeventbus 2000\nsentinel failover-timeout qeventbus 10000\nsentinel parallel-syncs qeventbus 1\n",
+                directory.path().display(),
+                server.master_port,
+            );
+            let config_path = directory.path().join("sentinel.conf");
+            fs::write(&config_path, config)?;
+            let child = Command::new("redis-server")
+                .arg(config_path)
+                .arg("--sentinel")
+                .arg("--daemonize")
+                .arg("no")
+                .arg("--logfile")
+                .arg(directory.path().join("redis.log"))
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()?;
+            server.children.push(child);
             server.directories.push(directory);
             server.sentinel_ports.push(port);
         }
@@ -257,14 +340,22 @@ impl SentinelServer {
     /// after blocking Docker/Redis IO, or process/stop/promotion-deadline
     /// failure errors.
     pub fn stop_original_master(&mut self) -> Result<(), Box<dyn Error>> {
-        let master = self.container_ids.remove(0);
-        let status = Command::new("docker")
-            .args(["stop", &master])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()?;
-        if !status.success() {
-            return Err("could not stop the isolated Redis master".into());
+        if !self.container_ids.is_empty() {
+            let master = self.container_ids.remove(0);
+            let status = Command::new("docker")
+                .args(["stop", &master])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()?;
+            if !status.success() {
+                return Err("could not stop the isolated Redis master".into());
+            }
+        } else {
+            let master = self.children.first_mut().ok_or("missing local Redis master")?;
+            let kill_result = master.kill();
+            let wait_result = master.wait();
+            kill_result?;
+            wait_result?;
         }
         let deadline = Instant::now() + Duration::from_secs(30);
         while Instant::now() < deadline {
@@ -285,6 +376,15 @@ impl SentinelServer {
             })
             .collect::<Vec<_>>()
             .join("\n");
+        let logs = if self.container_ids.is_empty() {
+            self.directories
+                .iter()
+                .filter_map(|directory| fs::read_to_string(directory.path().join("redis.log")).ok())
+                .collect::<Vec<_>>()
+                .join("\n")
+        } else {
+            logs
+        };
         Err(format!("Sentinel did not promote the isolated replica; logs:\n{logs}").into())
     }
 
@@ -295,7 +395,7 @@ impl SentinelServer {
     /// readiness or a readiness error at the polling deadline; individual
     /// query errors are retried.
     fn wait_for_quorum(&self) -> Result<(), Box<dyn Error>> {
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + Duration::from_secs(20);
         while Instant::now() < deadline {
             let all_sentinels_ready = self.sentinel_ports.iter().all(|port| {
                 self.master_port_at(*port)
@@ -310,16 +410,41 @@ impl SentinelServer {
                         })
                         .is_ok_and(|result| result.starts_with("OK"))
             });
+            let healthy_sentinel_count = self
+                .sentinel_ports
+                .iter()
+                .filter(|port| sentinel_has_healthy_replica(**port))
+                .count();
+            let sentinel_quorum = self.sentinel_ports.len() / 2 + 1;
             let replica_ready = Client::open(format!("redis://127.0.0.1:{}/", self.master_port))
                 .and_then(|client| client.get_connection())
                 .and_then(|mut connection| cmd("INFO").arg("replication").query::<String>(&mut connection))
-                .is_ok_and(|info| info.contains("connected_slaves:1"));
-            if all_sentinels_ready && replica_ready {
+                .is_ok_and(|info| info.contains("connected_slaves:1") && info.contains("state=online"));
+            if all_sentinels_ready && healthy_sentinel_count >= sentinel_quorum && replica_ready {
                 return Ok(());
             }
             sleep(Duration::from_millis(100));
         }
-        Err("Redis Sentinel quorum did not become ready".into())
+        let replica_states = self
+            .sentinel_ports
+            .iter()
+            .map(|port| format!("{port}: {}", sentinel_replica_state(*port)))
+            .collect::<Vec<_>>()
+            .join("; ");
+        let master_state = Client::open(format!("redis://127.0.0.1:{}/", self.master_port))
+            .and_then(|client| client.get_connection())
+            .and_then(|mut connection| cmd("INFO").arg("replication").query::<String>(&mut connection))
+            .unwrap_or_else(|error| error.to_string());
+        let logs = self
+            .directories
+            .iter()
+            .filter_map(|directory| fs::read_to_string(directory.path().join("redis.log")).ok())
+            .collect::<Vec<_>>()
+            .join("\n");
+        Err(format!(
+            "Redis Sentinel quorum did not become ready; replicas={replica_states}; master={master_state}; logs={logs}"
+        )
+        .into())
     }
 }
 
@@ -337,6 +462,44 @@ fn master_port_from(sentinel_port: u16) -> Result<u16, Box<dyn Error>> {
     Ok(port)
 }
 
+fn sentinel_has_healthy_replica(port: u16) -> bool {
+    let Ok(client) = Client::open(format!("redis://127.0.0.1:{port}/")) else {
+        return false;
+    };
+    let Ok(mut connection) = client.get_connection() else {
+        return false;
+    };
+    let Ok(replicas) = cmd("SENTINEL")
+        .arg("REPLICAS")
+        .arg("qeventbus")
+        .query::<Vec<Vec<String>>>(&mut connection)
+    else {
+        return false;
+    };
+    replicas.iter().any(|replica| {
+        let fields: std::collections::HashMap<String, String> = replica
+            .chunks_exact(2)
+            .filter_map(|pair| Some((pair.first()?.clone(), pair.get(1)?.clone())))
+            .collect();
+        fields
+            .get("flags")
+            .is_some_and(|flags| !flags.contains("s_down") && !flags.contains("o_down"))
+            && fields.get("master-link-status").is_some_and(|status| status == "ok")
+    })
+}
+
+fn sentinel_replica_state(port: u16) -> String {
+    Client::open(format!("redis://127.0.0.1:{port}/"))
+        .and_then(|client| client.get_connection())
+        .and_then(|mut connection| {
+            cmd("SENTINEL")
+                .arg("REPLICAS")
+                .arg("qeventbus")
+                .query::<redis::Value>(&mut connection)
+        })
+        .map_or_else(|error| error.to_string(), |value| format!("{value:?}"))
+}
+
 impl Drop for SentinelServer {
     /// Removes only containers and temporary state owned by this fixture.
     ///
@@ -350,8 +513,22 @@ impl Drop for SentinelServer {
                 .stderr(Stdio::null())
                 .status();
         }
+        for child in &mut self.children {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
         let _ = &self.directories;
     }
+}
+
+fn start_local_redis<const N: usize>(args: [&str; N]) -> Result<Child, Box<dyn Error>> {
+    Ok(Command::new("redis-server")
+        .args(args)
+        .arg("--daemonize")
+        .arg("no")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?)
 }
 
 /// Starts Docker with the `N` supplied process arguments `args`.

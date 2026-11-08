@@ -5,7 +5,7 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-//! Unknown-XACK intent remains fixed until identical settlement succeeds.
+//! Unknown-settlement intent remains fixed until identical settlement succeeds.
 use std::any::TypeId;
 use std::error::Error;
 use std::sync::Arc;
@@ -164,7 +164,7 @@ fn assert_ack_applied(server: &RedisServer) -> TestResult {
 }
 
 #[test]
-fn test_settle_unknown_xack_preserves_intent_and_same_retry_releases_slot() -> TestResult {
+fn test_settle_unknown_settlement_preserves_intent_and_same_retry_releases_slot() -> TestResult {
     let server = RedisServer::start()?;
     let proxy = ControlledRedis::start(server.url())?;
     let bus = create_bus(&proxy.url())?;
@@ -174,7 +174,7 @@ fn test_settle_unknown_xack_preserves_intent_and_same_retry_releases_slot() -> T
     let ReceiveOutcome::Message(received) = receiver.receive(Duration::from_secs(2))? else {
         return Err("first event missing".into());
     };
-    let gate = proxy.pause_after_reply("XACK");
+    let gate = proxy.pause_after_settlement_reply();
     let worker = spawn(move || {
         let failed = receiver
             .settle(
@@ -188,7 +188,7 @@ fn test_settle_unknown_xack_preserves_intent_and_same_retry_releases_slot() -> T
     if !reached {
         gate.release_without_reply();
     }
-    assert!(reached, "XACK reply gate was not reached");
+    assert!(reached, "settlement EVAL reply gate was not reached");
     assert_ack_applied(&server)?;
     gate.release_without_reply();
     let (failed, mut receiver, received) = worker.join().expect("settlement worker finishes");
@@ -234,7 +234,7 @@ fn test_settle_first_explicit_rejection_allows_retry() -> TestResult {
 }
 
 #[test]
-fn test_settle_explicit_rejection_after_unknown_xack_never_unlocks_intent() -> TestResult {
+fn test_settle_explicit_rejection_after_unknown_settlement_never_unlocks_intent() -> TestResult {
     let server = RedisServer::start()?;
     let proxy = ControlledRedis::start(server.url())?;
     let bus = create_bus(&proxy.url())?;
@@ -243,7 +243,7 @@ fn test_settle_explicit_rejection_after_unknown_xack_never_unlocks_intent() -> T
     let ReceiveOutcome::Message(received) = receiver.receive(Duration::from_secs(2))? else {
         return Err("event missing".into());
     };
-    let gate = proxy.pause_after_reply("XACK");
+    let gate = proxy.pause_after_settlement_reply();
     let worker = spawn(move || {
         let failed = receiver
             .settle(

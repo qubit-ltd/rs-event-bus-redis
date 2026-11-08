@@ -587,7 +587,7 @@ fn test_sync_attempt_query_failure_delivers_unknown_and_discards_connection() {
         Step::reply("XGROUP", b"+OK\r\n"),
         Step::reply("XAUTOCLAIM", &claimed_record(false)),
         Step::reply("XPENDING", FAULT),
-        Step::reply("XACK", b":1\r\n"),
+        Step::settlement_reply(b":1\r\n"),
     ])
     .expect("start RESP endpoint");
     let bus = sync_bus(&server);
@@ -611,7 +611,7 @@ fn test_async_attempt_query_failure_delivers_unknown_and_discards_connection() {
             Step::reply("XGROUP", b"+OK\r\n"),
             Step::reply("XAUTOCLAIM", &claimed_record(false)),
             Step::reply("XPENDING", FAULT),
-            Step::reply("XACK", b":1\r\n"),
+            Step::settlement_reply(b":1\r\n"),
         ])
         .expect("start RESP endpoint");
         let bus = async_bus(&server).await;
@@ -636,7 +636,7 @@ fn test_sync_settlement_connection_failure_keeps_the_token_unapplied() {
         Step::reply("XGROUP", b"+OK\r\n"),
         Step::reply("XAUTOCLAIM", &claimed_record(false)),
         Step::reply("XPENDING", TRUSTED_PENDING_ROW),
-        Step::disconnect("XACK", true),
+        Step::settlement_disconnect(true),
     ])
     .expect("start RESP endpoint");
     let bus = sync_bus(&server);
@@ -648,7 +648,7 @@ fn test_sync_settlement_connection_failure_keeps_the_token_unapplied() {
     assert_failure(
         subscription
             .settle(token, DeliveryDisposition::Accept)
-            .expect_err("first XACK loses transport"),
+            .expect_err("first settlement EVAL loses transport"),
         "settle",
         "outcome_unknown",
         Some(true),
@@ -683,7 +683,7 @@ fn test_async_settlement_connection_failure_keeps_the_token_unapplied() {
             Step::reply("XGROUP", b"+OK\r\n"),
             Step::reply("XAUTOCLAIM", &claimed_record(false)),
             Step::reply("XPENDING", TRUSTED_PENDING_ROW),
-            Step::disconnect("XACK", true),
+            Step::settlement_disconnect(true),
         ])
         .expect("start RESP endpoint");
         let bus = async_bus(&server).await;
@@ -696,7 +696,7 @@ fn test_async_settlement_connection_failure_keeps_the_token_unapplied() {
             subscription
                 .settle(token, DeliveryDisposition::Accept)
                 .await
-                .expect_err("first XACK loses transport"),
+                .expect_err("first settlement EVAL loses transport"),
             "settle",
             "outcome_unknown",
             Some(true),

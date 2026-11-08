@@ -21,6 +21,7 @@ struct GateState {
     armed: bool,
     command: Option<Vec<u8>>,
     new_entries_only: bool,
+    settlement_eval_only: bool,
     reached: bool,
     released: bool,
     discard_reply: bool,
@@ -53,6 +54,20 @@ impl ReplyGate {
         state.armed = true;
         state.command = Some(command.as_bytes().to_ascii_uppercase());
         state.new_entries_only = false;
+        state.settlement_eval_only = false;
+        state.reached = false;
+        state.released = false;
+        state.discard_reply = false;
+        state.waker = None;
+    }
+
+    /// Arms the next one-key EVAL using the settlement Lua protocol.
+    pub fn arm_for_settlement(&self) {
+        let mut state = self.state.lock().expect("reply gate lock is healthy");
+        state.armed = true;
+        state.command = Some(b"EVAL".to_vec());
+        state.new_entries_only = false;
+        state.settlement_eval_only = true;
         state.reached = false;
         state.released = false;
         state.discard_reply = false;
@@ -69,6 +84,7 @@ impl ReplyGate {
         state.armed = true;
         state.command = Some(b"XREADGROUP".to_vec());
         state.new_entries_only = true;
+        state.settlement_eval_only = false;
         state.reached = false;
         state.released = false;
         state.discard_reply = false;
@@ -133,6 +149,9 @@ impl ReplyGate {
         if !state.armed || state.command.as_deref() != Some(command) {
             return false;
         }
+        if state.settlement_eval_only && !is_settlement_eval(request) {
+            return false;
+        }
         if state.new_entries_only && !request.contains(&b'>') {
             return false;
         }
@@ -151,6 +170,41 @@ impl ReplyGate {
             .expect("reply gate lock is healthy");
         _state.discard_reply
     }
+}
+
+pub(super) fn is_settlement_eval(request: &[u8]) -> bool {
+    let mut fields = Vec::new();
+    let mut cursor = 0;
+    while cursor < request.len() {
+        let Some(end) = request[cursor..].windows(2).position(|pair| pair == b"\r\n") else {
+            return false;
+        };
+        let header_end = cursor + end;
+        let Ok(header) = std::str::from_utf8(&request[cursor..header_end]) else {
+            return false;
+        };
+        let Some(length) = header.strip_prefix('$').and_then(|value| value.parse::<usize>().ok()) else {
+            if header.starts_with('*') && fields.is_empty() {
+                cursor = header_end + 2;
+                continue;
+            }
+            return false;
+        };
+        let start = header_end + 2;
+        let Some(stop) = start.checked_add(length) else {
+            return false;
+        };
+        if stop + 2 > request.len() || &request[stop..stop + 2] != b"\r\n" {
+            return false;
+        }
+        fields.push(&request[start..stop]);
+        cursor = stop + 2;
+    }
+    fields.len() == 7
+        && fields[0].eq_ignore_ascii_case(b"EVAL")
+        && fields[1].windows(8).any(|value| value == b"XPENDING")
+        && fields[1].windows(4).any(|value| value == b"XACK")
+        && fields[2] == b"1"
 }
 
 /// Future returned by [`ReplyGate::wait_applied`].

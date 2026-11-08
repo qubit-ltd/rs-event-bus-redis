@@ -77,6 +77,21 @@ fn test_sync_acl_missing_eval() {
 fn test_sync_acl_missing_quarantine_key() {
     parent("missing_quarantine_key", "test_sync_acl_child");
 }
+#[cfg(feature = "sync")]
+#[test]
+fn test_sync_acl_settlement_missing_eval() {
+    parent("settlement_missing_eval", "test_sync_acl_child");
+}
+#[cfg(feature = "sync")]
+#[test]
+fn test_sync_acl_settlement_missing_xpending() {
+    parent("settlement_missing_xpending", "test_sync_acl_child");
+}
+#[cfg(feature = "sync")]
+#[test]
+fn test_sync_acl_settlement_missing_xack() {
+    parent("settlement_missing_xack", "test_sync_acl_child");
+}
 #[cfg(feature = "async")]
 #[test]
 fn test_async_acl_workflow() {
@@ -91,6 +106,21 @@ fn test_async_acl_missing_eval() {
 #[test]
 fn test_async_acl_missing_quarantine_key() {
     parent("missing_quarantine_key", "test_async_acl_child");
+}
+#[cfg(feature = "async")]
+#[test]
+fn test_async_acl_settlement_missing_eval() {
+    parent("settlement_missing_eval", "test_async_acl_child");
+}
+#[cfg(feature = "async")]
+#[test]
+fn test_async_acl_settlement_missing_xpending() {
+    parent("settlement_missing_xpending", "test_async_acl_child");
+}
+#[cfg(feature = "async")]
+#[test]
+fn test_async_acl_settlement_missing_xack() {
+    parent("settlement_missing_xack", "test_async_acl_child");
 }
 
 #[cfg(feature = "sync")]
@@ -183,10 +213,20 @@ fn sync_child() -> Result<(), Box<dyn Error>> {
     let ReceiveOutcome::Message(message) = subscription.receive(Duration::from_secs(3))? else {
         return Err("restricted account did not receive its published event".into());
     };
-    subscription.settle(
+    let settle = subscription.settle(
         message.settlement().ok_or("missing settlement token")?,
         DeliveryDisposition::Accept,
-    )?;
+    );
+    if case.starts_with("settlement_") {
+        let error = settle.expect_err("restricted settlement must fail");
+        assert_eq!(error.kind(), "authentication");
+        assert_eq!(error.retryable(), Some(false));
+        assert!(!error.to_string().contains("ephemeral-acl-test-password"));
+        signal_ready_and_wait()?;
+        subscription.close()?;
+        return Ok(());
+    }
+    settle?;
     assert_outside_namespace_denied_sync(&namespace)?;
     signal_ready_and_wait()?;
     let outcome = subscription.receive(Duration::from_secs(3));
@@ -241,12 +281,22 @@ async fn async_child() -> Result<(), Box<dyn Error>> {
     let ReceiveOutcome::Message(message) = subscription.receive(Duration::from_secs(3)).await? else {
         return Err("restricted account did not receive its published event".into());
     };
-    subscription
+    let settle = subscription
         .settle(
             message.settlement().ok_or("missing settlement token")?,
             DeliveryDisposition::Accept,
         )
-        .await?;
+        .await;
+    if case.starts_with("settlement_") {
+        let error = settle.expect_err("restricted settlement must fail");
+        assert_eq!(error.kind(), "authentication");
+        assert_eq!(error.retryable(), Some(false));
+        assert!(!error.to_string().contains("ephemeral-acl-test-password"));
+        signal_ready_and_wait()?;
+        subscription.close().await?;
+        return Ok(());
+    }
+    settle?;
     assert_outside_namespace_denied_async(&namespace).await?;
     signal_ready_and_wait()?;
     let outcome = subscription.receive(Duration::from_secs(3)).await;

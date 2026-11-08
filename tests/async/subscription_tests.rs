@@ -5,7 +5,7 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-//! Unknown-XACK intent remains fixed until identical settlement succeeds.
+//! Unknown-settlement intent remains fixed until identical settlement succeeds.
 use std::any::TypeId;
 use std::error::Error;
 use std::sync::Arc;
@@ -252,7 +252,7 @@ fn test_settle_cancelled_applied_xack_preserves_intent_and_same_retry_releases_s
             return Err("first event missing".into());
         };
         let token = received.settlement().ok_or("token missing")?;
-        let gate = proxy.pause_after_reply("XACK");
+        let gate = proxy.pause_after_settlement_reply();
         let result = race(
             async { Some(receiver.settle(token, DeliveryDisposition::Accept).await) },
             async {
@@ -324,7 +324,7 @@ fn test_settle_explicit_rejection_after_cancelled_xack_never_unlocks_intent() ->
             return Err("event missing".into());
         };
         let token = received.settlement().ok_or("token missing")?;
-        let gate = proxy.pause_after_reply("XACK");
+        let gate = proxy.pause_after_settlement_reply();
         let result = race(
             async { Some(receiver.settle(token, DeliveryDisposition::Accept).await) },
             async {

@@ -9,6 +9,8 @@
 
 use std::error::Error;
 use std::fs;
+use std::net::TcpListener;
+use std::process::Child;
 use std::process::Command;
 use std::process::Stdio;
 use std::thread::sleep;
@@ -26,7 +28,8 @@ macro_rules! openssl_args {
 
 /// Owns a Redis TLS container and its generated test CA and server identity.
 pub struct TlsRedisServer {
-    container_id: String,
+    container_id: Option<String>,
+    child: Option<Child>,
     _directory: TempDir,
     url: String,
     ca_path: String,
@@ -81,7 +84,7 @@ impl TlsRedisServer {
 
         let mount = format!("{}:/tls:ro", directory.path().display());
         let client_auth = if require_client_auth { "yes" } else { "no" };
-        let (container_id, port) = super::redis_server::start_mapped_container(
+        let docker = super::redis_server::start_mapped_container(
             &["run", "-d", "--rm"],
             &[
                 "-v",
@@ -104,12 +107,21 @@ impl TlsRedisServer {
                 "yes",
             ],
             6379,
-        )?;
+        );
+        let (container_id, child, port) = match docker {
+            Ok((container_id, port)) => (Some(container_id), None, port),
+            Err(_) => {
+                let port = TcpListener::bind(("127.0.0.1", 0))?.local_addr()?.port();
+                let child = start_local_tls(directory.path(), port, require_client_auth)?;
+                (None, Some(child), port)
+            }
+        };
         let ca_path = directory.path().join("ca.crt").to_string_lossy().into_owned();
         let client_cert_path = directory.path().join("client.crt").to_string_lossy().into_owned();
         let client_key_path = directory.path().join("client.key").to_string_lossy().into_owned();
         let server = Self {
             container_id,
+            child,
             _directory: directory,
             url: format!("rediss://localhost:{port}/"),
             ca_path,
@@ -128,14 +140,19 @@ impl TlsRedisServer {
             }
             sleep(Duration::from_millis(100));
         }
-        let logs = Command::new("docker")
-            .args(["logs", "--tail", "30", &server.container_id])
-            .output()?;
-        Err(format!(
-            "TLS Redis container did not become ready: {}",
-            String::from_utf8_lossy(&logs.stderr)
-        )
-        .into())
+        let logs = server
+            .container_id
+            .as_deref()
+            .and_then(|container_id| {
+                Command::new("docker")
+                    .args(["logs", "--tail", "30", container_id])
+                    .output()
+                    .ok()
+            })
+            .map_or_else(String::new, |output| {
+                String::from_utf8_lossy(&output.stderr).into_owned()
+            });
+        Err(format!("TLS Redis container did not become ready: {}", logs).into())
     }
 
     /// Returns the authenticated loopback TLS URL.
@@ -177,12 +194,47 @@ impl TlsRedisServer {
 impl Drop for TlsRedisServer {
     /// Removes the owned Redis container; cleanup process errors are ignored.
     fn drop(&mut self) {
-        let _ = Command::new("docker")
-            .args(["rm", "-f", &self.container_id])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        if let Some(container_id) = &self.container_id {
+            let _ = Command::new("docker")
+                .args(["rm", "-f", container_id])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+        if let Some(child) = &mut self.child {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
+}
+
+fn start_local_tls(directory: &std::path::Path, port: u16, require_client_auth: bool) -> Result<Child, Box<dyn Error>> {
+    let server = std::env::var_os("RER_TLS_TEST_REDIS_SERVER").unwrap_or_else(|| "redis-server".into());
+    let client_auth = if require_client_auth { "yes" } else { "no" };
+    Ok(Command::new(server)
+        .arg("--bind")
+        .arg("127.0.0.1")
+        .arg("--port")
+        .arg("0")
+        .arg("--tls-port")
+        .arg(port.to_string())
+        .arg("--tls-cert-file")
+        .arg(directory.join("server.crt"))
+        .arg("--tls-key-file")
+        .arg(directory.join("server.key"))
+        .arg("--tls-ca-cert-file")
+        .arg(directory.join("ca.crt"))
+        .arg("--tls-auth-clients")
+        .arg(client_auth)
+        .arg("--appendonly")
+        .arg("yes")
+        .arg("--dir")
+        .arg(directory)
+        .arg("--daemonize")
+        .arg("no")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?)
 }
 
 /// Generates test-only CA, server, and client PEM files in `directory`.

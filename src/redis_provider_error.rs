@@ -99,26 +99,33 @@ pub enum RedisProviderError {
 #[cfg(any(feature = "sync", feature = "async"))]
 pub(crate) fn from_redis_error(operation: &'static str, error: &RedisError) -> RedisProviderError {
     let code_class = redis_error_code_class(error.code().unwrap_or_default());
-    let (kind, retryable) = code_class.unwrap_or_else(|| match error.kind() {
-        ErrorKind::AuthenticationFailed => ("authentication", Some(false)),
-        ErrorKind::UnexpectedReturnType => ("wrong_type", Some(false)),
-        ErrorKind::InvalidClientConfig
-        | ErrorKind::EmptySentinelList
-        | ErrorKind::MasterNameNotFoundBySentinel
-        | ErrorKind::NoValidReplicasFoundBySentinel => ("configuration", Some(false)),
-        ErrorKind::Server(ServerErrorKind::BusyLoading)
-        | ErrorKind::Server(ServerErrorKind::TryAgain)
-        | ErrorKind::Server(ServerErrorKind::MasterDown)
-        | ErrorKind::Server(ServerErrorKind::ReadOnly) => ("temporarily_unavailable", Some(true)),
-        ErrorKind::Io => ("transport", Some(true)),
-        ErrorKind::Parse | ErrorKind::RESP3NotSupported | ErrorKind::ResponseTooLarge => ("protocol", Some(false)),
-        ErrorKind::Server(ServerErrorKind::Moved)
-        | ErrorKind::Server(ServerErrorKind::Ask)
-        | ErrorKind::Server(ServerErrorKind::CrossSlot)
-        | ErrorKind::Server(ServerErrorKind::ClusterDown)
-        | ErrorKind::ClusterConnectionNotFound => ("unsupported_topology", Some(false)),
-        _ => ("redis_error", None),
-    });
+    let script_acl_failure = error.code() == Some("ERR")
+        && error.detail().is_some_and(|detail| {
+            (detail.starts_with("ACL failure in script:") && detail.contains("has no permissions to run"))
+                || detail.contains("The user executing the script can't run this command or subcommand")
+        });
+    let (kind, retryable) = code_class
+        .or_else(|| script_acl_failure.then_some(("authentication", Some(false))))
+        .unwrap_or_else(|| match error.kind() {
+            ErrorKind::AuthenticationFailed => ("authentication", Some(false)),
+            ErrorKind::UnexpectedReturnType => ("wrong_type", Some(false)),
+            ErrorKind::InvalidClientConfig
+            | ErrorKind::EmptySentinelList
+            | ErrorKind::MasterNameNotFoundBySentinel
+            | ErrorKind::NoValidReplicasFoundBySentinel => ("configuration", Some(false)),
+            ErrorKind::Server(ServerErrorKind::BusyLoading)
+            | ErrorKind::Server(ServerErrorKind::TryAgain)
+            | ErrorKind::Server(ServerErrorKind::MasterDown)
+            | ErrorKind::Server(ServerErrorKind::ReadOnly) => ("temporarily_unavailable", Some(true)),
+            ErrorKind::Io => ("transport", Some(true)),
+            ErrorKind::Parse | ErrorKind::RESP3NotSupported | ErrorKind::ResponseTooLarge => ("protocol", Some(false)),
+            ErrorKind::Server(ServerErrorKind::Moved)
+            | ErrorKind::Server(ServerErrorKind::Ask)
+            | ErrorKind::Server(ServerErrorKind::CrossSlot)
+            | ErrorKind::Server(ServerErrorKind::ClusterDown)
+            | ErrorKind::ClusterConnectionNotFound => ("unsupported_topology", Some(false)),
+            _ => ("redis_error", None),
+        });
     RedisProviderError::Transport {
         operation,
         kind,
@@ -137,6 +144,7 @@ pub(crate) fn from_redis_error(operation: &'static str, error: &RedisError) -> R
 /// A stable category and retryability hint for recognized codes; otherwise
 /// `None`.
 #[inline]
+#[cfg(any(feature = "sync", feature = "async"))]
 fn redis_error_code_class(code: &str) -> Option<(&'static str, Option<bool>)> {
     match code {
         "NOAUTH" | "WRONGPASS" | "NOPERM" => Some(("authentication", Some(false))),

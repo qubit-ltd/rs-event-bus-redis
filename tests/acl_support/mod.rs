@@ -9,6 +9,7 @@
 
 use std::error::Error;
 use std::fs;
+use std::io::Read;
 use std::process::Child;
 use std::process::Command;
 use std::process::Stdio;
@@ -26,25 +27,61 @@ const USER: &str = "qubit_acl_test";
 const PASSWORD: &str = "ephemeral-acl-test-password";
 const TIMEOUT: Duration = Duration::from_secs(30);
 
+struct AclPermissions {
+    eval: bool,
+    quarantine_key: bool,
+    xpending: bool,
+    xack: bool,
+}
+
 /// Runs an ignored helper in an isolated child process and validates the
 /// administrator-observed quarantine result.
 pub fn run_workflow(image: &str, case: &str, helper: &str) -> Result<(), Box<dyn Error>> {
-    let server = RedisServer::start_version(image)?;
-    let mut admin = redis::Client::open(server.url())?.get_connection()?;
-    let namespace = format!("acl-{}-{}", case.replace('_', "-"), image);
+    let external_url = std::env::var("RER_ACL_URL").ok();
+    let server = if external_url.is_none() {
+        Some(RedisServer::start()?)
+    } else {
+        None
+    };
+    let url = external_url
+        .as_deref()
+        .or_else(|| server.as_ref().map(RedisServer::url))
+        .ok_or("ACL Redis URL missing")?;
+    let mut admin = redis::Client::open(url)?.get_connection()?;
+    let namespace = format!(
+        "acl-{}-{}-{}-{}",
+        case.replace('_', "-"),
+        helper,
+        image,
+        std::process::id()
+    );
     let source = qubit_event_bus_redis::naming::stream_key(&namespace, "events");
     let group = qubit_event_bus_redis::naming::group_name(&namespace, "events", "worker", Some("workers"));
     let quarantine = qubit_event_bus_redis::naming::poison_key(&namespace, "events", &group);
     let allow_quarantine = case != "missing_quarantine_key";
-    let allow_eval = case != "missing_eval";
-    create_user(&mut admin, &source, &quarantine, allow_eval, allow_quarantine)?;
+    // The helper first settles a normal record before the parent injects a
+    // malformed record; deny EVAL only after that setup for quarantine cases.
+    let allow_eval = case != "settlement_missing_eval";
+    let allow_xpending = case != "settlement_missing_xpending";
+    let allow_xack = case != "settlement_missing_xack";
+    create_user(
+        &mut admin,
+        &source,
+        &quarantine,
+        AclPermissions {
+            eval: allow_eval,
+            quarantine_key: allow_quarantine,
+            xpending: allow_xpending,
+            xack: allow_xack,
+        },
+    )?;
 
     let paths = TempDir::new()?;
     let ready = paths.path().join("ready");
     let proceed = paths.path().join("proceed");
     let mut child = Command::new(std::env::current_exe()?)
         .args(["--ignored", "--exact", helper, "--nocapture"])
-        .env("RER_ACL_URL", server.url())
+        .env("RER_ACL_URL", url)
         .env("RER_ACL_NAMESPACE", &namespace)
         .env("RER_ACL_CASE", case)
         .env("RER_ACL_USER", USER)
@@ -56,6 +93,28 @@ pub fn run_workflow(image: &str, case: &str, helper: &str) -> Result<(), Box<dyn
         .spawn()?;
 
     wait_for_marker(&mut child, &ready)?;
+    if case == "missing_eval" {
+        cmd("ACL")
+            .arg("SETUSER")
+            .arg(USER)
+            .arg("-eval")
+            .query::<()>(&mut admin)?;
+    }
+    if case.starts_with("settlement_") {
+        assert_source_state(&mut admin, &source, &group, case, "")?;
+        fs::write(&proceed, b"continue")?;
+        let output = wait_child(child, TIMEOUT)?;
+        if !output.status.success() {
+            return Err(format!(
+                "ACL helper failed: {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            )
+            .into());
+        }
+        assert_source_state(&mut admin, &source, &group, case, "")?;
+        return Ok(());
+    }
     let source_id: String = cmd("XADD")
         .arg(&source)
         .arg("*")
@@ -84,32 +143,34 @@ fn create_user(
     admin: &mut Connection,
     source: &str,
     quarantine: &str,
-    allow_eval: bool,
-    allow_quarantine: bool,
+    permissions: AclPermissions,
 ) -> Result<(), Box<dyn Error>> {
     let mut command = cmd("ACL");
     command.arg("SETUSER").arg(USER).arg("reset").arg("on");
     command.arg(format!(">{PASSWORD}"));
     command.arg(format!("~{source}"));
-    if allow_quarantine {
+    if permissions.quarantine_key {
         command.arg(format!("~{quarantine}"));
     }
     for permission in [
         "+ping",
-        "+client|setinfo",
         "+xadd",
         "+xgroup|create",
         "+xreadgroup",
         "+xautoclaim",
-        "+xpending",
         "+xrange",
-        "+xack",
         "+type",
         "+role",
     ] {
         command.arg(permission);
     }
-    if allow_eval {
+    if permissions.xpending {
+        command.arg("+xpending");
+    }
+    if permissions.xack {
+        command.arg("+xack");
+    }
+    if permissions.eval {
         command.arg("+eval");
     }
     command.query::<()>(&mut *admin)?;
@@ -123,7 +184,15 @@ fn wait_for_marker(child: &mut Child, marker: &std::path::Path) -> Result<(), Bo
             return Ok(());
         }
         if let Some(status) = child.try_wait()? {
-            return Err(format!("ACL child exited before readiness marker: {status}").into());
+            let mut stdout = String::new();
+            let mut stderr = String::new();
+            if let Some(mut output) = child.stdout.take() {
+                output.read_to_string(&mut stdout)?;
+            }
+            if let Some(mut output) = child.stderr.take() {
+                output.read_to_string(&mut stderr)?;
+            }
+            return Err(format!("ACL child exited before readiness marker: {status}: {stdout}{stderr}").into());
         }
         sleep(Duration::from_millis(20));
     }
@@ -167,6 +236,8 @@ fn assert_source_state(
         .query(admin)?;
     if case == "workflow" {
         assert!(pending.is_empty(), "successful quarantine must ACK the source record");
+    } else if case.starts_with("settlement_") {
+        assert_eq!(pending.len(), 1, "denied settlement must preserve the PEL entry");
     } else {
         assert_eq!(
             pending.len(),
@@ -225,7 +296,7 @@ fn set_master_user(master: &mut Connection, source: &str, allow_role: bool) -> R
     let mut command = cmd("ACL");
     command.arg("SETUSER").arg("qubit_master_test").arg("reset").arg("on");
     command.arg(format!(">{PASSWORD}")).arg(format!("~{source}"));
-    command.arg("+client|setinfo").arg("+xadd");
+    command.arg("+xadd");
     if allow_role {
         command.arg("+role");
     }
@@ -238,7 +309,7 @@ fn configure_sentinel_users(endpoints: &str, allow_lookup: bool) -> Result<(), B
         let mut connection = redis::Client::open(format!("redis://{endpoint}/"))?.get_connection()?;
         let mut command = cmd("ACL");
         command.arg("SETUSER").arg("qubit_sentinel_test").arg("reset").arg("on");
-        command.arg(format!(">{PASSWORD}")).arg("+ping").arg("+client|setinfo");
+        command.arg(format!(">{PASSWORD}")).arg("+ping");
         if allow_lookup {
             command.arg("+sentinel|get-master-addr-by-name");
         }

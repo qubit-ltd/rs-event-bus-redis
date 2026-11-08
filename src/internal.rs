@@ -32,6 +32,10 @@ mod recovery_state;
 mod redis_capabilities;
 #[path = "internal/settlement_action.rs"]
 mod settlement_action;
+#[path = "internal/settlement_command.rs"]
+mod settlement_command;
+#[path = "internal/settlement_reply.rs"]
+mod settlement_reply;
 #[path = "internal/settlement_state.rs"]
 mod settlement_state;
 mod valid_stream_id;
@@ -53,6 +57,9 @@ pub(crate) use recovery_scan_stage::RecoveryScanStage;
 pub(crate) use recovery_state::RecoveryState;
 pub(crate) use redis_capabilities::redis_capabilities;
 pub(crate) use settlement_action::SettlementAction;
+pub(crate) use settlement_command::parse_settlement_reply;
+pub(crate) use settlement_command::settlement_command;
+pub(crate) use settlement_reply::SettlementReply;
 pub(crate) use settlement_state::SettlementState;
 pub(crate) use valid_stream_id::valid_stream_id;
 

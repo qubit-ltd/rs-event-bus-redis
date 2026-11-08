@@ -32,7 +32,7 @@ mod internal;
 
 /// Pending raw response substitution: Some holds the uppercase command name
 /// and replacement RESP bytes; None preserves the upstream response.
-type ReplyReplacement = Option<(Vec<u8>, Vec<u8>)>;
+type ReplyReplacement = Option<(Vec<u8>, Vec<u8>, bool)>;
 
 /// Forwards RESP traffic and pauses after the selected command is applied.
 pub struct ControlledRedis {
@@ -40,6 +40,7 @@ pub struct ControlledRedis {
     stop: Arc<AtomicBool>,
     gate: Arc<ReplyGate>,
     replacement: Arc<Mutex<ReplyReplacement>>,
+    drop_before_settlement: Arc<AtomicBool>,
     workers: Arc<Mutex<Vec<JoinHandle<()>>>>,
     listener_thread: Option<JoinHandle<()>>,
 }
@@ -69,6 +70,8 @@ impl ControlledRedis {
         let stop = Arc::new(AtomicBool::new(false));
         let gate = Arc::new(ReplyGate::default());
         let replacement = Arc::new(Mutex::new(None));
+        let drop_before_settlement = Arc::new(AtomicBool::new(false));
+        let thread_drop_before_settlement = Arc::clone(&drop_before_settlement);
         let thread_replacement = Arc::clone(&replacement);
         let thread_stop = Arc::clone(&stop);
         let thread_gate = Arc::clone(&gate);
@@ -81,7 +84,9 @@ impl ControlledRedis {
                         let upstream = upstream.clone();
                         let gate = Arc::clone(&thread_gate);
                         let replacement = Arc::clone(&thread_replacement);
-                        let worker = spawn(move || forward(client, &upstream, &gate, &replacement));
+                        let drop_before_settlement = Arc::clone(&thread_drop_before_settlement);
+                        let worker =
+                            spawn(move || forward(client, &upstream, &gate, &replacement, &drop_before_settlement));
                         if let Ok(mut workers) = listener_workers.lock() {
                             workers.push(worker);
                         }
@@ -98,6 +103,7 @@ impl ControlledRedis {
             stop,
             gate,
             replacement,
+            drop_before_settlement,
             workers,
             listener_thread: Some(listener_thread),
         })
@@ -120,7 +126,18 @@ impl ControlledRedis {
     /// performs the IO.
     pub fn replace_next_reply(&self, command: &str, reply: &[u8]) {
         *self.replacement.lock().expect("reply replacement lock is healthy") =
-            Some((command.as_bytes().to_ascii_uppercase(), reply.to_vec()));
+            Some((command.as_bytes().to_ascii_uppercase(), reply.to_vec(), false));
+    }
+
+    /// Copies the raw reply to replace only the next settlement EVAL response.
+    pub fn replace_next_settlement_reply(&self, reply: &[u8]) {
+        *self.replacement.lock().expect("replacement mutex is healthy") =
+            Some((b"EVAL".to_vec(), reply.to_vec(), true));
+    }
+
+    /// Drops the next settlement EVAL connection before forwarding it to Redis.
+    pub fn drop_next_settlement_before_forward(&self) {
+        self.drop_before_settlement.store(true, Ordering::SeqCst);
     }
 
     /// Arms the next applied reply for `command` and returns a shared gate
@@ -131,6 +148,13 @@ impl ControlledRedis {
     /// poisoned.
     pub fn pause_after_reply(&self, command: &'static str) -> Arc<ReplyGate> {
         self.gate.arm_for(command);
+        Arc::clone(&self.gate)
+    }
+
+    /// Arms the next settlement EVAL reply, matched by command shape and script
+    /// identity.
+    pub fn pause_after_settlement_reply(&self) -> Arc<ReplyGate> {
+        self.gate.arm_for_settlement();
         Arc::clone(&self.gate)
     }
 }
@@ -162,7 +186,13 @@ impl Drop for ControlledRedis {
 /// `gate` controls applied replies and `replacement` supplies one raw response.
 /// Performs blocking socket IO and exits without a result on transport failure
 /// or a discarded reply. Panics if the replacement mutex is poisoned.
-fn forward(client: TcpStream, upstream: &str, gate: &ReplyGate, replacement: &Mutex<ReplyReplacement>) {
+fn forward(
+    client: TcpStream,
+    upstream: &str,
+    gate: &ReplyGate,
+    replacement: &Mutex<ReplyReplacement>,
+    drop_before_settlement: &AtomicBool,
+) {
     let Ok(server) = TcpStream::connect(upstream) else {
         return;
     };
@@ -179,6 +209,12 @@ fn forward(client: TcpStream, upstream: &str, gate: &ReplyGate, replacement: &Mu
     let mut client_writer = client_writer;
     let mut server_writer = server_writer;
     while let Ok(Some((command, request))) = internal::read_request(&mut client_reader) {
+        if command.eq_ignore_ascii_case(b"EVAL")
+            && super::gate::is_settlement_eval(&request)
+            && drop_before_settlement.swap(false, Ordering::SeqCst)
+        {
+            break;
+        }
         if server_writer.write_all(&request).is_err() || server_writer.flush().is_err() {
             break;
         }
@@ -190,11 +226,10 @@ fn forward(client: TcpStream, upstream: &str, gate: &ReplyGate, replacement: &Mu
         }
         {
             let mut replacement = replacement.lock().expect("reply replacement lock is healthy");
-            if replacement
-                .as_ref()
-                .is_some_and(|(name, _)| name.eq_ignore_ascii_case(&command))
-            {
-                let (_, bytes) = replacement.take().expect("matching replacement exists");
+            if replacement.as_ref().is_some_and(|(name, _, settlement_only)| {
+                name.eq_ignore_ascii_case(&command) && (!settlement_only || super::gate::is_settlement_eval(&request))
+            }) {
+                let (_, bytes, _) = replacement.take().expect("matching replacement exists");
                 response = bytes;
             }
         }

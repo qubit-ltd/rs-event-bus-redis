@@ -5,7 +5,7 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-//! Unknown-XACK intent remains fixed until identical settlement succeeds.
+//! Unknown-settlement intent remains fixed until identical settlement succeeds.
 use std::any::TypeId;
 use std::error::Error;
 use std::sync::Arc;
@@ -104,7 +104,7 @@ fn assert_ack_applied(server: &RedisServer) -> TestResult {
 }
 
 #[test]
-fn test_nested_wrongtype_reply_retains_unknown_xack_intent() -> TestResult {
+fn test_nested_wrongtype_reply_retains_unknown_settlement_intent() -> TestResult {
     let server = RedisServer::start()?;
     let proxy = ControlledRedis::start(server.url())?;
     let bus = create_bus(&proxy.url())?;
@@ -115,7 +115,7 @@ fn test_nested_wrongtype_reply_retains_unknown_xack_intent() -> TestResult {
         return Err("event missing".into());
     };
     let token = received.settlement().ok_or("token missing")?;
-    proxy.replace_next_reply("XACK", b"*1\r\n-WRONGTYPE injected\r\n");
+    proxy.replace_next_settlement_reply(b"*1\r\n-WRONGTYPE injected\r\n");
     assert!(receiver.settle(token, DeliveryDisposition::Accept).is_err());
     assert_ack_applied(&server)?;
     assert!(

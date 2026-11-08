@@ -1765,7 +1765,7 @@ fn test_sync_receive_and_settle_unknown_count_once() -> Result<(), Box<dyn Error
         return Err("pending message not recovered".into());
     };
     let token = message.settlement().ok_or("settlement token missing")?;
-    proxy.replace_next_reply("XACK", b"+OK\r\n");
+    proxy.replace_next_reply("EVAL", b"+OK\r\n");
     let error = receiver
         .settle(token, DeliveryDisposition::Accept)
         .expect_err("malformed ACK reply");
@@ -1814,7 +1814,7 @@ fn test_async_receive_and_settle_unknown_count_once() -> Result<(), Box<dyn Erro
             return Err("pending message not recovered".into());
         };
         let token = message.settlement().ok_or("settlement token missing")?;
-        proxy.replace_next_reply("XACK", b"+OK\r\n");
+        proxy.replace_next_reply("EVAL", b"+OK\r\n");
         let error = receiver
             .settle(token, DeliveryDisposition::Accept)
             .await

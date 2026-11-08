@@ -8,11 +8,13 @@
 //! Docker-backed disposable Redis server for integration tests.
 
 use std::error::Error;
+use std::ffi::OsString;
 use std::io::Read;
 use std::io::Write;
 use std::net::SocketAddr;
 use std::net::TcpListener;
 use std::net::TcpStream;
+use std::process::Child;
 use std::process::Command;
 use std::process::Stdio;
 use std::thread::sleep;
@@ -96,10 +98,23 @@ fn ping_once(address: SocketAddr, deadline: Instant) -> bool {
     stream.read_exact(&mut reply).is_ok() && reply == *b"+PONG\r\n"
 }
 
-/// Owns a Redis container and removes it when dropped.
+/// Owns an isolated Redis container or a local fallback process.
 pub struct RedisServer {
-    container_id: String,
-    url: String,
+    backend: RedisBackend,
+}
+
+enum RedisBackend {
+    Docker {
+        container_id: String,
+        url: String,
+    },
+    Local {
+        child: Child,
+        directory: tempfile::TempDir,
+        port: u16,
+        url: String,
+        server_binary: OsString,
+    },
 }
 
 impl RedisServer {
@@ -109,7 +124,31 @@ impl RedisServer {
     /// returns port-bind, Docker, output-decoding, or readiness failure
     /// errors.
     pub fn start() -> Result<Self, Box<dyn Error>> {
-        Self::start_version("7-alpine")
+        match Self::start_version("7-alpine") {
+            Ok(server) => Ok(server),
+            Err(_) => Self::start_local(),
+        }
+    }
+
+    fn start_local() -> Result<Self, Box<dyn Error>> {
+        Self::start_local_with_binary(OsString::from("redis-server"))
+    }
+
+    fn start_local_with_binary(server_binary: OsString) -> Result<Self, Box<dyn Error>> {
+        let port = TcpListener::bind(("127.0.0.1", 0))?.local_addr()?.port();
+        let directory = tempfile::tempdir()?;
+        let child = start_local_process(port, directory.path(), &server_binary)?;
+        let server = Self {
+            backend: RedisBackend::Local {
+                child,
+                directory,
+                port,
+                url: format!("redis://127.0.0.1:{port}/"),
+                server_binary,
+            },
+        };
+        wait_until_ready(server.url(), Duration::from_secs(5))?;
+        Ok(server)
     }
 
     /// Starts a container for Redis image tag `image_tag` on an ephemeral local
@@ -121,15 +160,25 @@ impl RedisServer {
     /// readiness fails.
     pub fn start_version(image_tag: &str) -> Result<Self, Box<dyn Error>> {
         let image = format!("redis:{image_tag}");
-        let (container_id, port) =
-            start_mapped_container(&["run", "-d"], &[&image, "redis-server", "--appendonly", "yes"], 6379)?;
-        let server = Self {
-            container_id,
-            url: format!("redis://127.0.0.1:{port}/"),
-        };
-        wait_until_ready(&server.url, Duration::from_secs(5))
-            .map_err(|error| format!("Redis container did not become ready: {error}"))?;
-        Ok(server)
+        match start_mapped_container(&["run", "-d"], &[&image, "redis-server", "--appendonly", "yes"], 6379) {
+            Ok((container_id, port)) => {
+                let server = Self {
+                    backend: RedisBackend::Docker {
+                        container_id,
+                        url: format!("redis://127.0.0.1:{port}/"),
+                    },
+                };
+                wait_until_ready(server.url(), Duration::from_secs(5))
+                    .map_err(|error| format!("Redis container did not become ready: {error}"))?;
+                Ok(server)
+            }
+            Err(docker_error) => {
+                let server_binary = local_server_for_image(image_tag)
+                    .ok_or_else(|| format!("{docker_error}; no local Redis binary configured for {image_tag}"))?;
+                Self::start_local_with_binary(server_binary)
+                    .map_err(|local_error| format!("{docker_error}; local Redis fallback failed: {local_error}").into())
+            }
+        }
     }
 
     /// Restarts this fixture's owned Redis container and waits for readiness.
@@ -138,23 +187,38 @@ impl RedisServer {
     /// Docker/Redis IO and returns process, unsuccessful restart, or
     /// readiness failure errors.
     pub fn restart(&mut self) -> Result<(), Box<dyn Error>> {
-        let output = Command::new("docker").args(["restart", &self.container_id]).output()?;
-        if !output.status.success() {
-            return Err(format!(
-                "could not restart the isolated Redis server: {}",
-                String::from_utf8_lossy(&output.stderr)
-            )
-            .into());
-        }
-        if let Err(error) = wait_until_ready(&self.url, Duration::from_secs(10)) {
-            let logs = Command::new("docker")
-                .args(["logs", "--tail", "30", &self.container_id])
-                .output()?;
-            return Err(format!(
-                "Redis container did not become ready after restart ({error}): {}",
-                String::from_utf8_lossy(&logs.stdout)
-            )
-            .into());
+        match &mut self.backend {
+            RedisBackend::Docker { container_id, url } => {
+                let output = Command::new("docker").args(["restart", container_id]).output()?;
+                if !output.status.success() {
+                    return Err(format!(
+                        "could not restart the isolated Redis server: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    )
+                    .into());
+                }
+                if let Err(error) = wait_until_ready(url, Duration::from_secs(10)) {
+                    let logs = Command::new("docker")
+                        .args(["logs", "--tail", "30", container_id])
+                        .output()?;
+                    return Err(format!(
+                        "Redis container did not become ready after restart ({error}): {}",
+                        String::from_utf8_lossy(&logs.stdout)
+                    )
+                    .into());
+                }
+            }
+            RedisBackend::Local {
+                child,
+                directory,
+                port,
+                url,
+                server_binary,
+            } => {
+                shutdown_local_process(child, url)?;
+                *child = start_local_process(*port, directory.path(), server_binary)?;
+                wait_until_ready(url, Duration::from_secs(10))?;
+            }
         }
         Ok(())
     }
@@ -164,7 +228,9 @@ impl RedisServer {
     #[must_use]
     #[inline]
     pub fn url(&self) -> &str {
-        &self.url
+        match &self.backend {
+            RedisBackend::Docker { url, .. } | RedisBackend::Local { url, .. } => url,
+        }
     }
 }
 
@@ -204,12 +270,74 @@ impl Drop for RedisServer {
     ///
     /// Blocks on Docker process IO; cleanup errors are deliberately ignored.
     fn drop(&mut self) {
-        let _ = Command::new("docker")
-            .args(["rm", "-f", &self.container_id])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        match &mut self.backend {
+            RedisBackend::Docker { container_id, .. } => {
+                let _ = Command::new("docker")
+                    .args(["rm", "-f", container_id])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
+            }
+            RedisBackend::Local { child, .. } => {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
     }
+}
+
+fn local_server_for_image(image_tag: &str) -> Option<OsString> {
+    if image_tag.starts_with("6.2") {
+        std::env::var_os("RER_REDIS_6_2_SERVER")
+    } else if image_tag.starts_with('7') {
+        std::env::var_os("RER_REDIS_7_SERVER")
+    } else {
+        None
+    }
+}
+
+fn start_local_process(
+    port: u16,
+    directory: &std::path::Path,
+    server_binary: &std::ffi::OsStr,
+) -> Result<Child, Box<dyn Error>> {
+    Ok(Command::new(server_binary)
+        .args([
+            "--bind",
+            "127.0.0.1",
+            "--port",
+            &port.to_string(),
+            "--protected-mode",
+            "no",
+            "--appendonly",
+            "no",
+            "--dir",
+            directory.to_str().ok_or("Redis temp path is not UTF-8")?,
+            "--loglevel",
+            "warning",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?)
+}
+
+fn shutdown_local_process(child: &mut Child, url: &str) -> Result<(), Box<dyn Error>> {
+    let address = loopback_address(url)?;
+    if let Ok(mut stream) = TcpStream::connect_timeout(&address, CONNECT_TIMEOUT) {
+        stream.set_write_timeout(Some(IO_TIMEOUT))?;
+        let _ = stream.write_all(b"*2\r\n$8\r\nSHUTDOWN\r\n$4\r\nSAVE\r\n");
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if child.try_wait()?.is_some() {
+            return Ok(());
+        }
+        sleep(RETRY_DELAY);
+    }
+    child.kill()?;
+    child.wait()?;
+    Err("local Redis did not stop gracefully after SHUTDOWN SAVE".into())
 }
 
 #[cfg(test)]

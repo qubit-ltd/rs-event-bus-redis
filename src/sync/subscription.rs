@@ -55,10 +55,13 @@ use crate::internal::RecoveryGuard;
 use crate::internal::RecoveryState;
 use crate::internal::SettlementAction;
 use crate::internal::SettlementProgress;
+use crate::internal::SettlementReply;
 use crate::internal::SettlementState;
 use crate::internal::WireLimits;
 use crate::internal::decode_entry as decode_wire_entry;
+use crate::internal::parse_settlement_reply;
 use crate::internal::read_group_command;
+use crate::internal::settlement_command;
 use crate::poison::quarantine;
 use crate::stream_protocol::parse_auto_claim;
 use crate::stream_protocol::parse_pending_entries;
@@ -422,10 +425,11 @@ impl EventSubscriptionSpi for Subscription {
 
     /// Acknowledges terminal dispositions and leaves retries in the PEL.
     ///
-    /// Accept and Reject issue `XACK`; Retry only releases the receiver's local
-    /// in-flight slot and leaves the Redis entry pending. Repeating the same
-    /// disposition succeeds. Once XACK may have been sent, its intent remains
-    /// fixed across reply loss; conflicting dispositions are rejected.
+    /// Accept and Reject atomically verify the PEL owner and issue `XACK`;
+    /// Retry only releases the receiver's local in-flight slot and leaves
+    /// the Redis entry pending. Repeating the same disposition succeeds.
+    /// Once settlement may have been sent, its intent remains fixed across
+    /// reply loss; conflicting dispositions are rejected.
     ///
     /// # Parameters
     ///
@@ -435,9 +439,9 @@ impl EventSubscriptionSpi for Subscription {
     /// # Returns
     ///
     /// Success after local active-slot release and Applied bookkeeping.
-    /// Terminal decisions require a valid XACK reply (0 or 1); Retry commits
-    /// locally without acknowledging Redis. Repeating the applied intent is
-    /// idempotent, while unknown prior ACK intent remains fixed.
+    /// Terminal decisions require a valid settlement reply (0 or 1); Retry
+    /// commits locally without acknowledging Redis. Repeating the applied
+    /// intent is idempotent, while unknown prior ACK intent remains fixed.
     ///
     /// # Errors
     ///
@@ -467,15 +471,13 @@ impl EventSubscriptionSpi for Subscription {
                 .client
                 .get_connection(CommandClass::Settlement)
                 .map_err(|error| spi_error("settle", Some(&self.topic), error))?;
-            // The connection is ready: any following failure may follow a sent XACK.
+            // The connection is ready: any following failure may follow a sent settlement.
             *lock_state(&state.progress, &self.topic, "settle", "settlement lock")? =
                 SettlementProgress::AckPending(disposition);
-            let mut command = cmd("XACK");
-            command.arg(&state.stream).arg(&state.group).arg(&state.message_id);
-            // Preserve nested errors as malformed replies rather than rejecting XACK.
+            let command = settlement_command(&state.stream, &state.group, &self.consumer, &state.message_id);
+            // Preserve nested errors as malformed replies rather than rejecting EVAL.
             let result = connection.req_command(&command);
             match result {
-                Ok(Value::Int(0 | 1)) => {}
                 Ok(Value::ServerError(error)) => {
                     let error: RedisError = error.into();
                     if action == SettlementAction::PrepareAck {
@@ -484,7 +486,32 @@ impl EventSubscriptionSpi for Subscription {
                     }
                     return Err(classified_spi_error("settle", Some(&self.topic), &error));
                 }
-                Ok(_) | Err(_) => {
+                Ok(value) => match parse_settlement_reply(&value) {
+                    Some(SettlementReply::Completed) => {}
+                    Some(SettlementReply::OwnershipChanged) => {
+                        return Err(spi_error(
+                            "settle",
+                            Some(&self.topic),
+                            RedisProviderError::Transport {
+                                operation: "settle",
+                                kind: "settlement_ownership_changed",
+                                retryable: Some(false),
+                            },
+                        ));
+                    }
+                    None => {
+                        connection.discard();
+                        if let Some(diagnostics) = self.client.diagnostics() {
+                            diagnostics.increment(RedisDiagnosticCounter::SettlementUnknown);
+                        }
+                        return Err(spi_error(
+                            "settle",
+                            Some(&self.topic),
+                            RedisProviderError::OutcomeUnknown { operation: "settle" },
+                        ));
+                    }
+                },
+                Err(_) => {
                     connection.discard();
                     if let Some(diagnostics) = self.client.diagnostics() {
                         diagnostics.increment(RedisDiagnosticCounter::SettlementUnknown);
@@ -1005,7 +1032,7 @@ mod tests {
         );
         let key = subscription.key.clone();
         let group = subscription.group.clone();
-        let gate = proxy.pause_after_reply("XACK");
+        let gate = proxy.pause_after_settlement_reply();
 
         let (result, token) = scope(|scope| {
             let receiver = &mut subscription;
@@ -1017,7 +1044,7 @@ mod tests {
             if !reached {
                 gate.release();
             }
-            assert!(reached, "applied XACK reply gate must be reached");
+            assert!(reached, "applied settlement EVAL reply gate must be reached");
 
             let remaining: Vec<Value> = cmd("XPENDING")
                 .arg(&key)
@@ -1029,7 +1056,7 @@ mod tests {
                 .expect("observe the real PEL");
             assert!(
                 remaining.is_empty(),
-                "Redis applied XACK before local commit fault injection"
+                "Redis applied settlement EVAL before local commit fault injection"
             );
             assert_eq!(
                 *progress.lock().expect("progress healthy"),
@@ -1040,7 +1067,7 @@ mod tests {
             assert!(
                 spawn(move || {
                     let _guard = poisoned.lock().expect("recovery initially healthy");
-                    panic!("inject poisoned recovery between applied XACK and local commit");
+                    panic!("inject poisoned recovery between applied settlement EVAL and local commit");
                 })
                 .join()
                 .is_err()
@@ -1049,7 +1076,7 @@ mod tests {
             worker.join().expect("settlement worker completes without panic")
         });
 
-        let error = result.expect_err("applied XACK must not falsely report a successful local commit");
+        let error = result.expect_err("applied settlement EVAL must not falsely report a successful local commit");
         let SpiError::Operation {
             operation,
             kind,
@@ -1090,7 +1117,7 @@ mod tests {
             ));
         }
         recovery.clear_poison();
-        // The PEL was cleared above: this identical retry obtains XACK=0.
+        // The PEL was cleared above: this identical retry obtains EVAL=0.
         subscription.settle(&token, DeliveryDisposition::Accept)?;
         assert_eq!(
             *progress.lock().expect("progress healthy"),

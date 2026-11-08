@@ -152,7 +152,9 @@ fn test_async_tls_sentinel_rediscovers_tls_master_after_failover() -> Result<(),
                 break;
             }
             Ok(ReceiveOutcome::TimedOut) => {}
-            Ok(_) => return Err("unexpected non-message TLS Sentinel async recovery outcome".into()),
+            Ok(_) => {
+                return Err("unexpected non-message TLS Sentinel async recovery outcome".into());
+            }
             Err(error) => {
                 old_connection_errors += 1;
                 eprintln!("TLS Sentinel async receive error {old_connection_errors}/8: {error}");

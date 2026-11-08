@@ -489,7 +489,7 @@ async fn check_async_settlement_cancellation(server: &RedisServer) -> Result<(),
     };
     let token = received.take_settlement().ok_or("settlement token is missing")?;
     drop(received);
-    let gate = proxy.pause_after_reply("XACK");
+    let gate = proxy.pause_after_settlement_reply();
     // Build the Send SPI future before awaiting: SettlementToken is Send,
     // but its opaque payload is deliberately not required to be Sync.
     let settlement = receiver.settle(&token, DeliveryDisposition::Accept);
@@ -522,7 +522,7 @@ async fn check_async_settlement_cancellation(server: &RedisServer) -> Result<(),
         .query(&mut observer)
         .map_err(|error| error.to_string())?;
     if !pending.ids.is_empty() {
-        return Err("XACK must have taken effect before cancelling its pending future".into());
+        return Err("settlement EVAL must have taken effect before cancelling its pending future".into());
     }
     if receiver.settle(&token, DeliveryDisposition::Retry).await.is_ok()
         || receiver.settle(&token, DeliveryDisposition::Reject).await.is_ok()
@@ -815,7 +815,7 @@ fn test_async_settlement_cancellation_after_xack_is_idempotent() -> Result<(), B
         if received.settlement().is_none() {
             return Err("missing settlement token".into());
         }
-        let gate = proxy.pause_after_reply("XACK");
+        let gate = proxy.pause_after_settlement_reply();
         let cancel = Arc::new(CancelReceive::default());
         let worker_cancel = Arc::clone(&cancel);
         let (result_tx, result_rx) = channel();
@@ -842,7 +842,7 @@ fn test_async_settlement_cancellation_after_xack_is_idempotent() -> Result<(), B
             assert!(result.is_none(), "settlement future should be cancelled after XACK");
             gate.release();
             if !reached {
-                return Err("XACK response gate was not reached".into());
+                return Err("settlement EVAL response gate was not reached".into());
             }
             let mut observer = Client::open(server.url())?.get_connection()?;
             let pending: Vec<Value> = cmd("XPENDING")

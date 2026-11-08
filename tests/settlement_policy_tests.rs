@@ -23,6 +23,8 @@ use std::time::Duration;
 use std::time::Instant;
 
 #[cfg(feature = "async")]
+use futures_channel::oneshot;
+#[cfg(feature = "async")]
 use futures_lite::future::block_on;
 #[cfg(feature = "async")]
 use futures_lite::future::race;
@@ -155,16 +157,37 @@ impl Fixture {
             .build()?)
     }
     fn recovery_request(&self) -> Result<SpiSubscriptionRequest, Box<dyn Error>> {
+        self.consumer_request("recovery-consumer", ProviderOptions::new())
+    }
+    fn consumer_request(
+        &self,
+        consumer: &str,
+        options: ProviderOptions,
+    ) -> Result<SpiSubscriptionRequest, Box<dyn Error>> {
         Ok(SpiSubscriptionRequest::new(
             Id::new(IDS.fetch_add(1, Ordering::Relaxed)),
             TopicAddress::new(TOPIC)?,
-            SubscriberId::new("recovery-consumer")?,
+            SubscriberId::new(consumer)?,
             Some(ConsumerGroup::new(&self.group)?),
             SubscriptionDurability::Durable,
             StartPosition::New,
-            ProviderOptions::new(),
+            options,
             TypeId::of::<String>(),
         ))
+    }
+    fn pending_owner(&self, _message_id: &str) -> Result<Option<String>, Box<dyn Error>> {
+        let mut connection = Client::open(self.server.url())?.get_connection()?;
+        let rows: Vec<Vec<redis::Value>> = cmd("XPENDING")
+            .arg(stream_key(&self.namespace, TOPIC))
+            .arg(group_name(&self.namespace, TOPIC, "first-consumer", Some(&self.group)))
+            .arg("-")
+            .arg("+")
+            .arg(1)
+            .query(&mut connection)?;
+        Ok(rows
+            .first()
+            .map(|row| redis::from_redis_value(row[1].clone()))
+            .transpose()?)
     }
     fn pending(&self) -> Result<usize, Box<dyn Error>> {
         let mut connection = Client::open(self.server.url())?.get_connection()?;
@@ -289,10 +312,479 @@ fn test_sync_terminal_settlement_retains_unacked_redis_entry() -> Result<(), Box
 
 #[cfg(feature = "sync")]
 #[test]
+fn test_sync_settlement_ownership_changed_preserves_new_owner() -> Result<(), Box<dyn Error>> {
+    for disposition in [DeliveryDisposition::Accept, DeliveryDisposition::Reject] {
+        let fixture = Fixture::start()?;
+        let inner = RedisEventBusProvider
+            .create_configured(&fixture.config(fixture.server.url()))
+            .map_err(|e| e.into_error())?;
+        let bus = EventBus::with_config(ProviderId::new("redis-streams")?, inner.clone(), facade_config()?)?;
+        let mut a = inner.subscribe(fixture.consumer_request("consumer-a", ProviderOptions::new())?)?;
+        let receipt = bus.publish(PublishRequest::new(Topic::new(TOPIC)?, "ownership".to_owned())?)?;
+        let ReceiveOutcome::Message(message_a) = a.receive(Duration::from_secs(2))? else {
+            panic!("consumer A must receive the new message")
+        };
+        let token_a = message_a.settlement().expect("token A");
+        let owner_a = fixture
+            .pending_owner(message_a.id().as_str())?
+            .expect("A owns PEL entry");
+        let options = ProviderOptions::from([("redis.existing_group_start".into(), "resume".into())]);
+        let mut b = inner.subscribe(fixture.consumer_request("consumer-b", options)?)?;
+        let ReceiveOutcome::Message(message_b) = b.receive(Duration::from_secs(2))? else {
+            panic!("consumer B must claim A's pending message")
+        };
+        let token_b = message_b.settlement().expect("token B");
+        assert_eq!(message_b.id(), receipt.input_event_id());
+        let owner_b = fixture
+            .pending_owner(message_a.id().as_str())?
+            .expect("B owns PEL entry");
+        assert_ne!(owner_a, owner_b);
+
+        let error = a.settle(token_a, disposition).expect_err("stale owner must not settle");
+        assert_eq!(error.kind(), "settlement_ownership_changed");
+        assert_eq!(error.retryable(), Some(false));
+        assert_eq!(
+            fixture.pending_owner(message_a.id().as_str())?.as_deref(),
+            Some(owner_b.as_str())
+        );
+        b.settle(token_b, DeliveryDisposition::Retry)?;
+        let ReceiveOutcome::Message(message_again) = b.receive(Duration::from_secs(2))? else {
+            panic!("consumer B must recover the retried message")
+        };
+        assert_eq!(message_again.id(), receipt.input_event_id());
+        b.settle(
+            message_again.settlement().expect("new B token"),
+            DeliveryDisposition::Accept,
+        )?;
+        assert_eq!(fixture.pending_owner(message_a.id().as_str())?, None);
+        a.close()?;
+        b.close()?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "sync")]
+#[test]
+fn test_sync_facade_stops_when_settlement_owner_changes() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::start()?;
+    let inner = RedisEventBusProvider
+        .create_configured(&fixture.config(fixture.server.url()))
+        .map_err(|e| e.into_error())?;
+    let observation = Arc::new(Observation::default());
+    let wrapped = Arc::new(SyncObservedBus {
+        inner: inner.clone(),
+        observation: observation.clone(),
+        fail_before_settle: false,
+    });
+    let bus = EventBus::with_config(ProviderId::new("redis-streams")?, wrapped, facade_config()?)?;
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let release_rx = Arc::new(std::sync::Mutex::new(release_rx));
+    let release_signal = release_rx.clone();
+    let subscription = bus.subscribe(fixture.request()?, move |_| {
+        started_tx.send(()).expect("test observes handler start");
+        release_signal
+            .lock()
+            .expect("release lock")
+            .recv()
+            .expect("test releases blocked handler");
+    })?;
+    let receipt = bus.publish(PublishRequest::new(Topic::new(TOPIC)?, "facade-ownership".to_owned())?)?;
+    started_rx.recv_timeout(WATCHDOG)?;
+    let options = ProviderOptions::from([("redis.existing_group_start".into(), "resume".into())]);
+    let mut b = inner.subscribe(fixture.consumer_request("consumer-b", options)?)?;
+    let ReceiveOutcome::Message(message_b) = b.receive(Duration::from_secs(2))? else {
+        panic!("B must claim the blocked handler's pending entry")
+    };
+    assert_eq!(message_b.id(), receipt.input_event_id());
+    let owner_b = fixture
+        .pending_owner(message_b.id().as_str())?
+        .expect("B owns PEL entry");
+    release_tx.send(())?;
+    wait_until(|| subscription.terminal_failure().is_some() && observation.closes.load(Ordering::SeqCst) == 1);
+    let reason = subscription
+        .terminal_failure()
+        .expect("facade retains terminal settlement error");
+    let qubit_event_bus::model::SubscriptionStopReason::Settlement { error, .. } = reason.as_ref() else {
+        panic!("expected terminal settlement failure, got {reason:?}");
+    };
+    assert_eq!(error.kind(), "settlement_ownership_changed");
+    assert_eq!(observation.underlying_settles.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        fixture.pending_owner(message_b.id().as_str())?.as_deref(),
+        Some(owner_b.as_str())
+    );
+    b.close()?;
+    subscription.cancel()?;
+    Ok(())
+}
+
+#[cfg(feature = "sync")]
+#[test]
+fn test_sync_unknown_settlement_keeps_intent_and_checks_later_owner() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::start()?;
+    let proxy = ControlledRedis::start(fixture.server.url())?;
+    let inner = RedisEventBusProvider
+        .create_configured(&fixture.config(&proxy.url()))
+        .map_err(|e| e.into_error())?;
+    let bus = EventBus::with_config(ProviderId::new("redis-streams")?, inner.clone(), facade_config()?)?;
+    let mut a = inner.subscribe(fixture.consumer_request("consumer-a", ProviderOptions::new())?)?;
+    let receipt = bus.publish(PublishRequest::new(Topic::new(TOPIC)?, "unknown-owner".to_owned())?)?;
+    let ReceiveOutcome::Message(message_a) = a.receive(Duration::from_secs(2))? else {
+        panic!("consumer A must receive the new message")
+    };
+    let owner_a = fixture
+        .pending_owner(message_a.id().as_str())?
+        .expect("A owns PEL entry");
+    let token_a = message_a.settlement().expect("token A");
+    proxy.drop_next_settlement_before_forward();
+    let unknown = a
+        .settle(token_a, DeliveryDisposition::Accept)
+        .expect_err("proxy loses settlement before Redis");
+    assert_eq!(unknown.kind(), "outcome_unknown");
+    assert_eq!(
+        fixture.pending_owner(message_a.id().as_str())?.as_deref(),
+        Some(owner_a.as_str())
+    );
+
+    let options = ProviderOptions::from([("redis.existing_group_start".into(), "resume".into())]);
+    let mut b = inner.subscribe(fixture.consumer_request("consumer-b", options)?)?;
+    let ReceiveOutcome::Message(message_b) = b.receive(Duration::from_secs(2))? else {
+        panic!("consumer B must claim A's pending message")
+    };
+    assert_eq!(message_b.id(), receipt.input_event_id());
+    let owner_b = fixture
+        .pending_owner(message_a.id().as_str())?
+        .expect("B owns PEL entry");
+    assert_ne!(owner_a, owner_b);
+    let changed = a
+        .settle(token_a, DeliveryDisposition::Accept)
+        .expect_err("same intent must recheck current owner");
+    assert_eq!(changed.kind(), "settlement_ownership_changed");
+    assert_eq!(changed.retryable(), Some(false));
+    assert_eq!(
+        fixture.pending_owner(message_a.id().as_str())?.as_deref(),
+        Some(owner_b.as_str())
+    );
+    b.settle(message_b.settlement().expect("token B"), DeliveryDisposition::Retry)?;
+    let ReceiveOutcome::Message(message_again) = b.receive(Duration::from_secs(2))? else {
+        panic!("B must recover its retry")
+    };
+    b.settle(
+        message_again.settlement().expect("new B token"),
+        DeliveryDisposition::Accept,
+    )?;
+    assert_eq!(fixture.pending_owner(message_a.id().as_str())?, None);
+    a.close()?;
+    b.close()?;
+    Ok(())
+}
+
+#[cfg(feature = "sync")]
+#[test]
+fn test_sync_unknown_unapplied_settlement_retries_with_same_owner() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::start()?;
+    let proxy = ControlledRedis::start(fixture.server.url())?;
+    let inner = RedisEventBusProvider
+        .create_configured(&fixture.config(&proxy.url()))
+        .map_err(|e| e.into_error())?;
+    let bus = EventBus::with_config(ProviderId::new("redis-streams")?, inner.clone(), facade_config()?)?;
+    let mut a = inner.subscribe(fixture.consumer_request("consumer-a", ProviderOptions::new())?)?;
+    let receipt = bus.publish(PublishRequest::new(
+        Topic::new(TOPIC)?,
+        "unknown-same-owner".to_owned(),
+    )?)?;
+    let ReceiveOutcome::Message(message) = a.receive(Duration::from_secs(2))? else {
+        panic!("A receives event")
+    };
+    let token = message.settlement().expect("token");
+    let owner = fixture.pending_owner(message.id().as_str())?.expect("PEL owner");
+    proxy.drop_next_settlement_before_forward();
+    let error = a
+        .settle(token, DeliveryDisposition::Accept)
+        .expect_err("first reply is lost");
+    assert_eq!(error.kind(), "outcome_unknown");
+    assert_eq!(
+        fixture.pending_owner(message.id().as_str())?.as_deref(),
+        Some(owner.as_str())
+    );
+    a.settle(token, DeliveryDisposition::Accept)?;
+    assert_eq!(fixture.pending_owner(receipt.input_event_id().as_str())?, None);
+    a.close()?;
+    Ok(())
+}
+
+#[cfg(feature = "async")]
+#[test]
+fn test_async_settlement_ownership_changed_preserves_new_owner() -> Result<(), Box<dyn Error>> {
+    block_on(async {
+        for disposition in [DeliveryDisposition::Accept, DeliveryDisposition::Reject] {
+            let fixture = Fixture::start()?;
+            let inner = AsyncRedisEventBusProvider
+                .create_configured(&fixture.config(fixture.server.url()))
+                .await
+                .map_err(|e| e.into_error())?;
+            let bus = AsyncEventBus::with_config(ProviderId::new("redis-streams")?, inner.clone(), facade_config()?)?;
+            let mut a = inner
+                .subscribe(fixture.consumer_request("consumer-a", ProviderOptions::new())?)
+                .await?;
+            let receipt = bus
+                .publish(PublishRequest::new(Topic::new(TOPIC)?, "ownership".to_owned())?)
+                .await?;
+            let ReceiveOutcome::Message(message_a) = a.receive(Duration::from_secs(2)).await? else {
+                panic!("consumer A must receive the new message")
+            };
+            let token_a = message_a.settlement().expect("token A");
+            let owner_a = fixture
+                .pending_owner(message_a.id().as_str())?
+                .expect("A owns PEL entry");
+            let options = ProviderOptions::from([("redis.existing_group_start".into(), "resume".into())]);
+            let mut b = inner
+                .subscribe(fixture.consumer_request("consumer-b", options)?)
+                .await?;
+            let ReceiveOutcome::Message(message_b) = b.receive(Duration::from_secs(2)).await? else {
+                panic!("consumer B must claim A's pending message")
+            };
+            let token_b = message_b.settlement().expect("token B");
+            assert_eq!(message_b.id(), receipt.input_event_id());
+            let owner_b = fixture
+                .pending_owner(message_a.id().as_str())?
+                .expect("B owns PEL entry");
+            assert_ne!(owner_a, owner_b);
+
+            let error = a
+                .settle(token_a, disposition)
+                .await
+                .expect_err("stale owner must not settle");
+            assert_eq!(error.kind(), "settlement_ownership_changed");
+            assert_eq!(error.retryable(), Some(false));
+            assert_eq!(
+                fixture.pending_owner(message_a.id().as_str())?.as_deref(),
+                Some(owner_b.as_str())
+            );
+            b.settle(token_b, DeliveryDisposition::Retry).await?;
+            let ReceiveOutcome::Message(message_again) = b.receive(Duration::from_secs(2)).await? else {
+                panic!("consumer B must recover the retried message")
+            };
+            assert_eq!(message_again.id(), receipt.input_event_id());
+            b.settle(
+                message_again.settlement().expect("new B token"),
+                DeliveryDisposition::Accept,
+            )
+            .await?;
+            assert_eq!(fixture.pending_owner(message_a.id().as_str())?, None);
+            a.close().await?;
+            b.close().await?;
+        }
+        Ok::<(), Box<dyn Error>>(())
+    })
+}
+
+#[cfg(feature = "async")]
+#[test]
+fn test_async_facade_stops_when_settlement_owner_changes() -> Result<(), Box<dyn Error>> {
+    block_on(async {
+        let fixture = Fixture::start()?;
+        let inner = AsyncRedisEventBusProvider
+            .create_configured(&fixture.config(fixture.server.url()))
+            .await
+            .map_err(|e| e.into_error())?;
+        let observation = Arc::new(Observation::default());
+        let wrapped = Arc::new(AsyncObservedBus {
+            inner: inner.clone(),
+            observation: observation.clone(),
+            fail_before_settle: false,
+        });
+        let bus = AsyncEventBus::with_config(ProviderId::new("redis-streams")?, wrapped, facade_config()?)?;
+        let mut subscription = bus.subscribe(fixture.request()?).await?;
+        let receipt = bus
+            .publish(PublishRequest::new(
+                Topic::new(TOPIC)?,
+                "async-facade-ownership".to_owned(),
+            )?)
+            .await?;
+        let (started_tx, started_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let started_tx = Arc::new(std::sync::Mutex::new(Some(started_tx)));
+        let release_rx = Arc::new(std::sync::Mutex::new(Some(release_rx)));
+        let handler_started = started_tx.clone();
+        let handler_release = release_rx.clone();
+        let handler = move |_| {
+            if let Some(signal) = handler_started.lock().expect("started lock").take() {
+                let _ = signal.send(());
+            }
+            let wait = handler_release
+                .lock()
+                .expect("release lock")
+                .take()
+                .expect("one delivery");
+            async move {
+                wait.await.map_err(|_| qubit_event_bus::error::DeliveryError::Handler {
+                    source: Box::new(std::io::Error::other("test gate released")),
+                })?;
+                Ok(())
+            }
+        };
+        let competitor = async {
+            started_rx.await.map_err(|_| "facade handler did not start")?;
+            let options = ProviderOptions::from([("redis.existing_group_start".into(), "resume".into())]);
+            let mut b = inner
+                .subscribe(fixture.consumer_request("consumer-b", options)?)
+                .await?;
+            let ReceiveOutcome::Message(message_b) = b.receive(Duration::from_secs(2)).await? else {
+                return Err("B did not claim blocked handler's message".into());
+            };
+            assert_eq!(message_b.id(), receipt.input_event_id());
+            let owner_b = fixture
+                .pending_owner(message_b.id().as_str())?
+                .expect("B owns PEL entry");
+            release_tx.send(()).map_err(|_| "could not release facade handler")?;
+            b.close().await?;
+            Ok::<String, Box<dyn Error>>(owner_b)
+        };
+        let (run_result, owner_b) = futures_lite::future::zip(subscription.run(handler), competitor).await;
+        let owner_b = owner_b?;
+        assert!(matches!(run_result, Err(ReceiveError::Stopped(_))));
+        let reason = subscription
+            .terminal_failure()
+            .expect("facade retains terminal settlement cause");
+        let qubit_event_bus::model::SubscriptionStopReason::Settlement { error, .. } = reason.as_ref() else {
+            panic!("expected settlement stop reason, got {reason:?}");
+        };
+        assert_eq!(error.kind(), "settlement_ownership_changed");
+        assert_eq!(observation.closes.load(Ordering::SeqCst), 1);
+        assert_eq!(observation.underlying_settles.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            fixture.pending_owner(receipt.input_event_id().as_str())?.as_deref(),
+            Some(owner_b.as_str())
+        );
+        subscription.close().await?;
+        Ok::<(), Box<dyn Error>>(())
+    })
+}
+
+#[cfg(feature = "async")]
+#[test]
+fn test_async_unknown_settlement_keeps_intent_and_checks_later_owner() -> Result<(), Box<dyn Error>> {
+    block_on(async {
+        let fixture = Fixture::start()?;
+        let proxy = ControlledRedis::start(fixture.server.url())?;
+        let inner = AsyncRedisEventBusProvider
+            .create_configured(&fixture.config(&proxy.url()))
+            .await
+            .map_err(|e| e.into_error())?;
+        let bus = AsyncEventBus::with_config(ProviderId::new("redis-streams")?, inner.clone(), facade_config()?)?;
+        let mut a = inner
+            .subscribe(fixture.consumer_request("consumer-a", ProviderOptions::new())?)
+            .await?;
+        let receipt = bus
+            .publish(PublishRequest::new(Topic::new(TOPIC)?, "unknown-owner".to_owned())?)
+            .await?;
+        let ReceiveOutcome::Message(message_a) = a.receive(Duration::from_secs(2)).await? else {
+            panic!("consumer A must receive the new message")
+        };
+        let owner_a = fixture
+            .pending_owner(message_a.id().as_str())?
+            .expect("A owns PEL entry");
+        let token_a = message_a.settlement().expect("token A");
+        proxy.drop_next_settlement_before_forward();
+        let unknown = a
+            .settle(token_a, DeliveryDisposition::Accept)
+            .await
+            .expect_err("proxy loses settlement before Redis");
+        assert_eq!(unknown.kind(), "outcome_unknown");
+        assert_eq!(
+            fixture.pending_owner(message_a.id().as_str())?.as_deref(),
+            Some(owner_a.as_str())
+        );
+
+        let options = ProviderOptions::from([("redis.existing_group_start".into(), "resume".into())]);
+        let mut b = inner
+            .subscribe(fixture.consumer_request("consumer-b", options)?)
+            .await?;
+        let ReceiveOutcome::Message(message_b) = b.receive(Duration::from_secs(2)).await? else {
+            panic!("consumer B must claim A's pending message")
+        };
+        assert_eq!(message_b.id(), receipt.input_event_id());
+        let owner_b = fixture
+            .pending_owner(message_a.id().as_str())?
+            .expect("B owns PEL entry");
+        assert_ne!(owner_a, owner_b);
+        let changed = a
+            .settle(token_a, DeliveryDisposition::Accept)
+            .await
+            .expect_err("same intent must recheck current owner");
+        assert_eq!(changed.kind(), "settlement_ownership_changed");
+        assert_eq!(changed.retryable(), Some(false));
+        assert_eq!(
+            fixture.pending_owner(message_a.id().as_str())?.as_deref(),
+            Some(owner_b.as_str())
+        );
+        b.settle(message_b.settlement().expect("token B"), DeliveryDisposition::Retry)
+            .await?;
+        let ReceiveOutcome::Message(message_again) = b.receive(Duration::from_secs(2)).await? else {
+            panic!("B must recover its retry")
+        };
+        b.settle(
+            message_again.settlement().expect("new B token"),
+            DeliveryDisposition::Accept,
+        )
+        .await?;
+        assert_eq!(fixture.pending_owner(message_a.id().as_str())?, None);
+        a.close().await?;
+        b.close().await?;
+        Ok::<(), Box<dyn Error>>(())
+    })
+}
+
+#[cfg(feature = "async")]
+#[test]
+fn test_async_unknown_unapplied_settlement_retries_with_same_owner() -> Result<(), Box<dyn Error>> {
+    block_on(async {
+        let fixture = Fixture::start()?;
+        let proxy = ControlledRedis::start(fixture.server.url())?;
+        let inner = AsyncRedisEventBusProvider
+            .create_configured(&fixture.config(&proxy.url()))
+            .await
+            .map_err(|e| e.into_error())?;
+        let bus = AsyncEventBus::with_config(ProviderId::new("redis-streams")?, inner.clone(), facade_config()?)?;
+        let mut a = inner
+            .subscribe(fixture.consumer_request("consumer-a", ProviderOptions::new())?)
+            .await?;
+        let receipt = bus
+            .publish(PublishRequest::new(
+                Topic::new(TOPIC)?,
+                "unknown-same-owner".to_owned(),
+            )?)
+            .await?;
+        let ReceiveOutcome::Message(message) = a.receive(Duration::from_secs(2)).await? else {
+            panic!("A receives event")
+        };
+        let token = message.settlement().expect("token");
+        let owner = fixture.pending_owner(message.id().as_str())?.expect("PEL owner");
+        proxy.drop_next_settlement_before_forward();
+        let error = a
+            .settle(token, DeliveryDisposition::Accept)
+            .await
+            .expect_err("first reply is lost");
+        assert_eq!(error.kind(), "outcome_unknown");
+        assert_eq!(
+            fixture.pending_owner(message.id().as_str())?.as_deref(),
+            Some(owner.as_str())
+        );
+        a.settle(token, DeliveryDisposition::Accept).await?;
+        assert_eq!(fixture.pending_owner(receipt.input_event_id().as_str())?, None);
+        a.close().await?;
+        Ok::<(), Box<dyn Error>>(())
+    })
+}
+
+#[cfg(feature = "sync")]
+#[test]
 fn test_sync_retry_after_applied_xack_lost_reply() -> Result<(), Box<dyn Error>> {
     let fixture = Fixture::start()?;
     let proxy = ControlledRedis::start(fixture.server.url())?;
-    let gate = proxy.pause_after_reply("XACK");
+    let gate = proxy.pause_after_settlement_reply();
     let inner = RedisEventBusProvider
         .create_configured(&fixture.config(&proxy.url()))
         .map_err(|e| e.into_error())?;
@@ -319,7 +811,10 @@ fn test_sync_retry_after_applied_xack_lost_reply() -> Result<(), Box<dyn Error>>
     let release = gate.clone();
     let _release = ReleaseGate(Arc::new(move || release.release_without_reply()));
     let _ = bus.publish(PublishRequest::new(Topic::new(TOPIC)?, "acknowledged".to_owned())?)?;
-    assert!(gate.wait_until_reached(WATCHDOG), "real Redis XACK must reach the gate");
+    assert!(
+        gate.wait_until_reached(WATCHDOG),
+        "real Redis settlement EVAL must reach the gate"
+    );
     assert_eq!(fixture.pending()?, 0, "XACK applied before any reply is delivered");
     gate.release_without_reply();
     wait_until(|| observation.settled());
@@ -408,7 +903,7 @@ fn test_async_retry_after_applied_xack_lost_reply() -> Result<(), Box<dyn Error>
     block_on(async {
         let fixture = Fixture::start()?;
         let proxy = ControlledRedis::start(fixture.server.url())?;
-        let gate = proxy.pause_after_reply("XACK");
+        let gate = proxy.pause_after_settlement_reply();
         let inner = AsyncRedisEventBusProvider
             .create_configured(&fixture.config(&proxy.url()))
             .await

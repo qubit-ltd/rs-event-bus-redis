@@ -40,6 +40,7 @@ pub enum Reply {
 pub struct Step {
     command: &'static str,
     reply: Reply,
+    settlement_eval: bool,
 }
 
 impl Step {
@@ -49,6 +50,16 @@ impl Step {
         Self {
             command,
             reply: Reply::Bytes(reply.to_vec()),
+            settlement_eval: false,
+        }
+    }
+
+    /// Constructs a reply step that matches only the one-key settlement EVAL.
+    pub fn settlement_reply(reply: &[u8]) -> Self {
+        Self {
+            command: "EVAL",
+            reply: Reply::Bytes(reply.to_vec()),
+            settlement_eval: true,
         }
     }
 
@@ -58,6 +69,7 @@ impl Step {
         Self {
             command,
             reply: Reply::DelayedBytes(reply.to_vec(), delay),
+            settlement_eval: false,
         }
     }
 
@@ -69,6 +81,7 @@ impl Step {
                 id: id.to_owned(),
                 deliveries,
             },
+            settlement_eval: false,
         }
     }
 
@@ -84,6 +97,20 @@ impl Step {
             } else {
                 Reply::Disconnect
             },
+            settlement_eval: false,
+        }
+    }
+
+    /// Constructs a disconnect step matching only the one-key settlement EVAL.
+    pub fn settlement_disconnect(refuse_connections: bool) -> Self {
+        Self {
+            command: "EVAL",
+            reply: if refuse_connections {
+                Reply::DisconnectAndRefuseConnections
+            } else {
+                Reply::Disconnect
+            },
+            settlement_eval: true,
         }
     }
 }
@@ -261,7 +288,7 @@ fn serve_connection(stream: TcpStream, state: &State) {
         }
         let step = state.steps.lock().expect("steps lock").pop_front();
         let reply = match step {
-            Some(step) if step.command == name => step.reply,
+            Some(step) if step.command == name && (!step.settlement_eval || is_settlement_eval(&command)) => step.reply,
             step => {
                 let expected = step.map(|step| step.command);
                 state
@@ -306,6 +333,14 @@ fn serve_connection(stream: TcpStream, state: &State) {
             }
         }
     }
+}
+
+fn is_settlement_eval(command: &[String]) -> bool {
+    command.len() == 7
+        && command[0] == "EVAL"
+        && command[1].contains("XPENDING")
+        && command[1].contains("XACK")
+        && command[2] == "1"
 }
 
 /// Consumes one bounded RESP2 bulk-string command from `reader`.

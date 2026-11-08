@@ -165,7 +165,7 @@ fn test_sync_settlement_retry_after_applied_xack_reply_loss() -> Result<(), Box<
     let ReceiveOutcome::Message(received) = receiver.receive(Duration::from_secs(2))? else {
         return Err("published record was not received".into());
     };
-    let gate = proxy.pause_after_reply("XACK");
+    let gate = proxy.pause_after_settlement_reply();
     let (result_tx, result_rx) = channel();
     let worker = spawn(move || {
         let failed = receiver
@@ -194,7 +194,7 @@ fn test_sync_settlement_retry_after_applied_xack_reply_loss() -> Result<(), Box<
     gate.release_without_reply();
     let (failed, mut receiver, received) = result_rx.recv_timeout(Duration::from_secs(4))?;
     worker.join().expect("settlement worker should finish");
-    assert!(failed, "the client must observe the lost XACK reply");
+    assert!(failed, "the client must observe the lost settlement EVAL reply");
     receiver.settle(
         received.settlement().ok_or("missing settlement token")?,
         DeliveryDisposition::Accept,
