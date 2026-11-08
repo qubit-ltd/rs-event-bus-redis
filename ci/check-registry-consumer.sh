@@ -74,5 +74,11 @@ metadata=$(cargo +1.94.0 metadata --format-version 1 --locked)
 stage=metadata-verify
 printf '%s' "$metadata" | python3 "$project_root/ci/registry_consumer_target.py" verify \
     --provider-version "$provider_version" --core-version "$core_version" --spi-version "$spi_version"
+for features in 'sync,discovery' 'async,discovery'; do
+    stage="run-$features"
+    cargo +1.94.0 run --locked --no-default-features --features "$features"
+done
+stage=run-default-features
+cargo +1.94.0 run --locked
 echo "registry consumer checks passed for mode=$mode provider=$provider_version core=$core_version spi=$spi_version"
 stage=complete
