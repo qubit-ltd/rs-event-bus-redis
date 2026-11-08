@@ -27,12 +27,16 @@ The CI environment preferred Redis 7.2.6 for the plain fixture, selected 6.2.17 
 
 ## Commands and results
 
-- TDD red: focused `settlement_policy_tests` ownership regression with only the pre-implementation sync/async adapters restored; **failed as expected** because stale ownership could settle.
-- Focused settlement, scripted Redis fault, ACL, standalone, cancellation, sync/async Sentinel, TLS transport, TLS Sentinel, and recovery regression tests: **passed**. The settlement policy suite passed 14/14; Redis fault suite passed 20/20. Redis 6.2.17 and 7.2.6 ownership regressions passed in both modes. Recovery tests for deleted-pending entries and tombstones passed on both configured Redis versions.
-- Final async-only feature check: `cargo check --locked --no-default-features --features async`; **exit 0**, log `/tmp/rer001-check-async-only-final.log`.
-- Final sync-only feature check: `cargo check --locked --no-default-features --features sync`; **exit 0**, log `/tmp/rer001-check-sync-only-final.log`.
-- Final formatter/alignment: `.infra/bin/align-ci.sh` in the mirror with the configured rs-infra tool and `RS_INFRA_PROJECT_ROOT` pointing to the mirror; **exit 0**, log `/tmp/rer001-align-ci-final-cfg.log`.
-- Full `.infra/bin/ci-check.sh` in the mirror with Redis env above; **exit 0**, complete log `/tmp/rer001-ci-check-final.log`. Configured suites passed: style, Clippy, lock/verification, build, test, docs, README, release build, feature matrix, 10-second `bounded_wire` fuzz smoke, package, coverage, audit, and loom handling. `coverage-cfg-clippy` was explicitly not configured; loom was explicitly skipped as not configured. Audit reported one allowed warning for yanked `async-executor v1.14.0`.
+- TDD red: `cargo test --locked --all-features --test settlement_policy_tests ownership_changed -- --nocapture --test-threads=1`, with only the pre-implementation sync/async adapters restored and the new test retained; **exit 101 as expected** because stale ownership settled successfully under the old behavior.
+- TDD green: the same focused command after implementation; **sync and async ownership tests passed**. `cargo test --locked --all-features --test settlement_policy_tests -- --test-threads=1`; **14/14 passed**.
+- Settlement adapter gates: `cargo test --locked --all-features --test sync_tests settlement -- --test-threads=1` and `cargo test --locked --all-features --test async_tests settlement -- --test-threads=1`; **2/2 each passed**.
+- Standalone and recovery gates: `cargo test --locked --all-features --test sync_standalone_tests settlement -- --test-threads=1` (**1/1**), `cargo test --locked --all-features --test async_standalone_tests settlement -- --test-threads=1` (**1/1**), `cargo test --locked --all-features --test async_standalone_tests cancellation -- --test-threads=1` (**3/3**), `cargo test --locked --all-features --test redis_fault_tests -- --test-threads=1` (**20/20**), and the full `recovery_regression_tests` target in CI (**43/43 passed**, including deleted-pending and tombstone checks on Redis 6.2.17 and 7.2.6).
+- ACL matrix: `cargo test --locked --all-features --test acl_tests -- --test-threads=1`; **16 passed, 0 failed, 4 helper tests ignored** in full CI. The focused settlement-denial command and per-version results are recorded in [Cross-version settlement ACL follow-up](#cross-version-settlement-acl-follow-up).
+- Sentinel/facade/TLS: full CI passed `async_sentinel_tests` (**4/4**), `sync_sentinel_tests` (**3/3**), `tls_sentinel_tests` (**6/6**), and `tls_transport_tests` (**7/7**). The suite also passed both sync and async facade-stop ownership regressions.
+- Final async-only feature check: `cargo check --locked --no-default-features --features async`; **exit 0**.
+- Final sync-only feature check: `cargo check --locked --no-default-features --features sync`; **exit 0**.
+- Final formatter/alignment: `.infra/bin/align-ci.sh` in the mirror with the configured rs-infra tool and `RS_INFRA_PROJECT_ROOT` pointing to the mirror; **exit 0**. The exact source tree was synchronized and checked after alignment.
+- Full `.infra/bin/ci-check.sh` in the mirror with Redis env above; **exit 0**. Configured suites passed: style, Clippy, lock/verification, build, test, docs, README, release build, feature matrix, 10-second `bounded_wire` fuzz smoke, package, coverage, audit, and loom handling. `coverage-cfg-clippy` was explicitly not configured; loom was explicitly skipped as not configured. Audit reported one allowed warning for yanked `async-executor v1.14.0`.
 - Package gate: `Cargo package verification passed for 1 workspace package(s)`.
 - Coverage gate: thresholds passed with functions **95.52% (555/581)**, lines **96.07% (5454/5677)**, regions **94.98% (8440/8886)**. Per-file report and thresholds are in the CI log. CI cleaned its transient coverage target after completion; no raw coverage artifact remains.
 - Downstream named target: `cargo test --locked --features sqlite,event-bus --test redis_task_outbox_tests -- --test-threads=1` against a validation copy of `rs-task` whose provider path resolves to this final mirror; **12/12 passed**. The copy's test-only Redis fixture was temporarily adapted to prefer Docker and fall back to the configured local Redis 7.2.6 process, preserving its outage/restart behavior and assertions. The actual `/data/working/qubit/rust-common/rs-task` checkout was not modified.
@@ -43,7 +47,23 @@ The first broad downstream `cargo test --locked --features sqlite,event-bus` att
 
 A separate direct `redis_event_bus_integration_tests` run had 3 pure/local tests pass and 3 Redis-backed tests fail before assertions because that test file hard-codes Docker and Docker socket access is denied. It is outside the plan's named downstream outbox target. Provider CI's own downstream suite, including `rediss`, passed 4/4 through the provider-side local fixtures.
 
-The CI mirror's source formatter changes were copied back where needed. The final alignment run made no further source-input changes. No commit was created. The two plan/design source documents named in the task were not modified or staged.
+The CI mirror's source formatter changes were copied back where needed. The final alignment run made no further source-input changes. The two plan/design source documents named in the task were not modified or staged.
+
+## Failure diagnosis record
+
+- Initial Docker-backed ownership test compiled, then failed before exercising Redis because the current user cannot access `/var/run/docker.sock`. The existing Redis fixtures were adapted to prefer Docker and use isolated local Redis processes when Docker is unavailable; the red test then reached Redis 7.0.15 and failed at the stale-owner assertion as expected.
+- Early CI attempts found new test-support Clippy issues (`too_many_arguments`, needless borrows, `zombie_processes`, `int_plus_one`); these were fixed, formatting was realigned with `align-ci.sh`, and affected checks were rerun.
+- Local Sentinel attempts exposed startup/readiness mismatches: replica synchronization and Sentinel healthy-replica visibility were not ready before failover tests began. Readiness now requires an online replica, Sentinel quorum, and majority healthy-replica visibility. Plain Sentinel tests pass on Redis 7.2.6; TLS Sentinel tests pass on TLS-capable Redis 7.0.15.
+- One full CI attempt found a local Redis restart fixture did not preserve RDB state because it used `--save ""` and killed the process. The fallback now uses Redis's default RDB policy and `SHUTDOWN SAVE`; the restart regression and complete standalone suites passed afterward.
+- One full CI attempt found four `recovery_regression_tests` still using Docker-only `start_version`; version-aware local binary fallback was added for Redis 6.2/7. The four blocked cases passed on real Redis 6.2.17 and 7.2.6, and the final full CI passed.
+- Final full CI ran docs tests (4/4), downstream provider suite (4/4), all feature-matrix cases, package verification, coverage, fuzz, audit, and configured loom handling. An earlier direct `redis_event_bus_integration_tests` attempt remains Docker-blocked for three Docker-only tests; this is outside the plan's named `redis_task_outbox_tests` target and did not block provider CI or the named downstream target.
+
+## Git completion
+
+- Commits: `9dd06ae fix: verify Redis pending owner before settlement`; `1436765 docs: explain Redis settlement ownership safeguards`.
+- Both commits were fast-forward integrated into the original `dev-starfish` branch, then fast-forward merged and pushed to existing `dev`, `main`, and `dev-starfish` branches.
+- The task worktree was removed after confirming it was clean and fully integrated. The original checkout remains on `dev-starfish` with only the two protected timestamped plan/design documents untracked.
+- Disposable validation mirror and task-created test artifacts were removed after verification. Raw logs were retained in `/tmp` through this evidence update; they are disposable once the repository synchronization is complete.
 
 ## Cross-version settlement ACL follow-up
 
