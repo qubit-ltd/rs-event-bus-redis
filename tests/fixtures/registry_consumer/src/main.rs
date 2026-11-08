@@ -11,8 +11,14 @@ use qubit_event_bus_redis as _;
 
 fn main() {
     #[cfg(all(feature = "sync", feature = "discovery"))]
-    let _sync = EventBusRegistry::discover();
+    {
+        let registry = EventBusRegistry::discover().expect("sync discovery failed");
+        assert!(registry.provider_ids().iter().any(|id| id.as_str() == "redis-streams"));
+    }
 
     #[cfg(all(feature = "async", feature = "discovery"))]
-    let _async = AsyncEventBusRegistry::discover();
+    {
+        let registry = AsyncEventBusRegistry::discover().expect("async discovery failed");
+        assert!(registry.provider_ids().iter().any(|id| id.as_str() == "redis-streams"));
+    }
 }
