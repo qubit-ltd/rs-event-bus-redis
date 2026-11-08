@@ -94,6 +94,169 @@ fn command_calls(connection: &mut Connection, command: &str) -> Result<u64, Box<
     }
 }
 
+/// Measures the two Redis scan commands independently on isolated streams.
+/// The observer connection performs no reads that can mutate the PEL.
+#[derive(Debug)]
+struct PendingMetadata {
+    id: String,
+    owner: String,
+    idle_ms: u64,
+    delivery_count: u64,
+}
+
+/// Reads exactly one XPENDING detail row for `id` without changing the PEL.
+fn pending_metadata(
+    connection: &mut Connection,
+    stream: &str,
+    group: &str,
+    id: &str,
+) -> Result<PendingMetadata, Box<dyn Error>> {
+    let rows: Vec<(String, String, u64, u64)> = cmd("XPENDING")
+        .arg(stream)
+        .arg(group)
+        .arg(id)
+        .arg(id)
+        .arg(1)
+        .query(connection)?;
+    let [(id, owner, idle_ms, delivery_count)] = rows.as_slice() else {
+        return Err(format!("XPENDING returned {} rows for exact ID {id}", rows.len()).into());
+    };
+    Ok(PendingMetadata {
+        id: id.clone(),
+        owner: owner.clone(),
+        idle_ms: *idle_ms,
+        delivery_count: *delivery_count,
+    })
+}
+
+/// Asserts stable ID/owner and one Redis delivery-count increment while
+/// leaving the version-specific idle-time observation unconstrained.
+fn assert_scan_metadata_increment(
+    before: &PendingMetadata,
+    after: &PendingMetadata,
+    expected_id: &str,
+    expected_owner: &str,
+) {
+    assert_eq!(before.id, expected_id);
+    assert_eq!(after.id, expected_id);
+    assert_eq!(before.owner, expected_owner);
+    assert_eq!(after.owner, expected_owner);
+    assert_eq!(before.owner, after.owner);
+    assert_eq!(after.delivery_count, before.delivery_count + 1);
+}
+
+fn observe_isolated_scan_metadata(
+    connection: &mut Connection,
+    namespace: &str,
+    redis_version: &str,
+) -> Result<(), Box<dyn Error>> {
+    let claim_stream = format!("{namespace}:claim-only");
+    let claim_group = "claim-only-group";
+    let claim_consumer = "claim-only-consumer";
+    let claim_id: String = cmd("XADD")
+        .arg(&claim_stream)
+        .arg("*")
+        .arg("wire")
+        .arg("{}")
+        .query(connection)?;
+    let _: String = cmd("XGROUP")
+        .arg("CREATE")
+        .arg(&claim_stream)
+        .arg(claim_group)
+        .arg("0")
+        .arg("MKSTREAM")
+        .query(connection)?;
+    let _: Value = cmd("XREADGROUP")
+        .arg("GROUP")
+        .arg(claim_group)
+        .arg(claim_consumer)
+        .arg("COUNT")
+        .arg(1)
+        .arg("STREAMS")
+        .arg(&claim_stream)
+        .arg(">")
+        .query(connection)?;
+    let claim_before = pending_metadata(connection, &claim_stream, claim_group, &claim_id)?;
+    let claim_calls_before = command_calls(connection, "xautoclaim")?;
+    let _: Value = cmd("XAUTOCLAIM")
+        .arg(&claim_stream)
+        .arg(claim_group)
+        .arg(claim_consumer)
+        .arg(0)
+        .arg("0-0")
+        .arg("COUNT")
+        .arg(1)
+        .query(connection)?;
+    let claim_after = pending_metadata(connection, &claim_stream, claim_group, &claim_id)?;
+    let claim_calls = command_calls(connection, "xautoclaim")? - claim_calls_before;
+    eprintln!(
+        "Redis {redis_version} isolated XAUTOCLAIM: XPENDING {claim_before:?} -> {claim_after:?}; commandstats delta={claim_calls}"
+    );
+    assert_eq!(
+        claim_calls, 1,
+        "isolated claim experiment must issue exactly one XAUTOCLAIM"
+    );
+    assert_scan_metadata_increment(&claim_before, &claim_after, &claim_id, claim_consumer);
+    eprintln!(
+        "Redis {redis_version} XAUTOCLAIM idle observation: {} -> {} ms",
+        claim_before.idle_ms, claim_after.idle_ms
+    );
+
+    let pending_stream = format!("{namespace}:pending-only");
+    let pending_group = "pending-only-group";
+    let pending_consumer = "pending-only-consumer";
+    let pending_id: String = cmd("XADD")
+        .arg(&pending_stream)
+        .arg("*")
+        .arg("wire")
+        .arg("{}")
+        .query(connection)?;
+    let _: String = cmd("XGROUP")
+        .arg("CREATE")
+        .arg(&pending_stream)
+        .arg(pending_group)
+        .arg("0")
+        .arg("MKSTREAM")
+        .query(connection)?;
+    let _: Value = cmd("XREADGROUP")
+        .arg("GROUP")
+        .arg(pending_group)
+        .arg(pending_consumer)
+        .arg("COUNT")
+        .arg(1)
+        .arg("STREAMS")
+        .arg(&pending_stream)
+        .arg(">")
+        .query(connection)?;
+    let pending_before = pending_metadata(connection, &pending_stream, pending_group, &pending_id)?;
+    let pending_calls_before = command_calls(connection, "xreadgroup")?;
+    let _: Value = cmd("XREADGROUP")
+        .arg("GROUP")
+        .arg(pending_group)
+        .arg(pending_consumer)
+        .arg("COUNT")
+        .arg(1)
+        .arg("STREAMS")
+        .arg(&pending_stream)
+        .arg("0")
+        .query(connection)?;
+    let pending_after = pending_metadata(connection, &pending_stream, pending_group, &pending_id)?;
+    let pending_calls = command_calls(connection, "xreadgroup")? - pending_calls_before;
+    eprintln!(
+        "Redis {redis_version} isolated own-pending XREADGROUP: XPENDING {pending_before:?} -> {pending_after:?}; commandstats delta={pending_calls}"
+    );
+    assert_eq!(
+        pending_calls, 1,
+        "isolated own-pending experiment must issue exactly one XREADGROUP"
+    );
+    assert_scan_metadata_increment(&pending_before, &pending_after, &pending_id, pending_consumer);
+    eprintln!(
+        "Redis {redis_version} own-pending XREADGROUP idle observation: {} -> {} ms",
+        pending_before.idle_ms, pending_after.idle_ms
+    );
+
+    Ok(())
+}
 /// Dropping an unpolled future leaves the clock intact, while cancelling a
 /// polled receive forces a scan before another new-entry read.
 #[cfg(feature = "async")]
@@ -1263,6 +1426,273 @@ fn test_async_zero_timeout_progresses_past_active_pending_records() -> Result<()
     })
 }
 
+/// Records Redis PEL metadata while enforcing active-message and progress
+/// contracts across XAUTOCLAIM and own-pending scans on Redis 6.2 and 7.
+#[cfg(feature = "sync")]
+#[test]
+fn test_sync_active_recovery_metadata() -> Result<(), Box<dyn Error>> {
+    for image in ["6.2-alpine", "7-alpine"] {
+        for claim_idle_ms in [0, 80] {
+            let server = RedisServer::start_version(image)?;
+            let mut observer = Client::open(server.url())?.get_connection()?;
+            let info: String = cmd("INFO").arg("server").query(&mut observer)?;
+            let expected = image.split('-').next().ok_or("invalid Redis image")?;
+            let redis_version = info
+                .lines()
+                .find_map(|line| line.strip_prefix("redis_version:"))
+                .ok_or("Redis INFO omitted redis_version")?;
+            assert!(
+                redis_version.starts_with(&format!("{expected}.")),
+                "fixture {image} started Redis {redis_version}"
+            );
+            if claim_idle_ms == 0 {
+                observe_isolated_scan_metadata(&mut observer, &format!("isolation-sync-{image}"), redis_version)?;
+            }
+
+            let namespace = format!("active-sync-{image}-{claim_idle_ms}");
+            let mut options = provider_options(&server, &namespace, 2);
+            options.insert("redis.claim_min_idle_ms".into(), claim_idle_ms.to_string());
+            options.insert("redis.recovery_interval_ms".into(), "50".into());
+            options.insert("redis.command_timeout_ms".into(), "200".into());
+            let bus = RedisEventBusProvider
+                .create_configured(&EventBusConfig::default().with_provider_options(options))
+                .map_err(|failure| failure.into_error())?;
+            let stream = stream_key(&namespace, "events");
+            let group = group_name(&namespace, "events", "active-worker", Some("active-group"));
+            let _ = bus.publish(event("events", "active-A", b"payload")?)?;
+            let entries: StreamRangeReply = cmd("XRANGE")
+                .arg(&stream)
+                .arg("-")
+                .arg("+")
+                .arg("COUNT")
+                .arg(1)
+                .query(&mut observer)?;
+            let redis_id = entries.ids.first().ok_or("published A missing")?.id.clone();
+            let mut receiver = bus.subscribe(request(
+                "events",
+                "active-worker",
+                "active-group",
+                SubscriptionDurability::Durable,
+            )?)?;
+            let ReceiveOutcome::Message(active) = receiver.receive(Duration::from_secs(2))? else {
+                return Err("active A was not initially delivered".into());
+            };
+            let token = active.settlement().ok_or("A settlement token missing")?;
+            let pending_before: Vec<Value> = cmd("XPENDING")
+                .arg(&stream)
+                .arg(&group)
+                .arg(&redis_id)
+                .arg(&redis_id)
+                .arg(1)
+                .query(&mut observer)?;
+            assert_eq!(pending_before.len(), 1, "XPENDING must identify A exactly");
+            let claim_before = command_calls(&mut observer, "xautoclaim")?;
+            let read_before = command_calls(&mut observer, "xreadgroup")?;
+            assert!(matches!(
+                receiver.receive(Duration::from_millis(300))?,
+                ReceiveOutcome::TimedOut
+            ));
+            let _ = bus.publish(event("events", "active-B", b"payload")?)?;
+            let mut delivered_b = false;
+            for _ in 0..32 {
+                match receiver.receive(Duration::ZERO)? {
+                    ReceiveOutcome::Message(message) if message.id().as_str() == "active-B" => {
+                        delivered_b = true;
+                        break;
+                    }
+                    ReceiveOutcome::Message(message) => {
+                        return Err(
+                            format!("active A was redelivered before settlement: {}", message.id().as_str()).into(),
+                        );
+                    }
+                    ReceiveOutcome::TimedOut => {}
+                    ReceiveOutcome::Gap(gap) => {
+                        return Err(format!("unexpected gap during active scan: {gap:?}").into());
+                    }
+                    _ => return Err("unexpected receive outcome during active scan".into()),
+                }
+            }
+            assert!(delivered_b, "new B did not make progress while A remained active");
+            let claims = command_calls(&mut observer, "xautoclaim")? - claim_before;
+            let reads = command_calls(&mut observer, "xreadgroup")? - read_before;
+            assert!(claims >= 2, "expected two claim scans, got {claims}");
+            assert!(reads >= 2, "expected two own-pending scans, got {reads}");
+            let pending_after: Vec<Value> = cmd("XPENDING")
+                .arg(&stream)
+                .arg(&group)
+                .arg(&redis_id)
+                .arg(&redis_id)
+                .arg(1)
+                .query(&mut observer)?;
+            assert_eq!(pending_after.len(), 1, "active A must remain pending");
+            eprintln!(
+                "Redis {redis_version} sync claim_min_idle_ms={claim_idle_ms}: A XPENDING before={pending_before:?} after={pending_after:?}; XAUTOCLAIM calls={claims}; XREADGROUP calls={reads}; provider Messages: A=3 (initial, Retry redelivery, other-consumer recovery), B=1"
+            );
+
+            receiver.settle(token, DeliveryDisposition::Retry)?;
+            let ReceiveOutcome::Message(retried) = receiver.receive(Duration::from_secs(2))? else {
+                return Err("Retry did not make A eligible for redelivery".into());
+            };
+            assert_eq!(retried.id().as_str(), "active-A");
+            drop(receiver);
+            sleep(Duration::from_millis(120));
+            let mut second = bus.subscribe(request_at(
+                "events",
+                "other-worker",
+                "active-group",
+                SubscriptionDurability::Durable,
+                StartPosition::New,
+            )?)?;
+            let ReceiveOutcome::Message(recovered) = second.receive(Duration::from_secs(2))? else {
+                return Err("another consumer did not recover the pending message".into());
+            };
+            assert_eq!(
+                recovered.id().as_str(),
+                "active-A",
+                "another consumer must recover retried A"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Async counterpart of `test_sync_active_recovery_metadata`.
+#[cfg(feature = "async")]
+#[test]
+fn test_async_active_recovery_metadata() -> Result<(), Box<dyn Error>> {
+    block_on(async {
+        for image in ["6.2-alpine", "7-alpine"] {
+            for claim_idle_ms in [0, 80] {
+                let server = RedisServer::start_version(image)?;
+                let mut observer = Client::open(server.url())?.get_connection()?;
+                let info: String = cmd("INFO").arg("server").query(&mut observer)?;
+                let expected = image.split('-').next().ok_or("invalid Redis image")?;
+                let redis_version = info
+                    .lines()
+                    .find_map(|line| line.strip_prefix("redis_version:"))
+                    .ok_or("Redis INFO omitted redis_version")?;
+                assert!(
+                    redis_version.starts_with(&format!("{expected}.")),
+                    "fixture {image} started Redis {redis_version}"
+                );
+                if claim_idle_ms == 0 {
+                    observe_isolated_scan_metadata(&mut observer, &format!("isolation-async-{image}"), redis_version)?;
+                }
+
+                let namespace = format!("active-async-{image}-{claim_idle_ms}");
+                let mut options = provider_options(&server, &namespace, 2);
+                options.insert("redis.claim_min_idle_ms".into(), claim_idle_ms.to_string());
+                options.insert("redis.recovery_interval_ms".into(), "50".into());
+                options.insert("redis.command_timeout_ms".into(), "200".into());
+                let bus = AsyncRedisEventBusProvider
+                    .create_configured(&EventBusConfig::default().with_provider_options(options))
+                    .await
+                    .map_err(|failure| failure.into_error())?;
+                let stream = stream_key(&namespace, "events");
+                let group = group_name(&namespace, "events", "active-worker", Some("active-group"));
+                let _ = bus.publish(event("events", "active-A", b"payload")?).await?;
+                let entries: StreamRangeReply = cmd("XRANGE")
+                    .arg(&stream)
+                    .arg("-")
+                    .arg("+")
+                    .arg("COUNT")
+                    .arg(1)
+                    .query(&mut observer)?;
+                let redis_id = entries.ids.first().ok_or("published A missing")?.id.clone();
+                let mut receiver = bus
+                    .subscribe(request(
+                        "events",
+                        "active-worker",
+                        "active-group",
+                        SubscriptionDurability::Durable,
+                    )?)
+                    .await?;
+                let ReceiveOutcome::Message(active) = receiver.receive(Duration::from_secs(2)).await? else {
+                    return Err("active A was not initially delivered".into());
+                };
+                let token = active.settlement().ok_or("A settlement token missing")?;
+                let pending_before: Vec<Value> = cmd("XPENDING")
+                    .arg(&stream)
+                    .arg(&group)
+                    .arg(&redis_id)
+                    .arg(&redis_id)
+                    .arg(1)
+                    .query(&mut observer)?;
+                assert_eq!(pending_before.len(), 1, "XPENDING must identify A exactly");
+                let claim_before = command_calls(&mut observer, "xautoclaim")?;
+                let read_before = command_calls(&mut observer, "xreadgroup")?;
+                assert!(matches!(
+                    receiver.receive(Duration::from_millis(300)).await?,
+                    ReceiveOutcome::TimedOut
+                ));
+                let _ = bus.publish(event("events", "active-B", b"payload")?).await?;
+                let mut delivered_b = false;
+                for _ in 0..32 {
+                    match receiver.receive(Duration::ZERO).await? {
+                        ReceiveOutcome::Message(message) if message.id().as_str() == "active-B" => {
+                            delivered_b = true;
+                            break;
+                        }
+                        ReceiveOutcome::Message(message) => {
+                            return Err(format!(
+                                "active A was redelivered before settlement: {}",
+                                message.id().as_str()
+                            )
+                            .into());
+                        }
+                        ReceiveOutcome::TimedOut => {}
+                        ReceiveOutcome::Gap(gap) => {
+                            return Err(format!("unexpected gap during active scan: {gap:?}").into());
+                        }
+                        _ => return Err("unexpected receive outcome during active scan".into()),
+                    }
+                }
+                assert!(delivered_b, "new B did not make progress while A remained active");
+                let claims = command_calls(&mut observer, "xautoclaim")? - claim_before;
+                let reads = command_calls(&mut observer, "xreadgroup")? - read_before;
+                assert!(claims >= 2, "expected two claim scans, got {claims}");
+                assert!(reads >= 2, "expected two own-pending scans, got {reads}");
+                let pending_after: Vec<Value> = cmd("XPENDING")
+                    .arg(&stream)
+                    .arg(&group)
+                    .arg(&redis_id)
+                    .arg(&redis_id)
+                    .arg(1)
+                    .query(&mut observer)?;
+                assert_eq!(pending_after.len(), 1, "active A must remain pending");
+                eprintln!(
+                    "Redis {redis_version} async claim_min_idle_ms={claim_idle_ms}: A XPENDING before={pending_before:?} after={pending_after:?}; XAUTOCLAIM calls={claims}; XREADGROUP calls={reads}; provider Messages: A=3 (initial, Retry redelivery, other-consumer recovery), B=1"
+                );
+
+                receiver.settle(token, DeliveryDisposition::Retry).await?;
+                let ReceiveOutcome::Message(retried) = receiver.receive(Duration::from_secs(2)).await? else {
+                    return Err("Retry did not make A eligible for redelivery".into());
+                };
+                assert_eq!(retried.id().as_str(), "active-A");
+                drop(receiver);
+                sleep(Duration::from_millis(120));
+                let mut second = bus
+                    .subscribe(request_at(
+                        "events",
+                        "other-worker",
+                        "active-group",
+                        SubscriptionDurability::Durable,
+                        StartPosition::New,
+                    )?)
+                    .await?;
+                let ReceiveOutcome::Message(recovered) = second.receive(Duration::from_secs(2)).await? else {
+                    return Err("another consumer did not recover the pending message".into());
+                };
+                assert_eq!(
+                    recovered.id().as_str(),
+                    "active-A",
+                    "another consumer must recover retried A"
+                );
+            }
+        }
+        Ok::<(), Box<dyn Error>>(())
+    })
+}
 #[cfg(feature = "sync")]
 #[test]
 fn test_sync_duration_max_waits_for_a_message() -> Result<(), Box<dyn Error>> {

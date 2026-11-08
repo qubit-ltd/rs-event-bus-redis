@@ -172,6 +172,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 恢复工作按时间间隔分批限额：claim 和本 consumer pending 扫描各最多执行 8 条命令；tombstone 修复每轮最多执行一次 `XPENDING`、四次 `XRANGE` 和四次隔离 `EVAL`。扫描游标会跨间隔和 receive 调用保留。`Duration::ZERO` 执行有界非阻塞恢复（最多一次 claim、一次本 consumer pending 查询和一次新消息查询），跳过 tombstone 扫描，并允许隔离一条格式错误的记录。`Duration::MAX` 表示无限等待，内部以 1 秒的有限 Redis 阻塞读取循环实现。有限超时是调度截止时间，限制继续发起恢复工作及实际 Redis `BLOCK` 时长。零超时表示不在 Redis 等待新消息，不表示网络操作必须在 0ms 内完成。阻塞读取的响应等待预算为实际 `BLOCK` 加 `redis.command_timeout_ms`。同步 socket 超时只是每次 I/O 等待的软限制；DNS、多地址尝试、setup 各阶段及持续小包传输都可能使整体调用超出预算。已经发出的命令不会被强制停止。
 
+Redis 恢复扫描可能改变 pending entry 的元数据，即使 provider 在本地过滤了仍处于 active 状态的消息、没有再次返回它。`XAUTOCLAIM` 和读取本 consumer pending 的 `XREADGROUP` 都可能刷新 PEL idle 并增加 Redis 投递次数。恢复消息的 `provider_attempt` 报告的是 Redis 投递次数，不是 handler 执行次数；单独查看 `XPENDING` idle 既不能确定 handler 已运行多久，也不能证明它已停滞。排查恢复时应结合 PEL owner、投递次数、consumer 状态和应用 handler 遥测。
+
 ## 4. 驱动异步 SPI
 
 异步 bus 的创建、发布、订阅和接收操作都会返回 runtime-neutral future。小型示例用 `futures_lite::future::block_on` 驱动；长期运行的服务通常会在现有 executor 上轮询这些 future，并让订阅与其他服务工作并发运行。

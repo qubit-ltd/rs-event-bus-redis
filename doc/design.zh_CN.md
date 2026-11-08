@@ -104,6 +104,8 @@ wire 限额内且完整有效的未知 `u64` 整数版本会报错并保留 PEL�
 
 Accept/Reject 确认 Redis PEL，Retry 只释放本地占用并保留 PEL。`XREADGROUP >` 返回的新消息携带 `provider_attempt = Some(1)`。每条准备交付的恢复记录会先额外执行一次精确 ID 的 `XPENDING` 明细查询；只有恰好一条明细的 ID 与预期记录匹配、owner 为当前 consumer，且非零次数可由 SPI 的 `u32` 表示时，才报告投递次数。查询失败、空结果、格式错误、次数为零或不可表示、以及 owner/ID 不匹配时，次数保持未知（`None`）。因此每条恢复消息多一次 Redis 命令，新消息路径不增加查询。关闭不 ACK，不删除消费组或 stream。可选 `XADD MAXLEN ~` 会丢失未读/pending 历史；未读记录被裁剪不一定返回 Gap。至少一次投递要求业务幂等，claim idle 阈值应匹配 handler 时长。
 
+恢复命令可能先改变 PEL 元数据，再由 provider 过滤本 receiver 仍处于 active 状态的 ID。`XAUTOCLAIM` 和同一 consumer 的 `XREADGROUP` 历史读取都可能增加 Redis 投递次数，也可能刷新 idle。因此 `provider_attempt` 表示 Redis 投递次数，不表示 handler 执行次数。PEL idle 不能可靠表示 handler 处理时长，也不能单独证明 handler 停滞。运维诊断应结合 PEL owner/次数、consumer 状态和应用 handler 遥测。
+
 ## 安装与验证状态
 
 - **本地源码集成：** 上文的 sibling path dependency 与 core patch 示例说明如何集成 provider `0.7.0`、core `0.21` 和 SPI `0.14` 的源码 checkout；它不验证 registry 安装。
