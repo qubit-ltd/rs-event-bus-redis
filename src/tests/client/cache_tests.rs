@@ -32,6 +32,7 @@ use redis::Value;
 use redis::aio::ConnectionLike;
 use redis::pipe;
 
+use crate::client::AsyncConnectionRole;
 use crate::client::Client;
 use crate::client::CommandClass;
 use crate::config::RedisEventBusConfig;
@@ -159,19 +160,59 @@ fn test_stale_generation_failure_preserves_new_connection() {
             .get_async_connection(CommandClass::General)
             .await
             .expect("first generation");
-        client.invalidate_async_connection(old.generation).await;
+        client.invalidate_async_connection(old.role, old.generation).await;
         let replacement = client
             .get_async_connection(CommandClass::General)
             .await
             .expect("replacement generation");
         assert!(replacement.generation > old.generation);
-        client.invalidate_async_connection(old.generation).await;
+        client.invalidate_async_connection(old.role, old.generation).await;
         let still_current = client
             .get_async_connection(CommandClass::General)
             .await
             .expect("replacement survives stale failure");
         assert_eq!(still_current.generation, replacement.generation);
         assert_eq!(server.accepted.load(Ordering::SeqCst), 2);
+    });
+}
+
+#[test]
+fn test_general_and_settlement_cache_generations_are_isolated() {
+    let server = SetupEndpoint::new();
+    let settings = RedisEventBusConfig::new(&server.url, "role-cache").expect("settings");
+    let client = Client::new(&settings).expect("client");
+    block_on(async {
+        let general = client
+            .get_async_connection(CommandClass::General)
+            .await
+            .expect("general connection");
+        let settlement = client
+            .get_async_connection(CommandClass::Settlement)
+            .await
+            .expect("settlement connection");
+        assert_eq!(general.role, AsyncConnectionRole::General);
+        assert_eq!(settlement.role, AsyncConnectionRole::Settlement);
+        assert_eq!(
+            general.generation, settlement.generation,
+            "role caches may share generation numbers"
+        );
+        assert_eq!(server.accepted.load(Ordering::SeqCst), 2);
+
+        client
+            .invalidate_async_connection(AsyncConnectionRole::Settlement, settlement.generation)
+            .await;
+        drop(settlement);
+        let current_general = client
+            .get_async_connection(CommandClass::General)
+            .await
+            .expect("general cache remains intact");
+        assert_eq!(current_general.generation, general.generation);
+        let replacement_settlement = client
+            .get_async_connection(CommandClass::Settlement)
+            .await
+            .expect("settlement cache reconnects independently");
+        assert!(replacement_settlement.generation > general.generation);
+        assert_eq!(server.accepted.load(Ordering::SeqCst), 3);
     });
 }
 
@@ -273,7 +314,7 @@ fn test_async_pipeline_database_and_disconnect_generation_replacement() {
             .expect_err("lost pipeline reply");
         assert!(error.is_io_error());
         let failed_generation = old.generation;
-        client.invalidate_async_connection(failed_generation).await;
+        client.invalidate_async_connection(old.role, failed_generation).await;
         drop(old);
         server.disconnect_echo.store(false, Ordering::SeqCst);
         let replacement = client
@@ -283,7 +324,9 @@ fn test_async_pipeline_database_and_disconnect_generation_replacement() {
         assert!(replacement.generation > failed_generation);
         assert_eq!(replacement.get_db(), 3);
         let replacement_generation = replacement.generation;
-        client.invalidate_async_connection(failed_generation).await;
+        client
+            .invalidate_async_connection(replacement.role, failed_generation)
+            .await;
         drop(replacement);
         let current = client
             .get_async_connection(CommandClass::General)

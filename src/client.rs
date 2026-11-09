@@ -30,6 +30,8 @@ mod internal;
 use self::internal::AsyncCommandConnection;
 #[cfg(feature = "async")]
 use self::internal::AsyncConnectionCache;
+#[cfg(feature = "async")]
+pub(crate) use self::internal::AsyncConnectionRole;
 pub(crate) use self::internal::CommandClass;
 #[cfg(test)]
 use self::internal::CommandPermit;
@@ -74,7 +76,11 @@ pub(crate) struct Client {
     /// Single-flight standalone short-command connection cache with
     /// generations.
     #[cfg(feature = "async")]
-    async_cache: AsyncConnectionCache,
+    async_general_cache: AsyncConnectionCache,
+    /// Settlement EVALs use an independent standalone connection to avoid
+    /// waiting behind general-command response traffic.
+    #[cfg(feature = "async")]
+    async_settlement_cache: AsyncConnectionCache,
 }
 impl Client {
     /// Parses validated endpoint/ACL options without performing network I/O.
@@ -135,7 +141,9 @@ impl Client {
             #[cfg(feature = "sync")]
             sync_pool: Arc::new(SyncConnectionPool::new(config.max_idle_connections())),
             #[cfg(feature = "async")]
-            async_cache: AsyncConnectionCache::new(),
+            async_general_cache: AsyncConnectionCache::new(),
+            #[cfg(feature = "async")]
+            async_settlement_cache: AsyncConnectionCache::new(),
         })
     }
     /// Registers diagnostics exactly once before a provider shares this client.
@@ -338,12 +346,21 @@ impl Client {
                 diagnostics.increment(RedisDiagnosticCounter::CommandRejections);
             }
         })?;
+        let role = AsyncConnectionRole::from(class);
         let (generation, connection) = if self.standalone.is_some() {
-            self.async_cache.get_or_connect(self.open_async(None)).await?
+            match role {
+                AsyncConnectionRole::General => self.async_general_cache.get_or_connect(self.open_async(None)).await?,
+                AsyncConnectionRole::Settlement => {
+                    self.async_settlement_cache
+                        .get_or_connect(self.open_async(None))
+                        .await?
+                }
+            }
         } else {
             (0, self.open_async(None).await?)
         };
         Ok(AsyncCommandConnection {
+            role,
             generation,
             connection,
             _permit: permit,
@@ -370,13 +387,17 @@ impl Client {
     ///
     /// # Parameters
     ///
+    /// - `role`: Cache selected by the failed short-command lease.
     /// - `generation`: Identity carried by the failed short-command lease.
     ///
     /// A stale generation leaves a replacement connection intact. No network
     /// I/O is issued.
     #[cfg(feature = "async")]
-    pub(crate) async fn invalidate_async_connection(&self, generation: u64) {
-        self.async_cache.invalidate_if_current(generation).await;
+    pub(crate) async fn invalidate_async_connection(&self, role: AsyncConnectionRole, generation: u64) {
+        match role {
+            AsyncConnectionRole::General => self.async_general_cache.invalidate_if_current(generation).await,
+            AsyncConnectionRole::Settlement => self.async_settlement_cache.invalidate_if_current(generation).await,
+        }
     }
     /// Opens controlled standalone or freshly discovered Sentinel transport.
     ///
@@ -516,6 +537,8 @@ mod tests {
     #[cfg(feature = "sync")]
     use redis::pipe;
 
+    #[cfg(feature = "async")]
+    use super::AsyncConnectionRole;
     use super::Client;
     use super::CommandClass;
     use crate::config::RedisEventBusConfig;
@@ -606,7 +629,9 @@ mod tests {
         block_on(async {
             assert!(client.get_async_connection(CommandClass::General).await.is_err());
             assert!(client.get_async_dedicated_connection().await.is_err());
-            client.invalidate_async_connection(0).await;
+            client
+                .invalidate_async_connection(AsyncConnectionRole::General, 0)
+                .await;
         });
     }
     #[cfg(feature = "sync")]

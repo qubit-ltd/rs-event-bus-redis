@@ -486,13 +486,17 @@ impl AsyncEventSubscriptionSpi for Subscription {
                             *lock_state(&state.progress, &topic, "settle", "settlement lock")? =
                                 SettlementProgress::Open;
                         }
-                        client.invalidate_async_connection(connection.generation).await;
+                        client
+                            .invalidate_async_connection(connection.role, connection.generation)
+                            .await;
                         return Err(classified_spi_error("settle", Some(&topic), &error));
                     }
                     Ok(value) => match parse_settlement_reply(&value) {
                         Some(SettlementReply::Completed) => {}
                         Some(SettlementReply::OwnershipChanged) => {
-                            client.invalidate_async_connection(connection.generation).await;
+                            client
+                                .invalidate_async_connection(connection.role, connection.generation)
+                                .await;
                             return Err(spi_error(
                                 "settle",
                                 &topic,
@@ -504,7 +508,9 @@ impl AsyncEventSubscriptionSpi for Subscription {
                             ));
                         }
                         None => {
-                            client.invalidate_async_connection(connection.generation).await;
+                            client
+                                .invalidate_async_connection(connection.role, connection.generation)
+                                .await;
                             if let Some(diagnostics) = client.diagnostics() {
                                 diagnostics.increment(RedisDiagnosticCounter::SettlementUnknown);
                             }
@@ -516,7 +522,9 @@ impl AsyncEventSubscriptionSpi for Subscription {
                         }
                     },
                     Err(_) => {
-                        client.invalidate_async_connection(connection.generation).await;
+                        client
+                            .invalidate_async_connection(connection.role, connection.generation)
+                            .await;
                         if let Some(diagnostics) = client.diagnostics() {
                             diagnostics.increment(RedisDiagnosticCounter::SettlementUnknown);
                         }

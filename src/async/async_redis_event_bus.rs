@@ -118,7 +118,9 @@ impl AsyncEventBusSpi for AsyncRedisEventBus {
                 Ok(Value::BulkString(bytes)) => match String::from_utf8(bytes) {
                     Ok(id) if valid_stream_id(&id) && id != "0-0" => id,
                     _ => {
-                        self.client.invalidate_async_connection(connection.generation).await;
+                        self.client
+                            .invalidate_async_connection(connection.role, connection.generation)
+                            .await;
                         let error = invalid_publish_reply(&topic);
                         if let Some(diagnostics) = self.client.diagnostics() {
                             diagnostics.increment(RedisDiagnosticCounter::PublishUnknown);
@@ -137,7 +139,9 @@ impl AsyncEventBusSpi for AsyncRedisEventBus {
                     return Err(error);
                 }
                 Ok(_) => {
-                    self.client.invalidate_async_connection(connection.generation).await;
+                    self.client
+                        .invalidate_async_connection(connection.role, connection.generation)
+                        .await;
                     let error = invalid_publish_reply(&topic);
                     if let Some(diagnostics) = self.client.diagnostics() {
                         diagnostics.increment(RedisDiagnosticCounter::PublishUnknown);
@@ -145,7 +149,9 @@ impl AsyncEventBusSpi for AsyncRedisEventBus {
                     return Err(error);
                 }
                 Err(error) => {
-                    self.client.invalidate_async_connection(connection.generation).await;
+                    self.client
+                        .invalidate_async_connection(connection.role, connection.generation)
+                        .await;
                     let error = query_publish_error(&topic, &error);
                     if error.kind() == "outcome_unknown"
                         && let Some(diagnostics) = self.client.diagnostics()
@@ -265,12 +271,16 @@ impl AsyncEventBusSpi for AsyncRedisEventBus {
                     Ok(Value::Okay) => (Ok(()), false),
                     Ok(Value::ServerError(error)) => (Err(error.into()), false),
                     Ok(_) => {
-                        self.client.invalidate_async_connection(connection.generation).await;
+                        self.client
+                            .invalidate_async_connection(connection.role, connection.generation)
+                            .await;
                         (Ok(()), true)
                     }
                     Err(error) if error.is_io_error() || error.is_timeout() => (Err(error), false),
                     Err(error) => {
-                        self.client.invalidate_async_connection(connection.generation).await;
+                        self.client
+                            .invalidate_async_connection(connection.role, connection.generation)
+                            .await;
                         (Err(error), true)
                     }
                 };
@@ -280,7 +290,9 @@ impl AsyncEventBusSpi for AsyncRedisEventBus {
             let (result, malformed_reply) = if malformed_reply {
                 (result, true)
             } else if first_result_unknown {
-                self.client.invalidate_async_connection(connection.generation).await;
+                self.client
+                    .invalidate_async_connection(connection.role, connection.generation)
+                    .await;
                 drop(connection);
                 let mut retry_connection =
                     self.client
@@ -299,13 +311,13 @@ impl AsyncEventBusSpi for AsyncRedisEventBus {
                     Ok(Value::ServerError(error)) => (Err(error.into()), false),
                     Ok(_) => {
                         self.client
-                            .invalidate_async_connection(retry_connection.generation)
+                            .invalidate_async_connection(retry_connection.role, retry_connection.generation)
                             .await;
                         (Ok(()), true)
                     }
                     Err(error) => {
                         self.client
-                            .invalidate_async_connection(retry_connection.generation)
+                            .invalidate_async_connection(retry_connection.role, retry_connection.generation)
                             .await;
                         (Err(error), true)
                     }

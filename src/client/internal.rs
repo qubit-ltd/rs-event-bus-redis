@@ -11,6 +11,8 @@ mod async_command_connection;
 #[cfg(feature = "async")]
 mod async_connection_cache;
 #[cfg(feature = "async")]
+mod async_connection_role;
+#[cfg(feature = "async")]
 mod cache_state;
 mod command_class;
 mod command_lane;
@@ -30,6 +32,8 @@ pub(super) mod tls;
 pub(crate) use async_command_connection::AsyncCommandConnection;
 #[cfg(feature = "async")]
 pub(crate) use async_connection_cache::AsyncConnectionCache;
+#[cfg(feature = "async")]
+pub(crate) use async_connection_role::AsyncConnectionRole;
 pub(crate) use command_class::CommandClass;
 #[cfg(test)]
 pub(crate) use command_permit::CommandPermit;

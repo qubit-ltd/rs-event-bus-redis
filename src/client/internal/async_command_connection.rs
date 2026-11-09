@@ -14,10 +14,14 @@ use redis::Value;
 use redis::aio::ConnectionLike;
 use redis::aio::MultiplexedConnection;
 
+use super::async_connection_role::AsyncConnectionRole;
 use super::command_permit::CommandPermit;
 /// Owns admission and one connection generation until completion or
 /// cancellation.
 pub(crate) struct AsyncCommandConnection {
+    /// Cache role carried with this lease so an error invalidates only the
+    /// matching command channel.
+    pub(crate) role: AsyncConnectionRole,
     /// Cache generation used to reject stale invalidation; Sentinel leases use
     /// zero.
     pub(crate) generation: u64,
