@@ -551,7 +551,13 @@ INFO MEMORY
 
 通过有权限的运维连接执行这些命令。`XPENDING` 汇总提供各组 pending 数量；详细查询应翻页，找出 idle 最久的记录及其 owner。`XINFO GROUPS` 给出已有组最后投递位置，`XINFO CONSUMERS` 用于查看 consumer 活动情况。Redis 6.2 不能依赖 Redis 7 的 `lag` 字段，应结合游标和应用处理进度判断未读工作。`INFO MEMORY` 是整个 Redis 实例的指标，不属于某个 provider；应与该 Redis 部署的内存预算比较。命令活动可补充查看 `INFO commandstats`。隔离流单独增长，须独立采集 `XLEN`；`XRANGE ... COUNT 100` 只读取一页，完整检查应以上一页末尾 ID 为排他下界继续查询，直到没有后续记录。
 
-初始采集频率可设为每分钟一次：进程内快照、源/隔离流长度、group/consumer 和 PEL 汇总、PEL 最久 idle、使用 outbox 的应用的最老行年龄，以及 Redis 内存；同时计算计数器五分钟增量。示例告警是 `command_rejections` 或 `receiver_rejections` 在五分钟内增长、outbox 最老行超过应用通知延迟 SLO、PEL 最久 idle 超过 `2 × redis.claim_min_idle_ms`，或 Redis 已用内存超过该实例分配预算的 75%。频率与阈值均须按业务负载和处置能力调整。重建 SPI 后，新 ID 的计数从零开始；进程重启还会重置 ID 序列。这些重置都不能说明压力已消失。先排查准入压力、停滞的 handler、outbox 发布和 Redis 内存，再调整限额。
+建议先按每分钟一次采样 `subscription.delivery_metrics().metrics`，并保留五分钟观察窗口；同时采集进程内快照、源/隔离流长度、group/consumer 与 PEL 汇总、使用 outbox 时最老行的年龄，以及 Redis 内存。原有告警继续保留：`command_rejections` 或 `receiver_rejections` 在五分钟内增长、outbox 最老行超过应用的通知延迟 SLO，或 Redis 已用内存超过该实例预算的 75% 时应告警。PEL idle 高于 `2 × redis.claim_min_idle_ms` 可作为调查线索；低于该值不能说明消费健康。
+
+恢复扫描可能刷新 PEL idle，却没有把消息再次交给应用：`XAUTOCLAIM` 和读取本 consumer pending 历史的 `XREADGROUP` 路径都可能刷新 idle。因此，PEL idle 既不是消息首次进入 pending 的时间，也不是 handler 已运行的时长。可用以下组合信号发现停滞：`oldest_owned_age` 持续超过应用处理/结算 SLO，同时 `running_handlers > 0` 或 `settling > 0`，而 `completed` 没有增长。即使 `completed` 在增长，只要某条 owned 工作的 `oldest_owned_age` 持续超出 SLO，仍应调查；其他消息完成并不能排除单条消息卡住。`completed` 统计成功结束的投递生命周期，其中包括已结算的 `Retry` 和 `Reject`，不代表业务处理成功。`oldest_owned_age` 覆盖已归属的接收预留和投递，不只是用户 handler 的执行时间。`None` 表示没有可用时间戳或无法计算，不能当作零。各字段分别采样，不构成同一时刻的事务快照。
+
+例如每分钟采样一次、每秒进行一次恢复扫描、`claim_min_idle_ms=60000`，而旧告警阈值为 PEL idle 120 秒。若一条消息始终未完成，每轮恢复都可能刷新它的 idle，导致该阈值一直不触发；但当订阅侧归属时间持续超过应用 SLO、且生命周期完成数不变时，组合信号仍会要求调查。这些数值只用于说明场景，不是经过测试的建议值，也不是 provider 保证。
+
+订阅被重建时，其生命周期指标和本地年龄会重置；SPI 计数也会在新 instance ID 下重新开始，进程重启还会重置 ID 序列。跨实例追踪时，应由外部采集器按 Redis deployment/namespace、stream、group 和 pending ID 记录首次观测时间；owner 改变时不要重置该时间。分页或采样不完整、数据缺失或 group 重建都会造成历史不确定。首次观测时间只能作为 pending 时长的下界，不是 Redis 首次投递时间。对于 `rs-task` 通知，应核对权威 task 状态与 consumer projection 中最高的 `state_version`；outbox 年龄只反映发布积压。调查时保留错误、PEL ID、owner 和业务状态，并按应用的人工恢复与保留流程处理。采样频率和阈值应结合负载及处置能力调整；变更限额前，先调查准入压力、handler 停滞、outbox 发布和 Redis 内存。
 
 ### 人工决定保留策略
 
