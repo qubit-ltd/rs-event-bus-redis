@@ -88,7 +88,7 @@ adapter 按实际操作阶段分类失败，不额外定义两状态 outcome enu
 | 发布字节超限 | `payload_too_large` / `wire_too_large` | `Some(false)`，不发送 XADD |
 | wire 限额内且完整有效的未知版本 | `unsupported_wire_version` | `Some(false)`，保留 PEL；无效或嵌套过深的 JSON 会隔离 |
 
-订阅创建时，首次 `BUSYGROUP` 是明确的已有组结果；显式使用 `Earliest` 或 `At` 时仍按 `existing_group_start_position_ignored` 策略处理。发送 `XGROUP CREATE` 后发生超时或传输错误，则首次结果未知；adapter 仍按原规则重试一次。如果重试返回 `BUSYGROUP`，`New` 和显式 `resume` 沿用已有游标；显式 `Earliest` 或 `At` 配合 `reject` 时返回 `operation=subscribe`、`kind=outcome_unknown`、`retryable=Some(false)`。provider 不推断首次请求一定创建了组，不移动游标、不 ACK、也不删除任何对象。恢复前检查 `XINFO GROUPS` 和 `XPENDING`；仅当业务接受已有游标时使用 `resume`，若需新回放位置则选用新的 group。
+订阅创建只接受 RESP `+OK` 状态作为 `XGROUP CREATE` 成功确认。nil、整数、字符串、数组或嵌套错误回复均属畸形，返回 `operation=subscribe`、`kind=outcome_unknown`、`retryable=Some(false)`，且不增加额外重试。命令发送后发生超时或传输错误也表示结果未知，最多再尝试一次。若重试连接获取失败、Redis 拒绝重试，或重试再次发生传输错误/畸形回复，结果仍保持未知，因为后一次观察不能证明首次命令没有创建 group。重试收到 `+OK` 可确认创建；收到 `BUSYGROUP` 时，`New` 和显式 `resume` 可沿用已有游标，显式 `Earliest` 或 `At` 配合 `reject` 时仍返回未知。首次直接收到 `BUSYGROUP` 则是明确的已有组结果；显式使用 `Earliest` 或 `At` 时仍按 `existing_group_start_position_ignored` 策略处理。provider 不移动游标、不 ACK、也不删除任何对象。恢复前检查 `XINFO GROUPS` 和 `XPENDING`；仅当业务接受已有游标时使用 `resume`，若需新回放位置则选用新的 group。
 
 配置和已知 Redis 拒绝仍使用脱敏分类。retryable 是上下文提示，不表示自动重试或无重复保证。业务命令发送前的失败不会固定结算意图。错误不包含 URL 密钥、Redis 原始文本或 payload。
 

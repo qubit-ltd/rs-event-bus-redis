@@ -176,7 +176,7 @@ provider 对单条 wire、payload 和解码后的 headers 字符串设置有限�
 
 已有 Redis 消费组的起始位置现在有明确规则：`StartPosition::New` 沿用已保存游标；默认情况下，`Earliest` 和 `At` 返回 `existing_group_start_position_ignored`，不再静默忽略请求的位置。订阅可通过 `redis.existing_group_start=resume` 显式选择继续使用已有游标；该选项不会执行 `XGROUP SETID`。详见[消费组恢复指南](doc/user_guide.zh_CN.md#6-理解投递重试和清理)和[迁移指南](doc/migration.zh_CN.md#已有消费组起始位置变更)。
 
-如果 `XGROUP CREATE` 可能已在 Redis 执行，但回复丢失，重试收到 `BUSYGROUP` 无法证明本次调用创建了组，还是该组原本就存在。使用 `Earliest` 或 `At` 且默认策略为 `reject` 时，订阅返回 `outcome_unknown`，并带有 `retryable=Some(false)`。停止盲目重试；使用 `XINFO GROUPS` 和 `XPENDING` 检查 stream 与消费组；只有业务接受沿用已有游标时才设置 `redis.existing_group_start=resume`。若要从新位置重放，请使用新的 group 名称。provider 不会通过 `XGROUP SETID` 自动恢复或修改游标。
+只有 RESP `+OK` 才能确认 `XGROUP CREATE`；畸形回复返回 `outcome_unknown` 和 `retryable=Some(false)`。命令可能已执行但回复丢失时，provider 最多重试一次。若重试连接失败或被拒绝，结果仍为未知，因为这不能证明首次命令没有创建 group。重试收到 `BUSYGROUP` 时，`New` 或显式 `resume` 可继续沿用已有游标；`Earliest` 或 `At` 配合默认 `reject` 策略时仍属未知。停止盲目重试；使用 `XINFO GROUPS` 和 `XPENDING` 检查 stream 与消费组；只有业务接受沿用已有游标时才设置 `redis.existing_group_start=resume`。若要从新位置重放，请使用新的 group 名称。provider 不会通过 `XGROUP SETID` 自动恢复或修改游标。
 
 当前源码工作树中的 Core 0.21 分别限制 handler 运行数、全局持有投递数、每订阅持有量和注册订阅数。`RedisSubscriptionProfile` 要求明确指定起始位置，并构造 durable options；新读取的 stream entry 报告 provider attempt `Some(1)`。恢复 pending 或 claim 记录时，只有 Redis 中的记录 ID、当前 consumer owner 匹配，且非零次数可由 SPI 的 `u32` 表示时，才报告投递次数；否则仍为未知。结算只对明确可重试的错误执行有限重试，重试性未知时停止订阅。[用户指南](doc/user_guide.zh_CN.md) 说明首个终止原因、投递指标、持久恢复、provider snapshot 采集，以及限制等待时间但不保证强制退出进程的关闭策略。
 

@@ -429,7 +429,7 @@ let options = SubscribeOptions::<String>::builder()
 
 默认策略为 `reject`，唯一合法值是 `reject` 和 `resume`。`resume` 接受 Redis 中已有游标，绝不会执行 `XGROUP SETID`，因此不会修改或回退该游标。未知的 `redis.*` 订阅选项或非法值会在 Redis 网络 I/O 前失败。
 
-另有一种情况：首次 `XGROUP CREATE` 可能已执行，但回复因超时或连接故障丢失。provider 会重试一次；如果 Redis 返回 `BUSYGROUP`，且请求使用 `Earliest` 或 `At` 和默认 `reject` 策略，调用会返回 `SpiError::Operation`，字段为 `operation=subscribe`、`kind=outcome_unknown`、`retryable=Some(false)`。原消费组可能早已存在，也可能由首次请求创建，因此应停止盲目重试。使用公开 naming helper 获取 stream 和 group 名称，再运行 `XINFO GROUPS <stream>` 与 `XPENDING <stream> <group>` 检查状态。只有业务允许继续已有游标时，才显式设置 `redis.existing_group_start=resume`；如果必须按请求的新位置回放，则在评估重复处理后创建新的 group 名称。provider 不会通过 `XGROUP SETID`、删除 group 或 ACK 记录来自动恢复该结果。首次请求直接收到 `BUSYGROUP` 仍属于明确的已有组位置冲突。
+只有 RESP `+OK` 状态才确认 `XGROUP CREATE`。nil、整数、字符串（包括 bulk `OK` 和 `PONG`）、数组或嵌套错误回复都属于畸形回复，返回字段为 `operation=subscribe`、`kind=outcome_unknown`、`retryable=Some(false)` 的 `SpiError::Operation`，且不会因此增加重试。首次命令发送后超时或连接故障也表示结果未知，最多再尝试一次。如果重试无法连接、被拒绝（包括 `NOPERM` 或 `READONLY`）、再次发生传输错误或收到畸形回复，结果仍为未知，因为第二次观察无法证明首次命令没有创建 group。重试收到 `+OK` 可确认 group；收到 `BUSYGROUP` 时，`New` 或显式 `resume` 接受已有游标，也可继续成功。`Earliest` 或 `At` 配合默认 `reject` 策略时仍返回未知。停止盲目重试；使用公开 naming helper 获取 stream 和 group 名称，再运行 `XINFO GROUPS <stream>` 与 `XPENDING <stream> <group>` 检查状态。只有业务允许继续已有游标时，才显式设置 `redis.existing_group_start=resume`；如果必须按请求的新位置回放，则在评估重复处理后创建新的 group 名称。provider 不会通过 `XGROUP SETID`、删除 group 或 ACK 记录来自动恢复该结果。首次请求直接收到 `BUSYGROUP` 仍属于明确的已有组位置冲突。
 
 未设置 `redis.stream_maxlen_approx` 时，provider 不会裁剪 stream，也不会自动删除 group。应监控 Redis 内存和 stream 增长。删除 stream 或 group 前，先停止 consumer 并决定如何处理 pending 消息；删除 pending record 可能导致 `ReceiveOutcome::Gap`。Redis persistence 和 replication 配置需符合业务恢复目标：`Accepted` 不代表已 fsync，Sentinel 切换也可能丢失尚未复制的写入。
 
