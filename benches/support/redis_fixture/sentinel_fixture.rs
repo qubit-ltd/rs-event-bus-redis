@@ -8,7 +8,16 @@
 //! Fresh master/replica and Sentinel quorum for one measured failover.
 
 use std::error::Error;
+use std::io::copy;
+use std::net::Shutdown;
+use std::net::TcpListener;
+use std::net::TcpStream;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::thread;
+use std::thread::JoinHandle;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -23,6 +32,92 @@ pub struct SentinelFixture {
     pub master: RedisNode,
     pub replica: RedisNode,
     sentinels: Vec<RedisNode>,
+    sentinel_proxies: Vec<SentinelConnectionCounter>,
+}
+
+/// Transparent TCP relay that counts provider sockets without counting
+/// Sentinel peer/monitor traffic or observer connections.
+struct SentinelConnectionCounter {
+    address: std::net::SocketAddr,
+    accepted: Arc<AtomicU64>,
+    stop: Arc<AtomicBool>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl SentinelConnectionCounter {
+    fn start(target_port: u16) -> Result<Self, Box<dyn Error>> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        listener.set_nonblocking(true)?;
+        let accepted = Arc::new(AtomicU64::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_accepted = Arc::clone(&accepted);
+        let thread_stop = Arc::clone(&stop);
+        let worker = thread::spawn(move || {
+            let mut connections = Vec::new();
+            while !thread_stop.load(Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((client, _)) => {
+                        thread_accepted.fetch_add(1, Ordering::SeqCst);
+                        connections.push(thread::spawn(move || {
+                            if let Ok(server) = TcpStream::connect(("127.0.0.1", target_port)) {
+                                relay(client, server);
+                            }
+                        }));
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(1));
+                    }
+                    Err(_) => break,
+                }
+            }
+            for connection in connections {
+                let _ = connection.join();
+            }
+        });
+        Ok(Self {
+            address,
+            accepted,
+            stop,
+            worker: Some(worker),
+        })
+    }
+
+    fn endpoint(&self) -> String {
+        self.address.to_string()
+    }
+
+    fn accepted(&self) -> u64 {
+        self.accepted.load(Ordering::SeqCst)
+    }
+}
+
+impl Drop for SentinelConnectionCounter {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        let _ = TcpStream::connect(self.address);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+fn relay(client: TcpStream, server: TcpStream) {
+    let Ok(mut client_reader) = client.try_clone() else {
+        return;
+    };
+    let Ok(mut server_reader) = server.try_clone() else {
+        return;
+    };
+    let mut client_writer = client;
+    let mut server_writer = server;
+    let reverse = thread::spawn(move || {
+        let _ = copy(&mut server_reader, &mut client_writer);
+        let _ = client_writer.shutdown(Shutdown::Write);
+    });
+    let _ = copy(&mut client_reader, &mut server_writer);
+    let _ = server_writer.shutdown(Shutdown::Write);
+    let _ = reverse.join();
 }
 
 impl SentinelFixture {
@@ -38,6 +133,7 @@ impl SentinelFixture {
             master,
             replica,
             sentinels,
+            sentinel_proxies: Vec::new(),
         };
         let deadline = Instant::now() + Duration::from_secs(30);
         while Instant::now() < deadline {
@@ -49,6 +145,12 @@ impl SentinelFixture {
                 .arg("benchmaster")
                 .query::<String>(&mut sentinel);
             if info.contains("master_link_status:up") && quorum.is_ok_and(|reply| reply.starts_with("OK")) {
+                let mut fixture = fixture;
+                fixture.sentinel_proxies = fixture
+                    .sentinels
+                    .iter()
+                    .map(|sentinel| SentinelConnectionCounter::start(sentinel.port))
+                    .collect::<Result<_, _>>()?;
                 return Ok(fixture);
             }
             thread::sleep(Duration::from_millis(100));
@@ -84,11 +186,21 @@ impl SentinelFixture {
 
     /// Returns non-secret provider endpoint options.
     pub fn endpoints(&self) -> String {
-        self.sentinels
+        self.sentinel_proxies
             .iter()
-            .map(|node| format!("127.0.0.1:{}", node.port))
+            .map(SentinelConnectionCounter::endpoint)
             .collect::<Vec<_>>()
             .join(",")
+    }
+
+    /// Reads each Sentinel node independently, excluding observer traffic
+    /// from the measured provider interval.
+    pub fn sentinel_connection_counts(&self) -> Result<Vec<u64>, Box<dyn Error>> {
+        Ok(self
+            .sentinel_proxies
+            .iter()
+            .map(SentinelConnectionCounter::accepted)
+            .collect())
     }
 
     /// Observes promoted-master convergence without issuing any write fence.

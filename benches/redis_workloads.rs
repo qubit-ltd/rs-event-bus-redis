@@ -241,6 +241,8 @@ fn sentinel(
     settings.insert("redis.sentinel.nodes".into(), fixture.endpoints());
     settings.insert("redis.sentinel.service_name".into(), "benchmaster".into());
     let bus = Backend::new(mode, settings)?;
+    let sentinel_before = fixture.sentinel_connection_counts()?;
+    let master_role_before = fixture.master.role_probe_calls()?;
     measure(
         evidence,
         label,
@@ -253,6 +255,15 @@ fn sentinel(
         samples,
         &fixture.master.url(),
         &bus,
+    )?;
+    let sentinel_after = fixture.sentinel_connection_counts()?;
+    let master_role_after = fixture.master.role_probe_calls()?;
+    evidence.record_sentinel_connections(
+        label,
+        mode,
+        round,
+        (&sentinel_before, &sentinel_after),
+        (master_role_before, master_role_after),
     )?;
     // Prepare both observer connections before stopping the master. Their WAIT
     // is deliberately absent: observer sockets do not fence provider writes.

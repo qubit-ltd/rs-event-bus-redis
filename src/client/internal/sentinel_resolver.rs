@@ -7,6 +7,8 @@
 // =============================================================================
 //! Bounded Sentinel discovery without cached master sockets or write replay.
 use std::str::from_utf8;
+#[cfg(feature = "sync")]
+use std::sync::Mutex;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 #[cfg(feature = "sync")]
@@ -32,9 +34,13 @@ use redis::Value;
 use redis::aio::MultiplexedConnection;
 use redis::cmd;
 
+#[cfg(feature = "async")]
+use super::async_connection_cache::AsyncConnectionCache;
 use super::tls::build_client;
 use super::tls::load_certificates;
 use crate::config::RedisEventBusConfig;
+#[cfg(feature = "async")]
+use crate::error::RedisProviderError;
 use crate::internal::TransportPolicy;
 
 /// Finite RESP frame budget for Sentinel discovery and non-receiver master
@@ -45,6 +51,14 @@ const DISCOVERY_MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 pub(crate) struct SentinelResolver {
     /// Configured Sentinel endpoints with independent ACL credentials.
     endpoints: Vec<Client>,
+    /// One healthy idle sync control socket per endpoint. Concurrent lookups
+    /// use temporary connections when the slot is checked out.
+    #[cfg(feature = "sync")]
+    sync_control_connections: Vec<Mutex<Option<Connection>>>,
+    /// Single-flight async Sentinel control sockets, separate from master
+    /// command connections.
+    #[cfg(feature = "async")]
+    async_control_connections: Vec<AsyncConnectionCache>,
     /// Monitored master service name used for discovery queries.
     service: String,
     /// Master ACL and database settings preserved for discovered addresses.
@@ -129,7 +143,12 @@ impl SentinelResolver {
         if let Some(certificates) = &master_certificates {
             build_client(master_connection_info.clone(), Some(certificates))?;
         }
+        let endpoint_count = endpoints.len();
         Ok(Self {
+            #[cfg(feature = "sync")]
+            sync_control_connections: (0..endpoint_count).map(|_| Mutex::new(None)).collect(),
+            #[cfg(feature = "async")]
+            async_control_connections: (0..endpoint_count).map(|_| AsyncConnectionCache::new()).collect(),
             endpoints,
             service: config.sentinel_service().unwrap_or_default().into(),
             master_info,
@@ -165,9 +184,7 @@ impl SentinelResolver {
         for offset in 0..self.endpoints.len() {
             let index = (start + offset) % self.endpoints.len();
             let attempt = (|| {
-                let mut sentinel = open_sync(&self.endpoints[index], self.policy, Some(DISCOVERY_MAX_RESPONSE_BYTES))?;
-                let raw = sentinel.req_command(cmd("SENTINEL").arg("get-master-addr-by-name").arg(&self.service))?;
-                let target = self.target(raw)?;
+                let target = self.query_target_sync(index)?;
                 let mut connection = open_sync(
                     &target,
                     self.policy,
@@ -220,12 +237,7 @@ impl SentinelResolver {
         for offset in 0..self.endpoints.len() {
             let index = (start + offset) % self.endpoints.len();
             let attempt = async {
-                let mut sentinel =
-                    open_async(&self.endpoints[index], self.policy, Some(DISCOVERY_MAX_RESPONSE_BYTES)).await?;
-                let raw = sentinel
-                    .send_packed_command(cmd("SENTINEL").arg("get-master-addr-by-name").arg(&self.service))
-                    .await?;
-                let target = self.target(raw)?;
+                let target = self.query_target_async(index).await?;
                 let mut connection = open_async(
                     &target,
                     self.policy,
@@ -251,6 +263,64 @@ impl SentinelResolver {
             }
         }
         Err(last_error)
+    }
+
+    /// Queries and validates a Sentinel response, returning only a healthy
+    /// connection to the endpoint's bounded idle slot.
+    ///
+    /// # Parameters
+    ///
+    /// - `index`: Endpoint index selected by the resolver's discovery loop.
+    #[cfg(feature = "sync")]
+    fn query_target_sync(&self, index: usize) -> Result<Client, RedisError> {
+        let cached = self.sync_control_connections[index]
+            .lock()
+            .map_err(|_| discovery_error())?
+            .take();
+        let mut sentinel = match cached {
+            Some(connection) => connection,
+            None => open_sync(&self.endpoints[index], self.policy, Some(DISCOVERY_MAX_RESPONSE_BYTES))?,
+        };
+        configure_sync(&sentinel, self.policy.command_timeout)?;
+        let raw = sentinel.req_command(cmd("SENTINEL").arg("get-master-addr-by-name").arg(&self.service))?;
+        let target = self.target(raw)?;
+        if let Ok(mut slot) = self.sync_control_connections[index].lock()
+            && slot.is_none()
+        {
+            *slot = Some(sentinel);
+        }
+        Ok(target)
+    }
+
+    /// Runs one Sentinel query through a single-flight async control socket.
+    /// Redis errors are sanitized at this boundary before returning to the
+    /// resolver's discovery loop.
+    ///
+    /// # Parameters
+    ///
+    /// - `index`: Endpoint index selected by the resolver's discovery loop.
+    #[cfg(feature = "async")]
+    async fn query_target_async(&self, index: usize) -> Result<Client, RedisError> {
+        let cache = &self.async_control_connections[index];
+        let (generation, mut sentinel) = cache
+            .get_or_connect(async {
+                open_async(&self.endpoints[index], self.policy, Some(DISCOVERY_MAX_RESPONSE_BYTES))
+                    .await
+                    .map_err(|_| RedisProviderError::Operation("Sentinel control connection"))
+            })
+            .await
+            .map_err(|_| RedisError::from((ErrorKind::Io, "Sentinel control connection failed")))?;
+        let result = async {
+            let raw = sentinel
+                .send_packed_command(cmd("SENTINEL").arg("get-master-addr-by-name").arg(&self.service))
+                .await?;
+            self.target(raw)
+        }
+        .await;
+        if result.is_err() {
+            cache.invalidate_if_current(generation).await;
+        }
+        result
     }
     /// Builds a target client only from a validated Sentinel host/port reply.
     /// Preserves top-level Redis rejections for sanitized error classification.
@@ -416,6 +486,9 @@ pub(crate) async fn open_async(
 
 #[cfg(all(test, feature = "sync"))]
 mod tests {
+    #[cfg(feature = "async")]
+    use std::time::Duration;
+
     use qubit_event_bus::model::ProviderOptions;
     use redis::ErrorKind;
 
@@ -423,6 +496,38 @@ mod tests {
     use crate::config::RedisEventBusConfig;
     use crate::tests::support::redis_support::scripted_redis::ScriptedRedis;
     use crate::tests::support::redis_support::scripted_redis::Step;
+
+    fn resolver_settings(sentinel: &ScriptedRedis, service: &str) -> ProviderOptions {
+        let node = sentinel
+            .url()
+            .strip_prefix("redis://")
+            .expect("scripted Sentinel URL")
+            .trim_end_matches('/');
+        [
+            ("redis.url".into(), "redis://127.0.0.1:1/0".into()),
+            ("redis.sentinel.nodes".into(), node.into()),
+            ("redis.sentinel.service_name".into(), service.into()),
+            ("redis.connect_timeout_ms".into(), "1000".into()),
+            ("redis.command_timeout_ms".into(), "1000".into()),
+        ]
+        .into()
+    }
+
+    fn discovery_reply(master: &ScriptedRedis) -> Vec<u8> {
+        let address = master
+            .url()
+            .strip_prefix("redis://")
+            .expect("scripted master URL")
+            .trim_end_matches('/');
+        let (host, port) = address.split_once(':').expect("master host and port");
+        format!("*2\r\n${}\r\n{host}\r\n${}\r\n{port}\r\n", host.len(), port.len()).into_bytes()
+    }
+
+    fn role_steps(count: usize) -> Vec<Step> {
+        (0..count)
+            .map(|_| Step::reply("ROLE", b"*1\r\n$6\r\nmaster\r\n"))
+            .collect()
+    }
 
     #[test]
     fn test_invalid_utf8_discovered_host_is_rejected_before_target_connection() {
@@ -462,5 +567,153 @@ mod tests {
                 "master".to_owned()
             ]]
         );
+    }
+
+    #[test]
+    fn test_sync_reuses_healthy_sentinel_socket_but_rediscovers_master_each_time() {
+        const DISCOVERIES: usize = 4;
+        let master = ScriptedRedis::start(role_steps(DISCOVERIES)).expect("scripted master");
+        let sentinel = ScriptedRedis::start(
+            (0..DISCOVERIES)
+                .map(|_| Step::reply("SENTINEL", &discovery_reply(&master)))
+                .collect(),
+        )
+        .expect("scripted Sentinel");
+        let config = RedisEventBusConfig::from_provider_options(&resolver_settings(&sentinel, "master"))
+            .expect("valid settings");
+        let resolver = SentinelResolver::new(&config).expect("resolver");
+
+        for _ in 0..DISCOVERIES {
+            drop(resolver.connect_sync(None).expect("master connection"));
+        }
+
+        sentinel.finish();
+        master.finish();
+        assert_eq!(sentinel.connection_count(), 1, "healthy control socket is reused");
+        assert_eq!(
+            master.connection_count(),
+            DISCOVERIES,
+            "master sockets remain per operation"
+        );
+    }
+
+    #[test]
+    fn test_sync_drops_sentinel_socket_after_server_rejection() {
+        let master = ScriptedRedis::start(role_steps(1)).expect("scripted master");
+        let sentinel = ScriptedRedis::start(vec![
+            Step::reply("SENTINEL", b"-ERR master unavailable\r\n"),
+            Step::reply("SENTINEL", &discovery_reply(&master)),
+        ])
+        .expect("scripted Sentinel");
+        let config = RedisEventBusConfig::from_provider_options(&resolver_settings(&sentinel, "master"))
+            .expect("valid settings");
+        let resolver = SentinelResolver::new(&config).expect("resolver");
+
+        assert!(resolver.connect_sync(None).is_err());
+        drop(resolver.connect_sync(None).expect("recovered master connection"));
+
+        sentinel.finish();
+        master.finish();
+        assert_eq!(sentinel.connection_count(), 2, "a rejected response is not pooled");
+        assert_eq!(master.connection_count(), 1);
+    }
+
+    #[cfg(feature = "async")]
+    #[test]
+    fn test_async_reuses_healthy_sentinel_socket_but_rediscovers_master_each_time() {
+        use futures_lite::future::block_on;
+
+        const DISCOVERIES: usize = 4;
+        let master = ScriptedRedis::start(role_steps(DISCOVERIES)).expect("scripted master");
+        let sentinel = ScriptedRedis::start(
+            (0..DISCOVERIES)
+                .map(|_| Step::reply("SENTINEL", &discovery_reply(&master)))
+                .collect(),
+        )
+        .expect("scripted Sentinel");
+        let config = RedisEventBusConfig::from_provider_options(&resolver_settings(&sentinel, "master"))
+            .expect("valid settings");
+        let resolver = SentinelResolver::new(&config).expect("resolver");
+
+        for _ in 0..DISCOVERIES {
+            drop(block_on(resolver.connect_async(None)).expect("master connection"));
+        }
+
+        sentinel.finish();
+        master.finish();
+        assert_eq!(sentinel.connection_count(), 1, "healthy control socket is reused");
+        assert_eq!(
+            master.connection_count(),
+            DISCOVERIES,
+            "master sockets remain per operation"
+        );
+    }
+
+    #[cfg(feature = "async")]
+    #[test]
+    fn test_async_drops_sentinel_generation_after_server_rejection() {
+        use futures_lite::future::block_on;
+
+        let master = ScriptedRedis::start(role_steps(1)).expect("scripted master");
+        let sentinel = ScriptedRedis::start(vec![
+            Step::reply("SENTINEL", b"-ERR master unavailable\r\n"),
+            Step::reply("SENTINEL", &discovery_reply(&master)),
+        ])
+        .expect("scripted Sentinel");
+        let config = RedisEventBusConfig::from_provider_options(&resolver_settings(&sentinel, "master"))
+            .expect("valid settings");
+        let resolver = SentinelResolver::new(&config).expect("resolver");
+
+        assert!(block_on(resolver.connect_async(None)).is_err());
+        drop(block_on(resolver.connect_async(None)).expect("recovered master connection"));
+
+        sentinel.finish();
+        master.finish();
+        assert_eq!(sentinel.connection_count(), 2, "a rejected generation is not reused");
+        assert_eq!(master.connection_count(), 1);
+    }
+
+    #[cfg(feature = "async")]
+    #[test]
+    fn test_async_canceled_sentinel_query_keeps_multiplexed_connection_usable() {
+        use futures_lite::future::block_on;
+        use futures_lite::future::or;
+
+        let master = ScriptedRedis::start(role_steps(1)).expect("scripted master");
+        let sentinel = ScriptedRedis::start(vec![
+            Step::delayed_reply("SENTINEL", &discovery_reply(&master), Duration::from_millis(100)),
+            Step::reply("SENTINEL", &discovery_reply(&master)),
+        ])
+        .expect("scripted Sentinel");
+        let config = RedisEventBusConfig::from_provider_options(&resolver_settings(&sentinel, "master"))
+            .expect("valid settings");
+        let resolver = SentinelResolver::new(&config).expect("resolver");
+        let (cancel, canceled) = futures_channel::oneshot::channel();
+        let query = std::thread::spawn(move || {
+            block_on(or(
+                async {
+                    let _ = resolver.connect_async(None).await;
+                },
+                async {
+                    let _ = canceled.await;
+                },
+            ));
+            drop(block_on(resolver.connect_async(None)).expect("next query uses a live connection"));
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while sentinel.finish_allow_remaining().is_empty() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(
+            sentinel.finish_allow_remaining().len(),
+            1,
+            "query reached Sentinel before cancellation"
+        );
+        cancel.send(()).expect("cancel signal receiver is alive");
+        query.join().expect("query worker completes");
+
+        sentinel.finish();
+        master.finish();
+        assert_eq!(sentinel.connection_count(), 1);
     }
 }

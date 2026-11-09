@@ -22,6 +22,7 @@ use super::snapshot::Snapshot;
 pub struct Evidence {
     summary: File,
     samples: File,
+    sentinel_connections: File,
 }
 
 impl Evidence {
@@ -36,6 +37,10 @@ impl Evidence {
             .write(true)
             .create_new(true)
             .open(directory.join(format!("{label}-samples.csv")))?;
+        let mut sentinel_connections = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(directory.join(format!("{label}-sentinel-connections.csv")))?;
         writeln!(
             summary,
             "label,scenario,mode,limits,payload_bytes,concurrency,round,attempts,success,errors,unknown,elapsed_ns,events_per_second,p50_ns,p95_ns,p99_ns,new_connections,active_before,active_after,active_peak_sampled,xautoclaim,xreadgroup,error_p50_ns,error_p95_ns,error_p99_ns"
@@ -44,7 +49,39 @@ impl Evidence {
             samples,
             "label,scenario,mode,limits,payload_bytes,concurrency,round,worker,sequence,latency_ns,outcome"
         )?;
-        Ok(Self { summary, samples })
+        writeln!(
+            sentinel_connections,
+            "label,mode,round,sentinel_node,sentinel_new_connections,master_role_probe_calls"
+        )?;
+        Ok(Self {
+            summary,
+            samples,
+            sentinel_connections,
+        })
+    }
+
+    /// Records per-node Sentinel control connections separately from master
+    /// connections. The before/after observations are outside the timed loop.
+    pub fn record_sentinel_connections(
+        &mut self,
+        label: &str,
+        mode: &str,
+        round: usize,
+        sentinel_counts: (&[u64], &[u64]),
+        master_role_counts: (u64, u64),
+    ) -> Result<(), Box<dyn Error>> {
+        let (sentinel_before, sentinel_after) = sentinel_counts;
+        let (master_role_before, master_role_after) = master_role_counts;
+        for (node, (before, after)) in sentinel_before.iter().zip(sentinel_after).enumerate() {
+            writeln!(
+                self.sentinel_connections,
+                "{label},{mode},{round},{node},{},{}",
+                after.saturating_sub(*before),
+                master_role_after.saturating_sub(master_role_before)
+            )?;
+        }
+        self.sentinel_connections.flush()?;
+        Ok(())
     }
 
     /// Writes all samples and nearest-rank successful latency percentiles.

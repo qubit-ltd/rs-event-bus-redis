@@ -102,6 +102,20 @@ impl RedisNode {
         format!("redis://127.0.0.1:{}/", self.port)
     }
 
+    /// Counts candidate-master connection setups from their mandatory ROLE
+    /// probe, excluding Sentinel monitor and benchmark observer sockets.
+    pub fn role_probe_calls(&self) -> Result<u64, Box<dyn Error>> {
+        let mut connection = Client::open(self.url())?.get_connection()?;
+        let info: String = cmd("INFO").arg("commandstats").query(&mut connection)?;
+        info.lines()
+            .find_map(|line| line.strip_prefix("cmdstat_role:calls="))
+            .map(|value| value.split(',').next().unwrap_or(value))
+            .map(str::parse)
+            .transpose()
+            .map(|calls| calls.unwrap_or(0))
+            .map_err(Into::into)
+    }
+
     /// Abruptly stops only the master owned by this fixture.
     pub fn stop(&mut self) -> Result<(), Box<dyn Error>> {
         if let Some(mut child) = self.child.take() {
