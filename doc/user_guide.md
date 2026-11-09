@@ -27,7 +27,7 @@ Registry verification has two modes. `source-candidate` is the default and compa
 
 For discovery, disable defaults and select `features = ["sync", "discovery"]` or `["async", "discovery"]` on the provider, and enable facade `discovery`. For manual registration, provider `features = ["sync"]` or `["async"]` suffice; facade discovery is unnecessary. `async` enables the Redis client's Smol adapter; its futures can be polled by a Smol or Tokio host. The crate does not start a Tokio runtime or spawn a subscription worker; the facade's async runner is polled by the application's executor.
 
-Redis 6.2 or newer is required. The integration tests use Docker to start isolated Redis 6.2, Redis 7, and Sentinel processes.
+Redis 6.2 or newer is required. Integration tests use Docker to start isolated Redis 6.2, Redis 7, and Sentinel processes. The fixture verifies the actual `INFO server` version and logs `backend`, `requested`, and `actual_version`. Its local fallback requires Redis 6.2 or newer; explicit 6.2 and 7 fixtures require the requested version series and fail on a mismatch or failed probe. If Docker startup is unavailable, set `RER_REDIS_6_2_SERVER` or `RER_REDIS_7_SERVER` to the matching local server binary for explicit-version tests, or make a supported `redis-server` available on `PATH` for the default fixture.
 
 ## 2. Register a codec for portable payloads
 

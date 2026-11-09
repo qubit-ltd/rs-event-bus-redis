@@ -27,7 +27,7 @@ Registry 验证有两种模式。默认 `source-candidate` 会将输入的 provi
 
 采用自动发现时，provider 关闭默认 feature 后应选择 `["sync", "discovery"]` 或 `["async", "discovery"]`，facade 也须启用 `discovery`。采用手动注册时，provider 只需 `["sync"]` 或 `["async"]`，facade 无须启用发现功能。`async` 可以使用 Redis client 的 Smol adapter，也能在 Tokio host 中运行。crate 不会启动 Tokio runtime 或生成订阅 worker；异步 facade 的 runner 由应用现有 executor 驱动。
 
-Redis 需要 6.2 或更高版本。集成测试使用 Docker 启动隔离的 Redis 6.2、Redis 7 和 Sentinel 进程。
+Redis 需要 6.2 或更高版本。集成测试使用 Docker 启动隔离的 Redis 6.2、Redis 7 和 Sentinel 进程。fixture 会校验 `INFO server` 返回的实际版本，并输出 `backend`、`requested` 和 `actual_version`。本地 fallback 至少需要 Redis 6.2；显式 6.2/7 fixture 必须匹配所请求的版本系列，版本不符或探测失败都会报错。Docker 无法启动时，显式版本测试可通过 `RER_REDIS_6_2_SERVER` 或 `RER_REDIS_7_SERVER` 指定对应本地二进制；默认 fixture 则要求 `PATH` 中的 `redis-server` 达到支持版本。
 
 ## 2. 为跨进程 payload 注册 codec
 

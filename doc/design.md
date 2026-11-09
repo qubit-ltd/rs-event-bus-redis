@@ -56,6 +56,8 @@ does not change the schedule. An incomplete round does not advance the deadline.
 
 Zero timeout permits at most one claim, one own-pending read and one new-message read, all without BLOCK, with early delivery/Gap allowed; it skips tombstone scans and may quarantine one malformed record. `Duration::MAX` uses finite BLOCK intervals of at most one second. Finite deadlines stop additional recovery work and bound the chosen BLOCK; they do not force an already-started command to stop. Recovery preserves active deduplication, live records deferred behind gaps and Redis 6.2 tombstone repair.
 
+The shared response parser validates the `XAUTOCLAIM` cursor and every returned stream entry ID before producing a parsed result. Invalid IDs make the receive outcome unknown; they do not advance the saved recovery cursor or trigger acknowledgement or quarantine. Reconnection therefore resumes from the last valid cursor. Redis 6.2 nil tombstones remain supported.
+
 ## Connection policy and resource lifecycle
 
 | Provider option | Default | Inclusive range / relation |

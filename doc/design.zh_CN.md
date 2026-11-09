@@ -50,6 +50,8 @@ token 保存 Redis 坐标、receiver 身份和共享进度。终结路径为 Ope
 
 零超时最多进行一次 claim、一次本 consumer pending 查询和一次新消息查询，均不带 BLOCK，可因 Message/Gap 提前返回；跳过 tombstone 扫描，允许隔离一条畸形记录。`Duration::MAX` 通过不超过一秒的有限 BLOCK 循环等待。有限截止时间停止新增恢复工作并限制所选 BLOCK，不能强制终止已发出的命令。恢复保留活跃去重、Gap 后延后交付的有效记录及 Redis 6.2 tombstone 修复。
 
+共享响应 parser 会在生成解析结果前校验 `XAUTOCLAIM` 游标及所有返回的 stream entry ID。非法 ID 会使 receive 结果变为未知，不会推进已保存的恢复游标，也不会触发 ACK 或隔离；重连后会从最后一个有效游标继续。继续兼容 Redis 6.2 的 nil tombstone。
+
 ## 连接策略与资源生命周期
 
 | Provider option | 默认值 | 闭区间 / 关联限制 |
