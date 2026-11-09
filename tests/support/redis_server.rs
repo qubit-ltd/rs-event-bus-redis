@@ -21,9 +21,126 @@ use std::thread::sleep;
 use std::time::Duration;
 use std::time::Instant;
 
+use redis::Client;
+use redis::cmd;
+
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
 const IO_TIMEOUT: Duration = Duration::from_millis(250);
 const RETRY_DELAY: Duration = Duration::from_millis(100);
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum VersionRequirement {
+    Supported,
+    Series(u64, Option<u64>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RedisVersion {
+    major: u64,
+    minor: u64,
+    patch: u64,
+    suffix: Option<String>,
+}
+
+impl RedisVersion {
+    pub(crate) fn parse_info(info: &str) -> Result<Self, Box<dyn Error>> {
+        let mut found = None;
+        for line in info.lines().filter(|line| line.starts_with("redis_version:")) {
+            if found.is_some() {
+                return Err("INFO server contains repeated redis_version fields".into());
+            }
+            let value = line
+                .strip_prefix("redis_version:")
+                .ok_or("invalid redis_version field")?;
+            let (numbers, suffix) = value
+                .split_once('-')
+                .map_or((value, None), |(head, tail)| (head, Some(tail)));
+            if suffix.is_some_and(str::is_empty) {
+                return Err("Redis version suffix is empty".into());
+            }
+            let mut parts = numbers.split('.');
+            let major = parse_version_part(parts.next())?;
+            let minor = parse_version_part(parts.next())?;
+            let patch = parse_version_part(parts.next())?;
+            if parts.next().is_some() {
+                return Err("Redis version must have three numeric components".into());
+            }
+            found = Some(Self {
+                major,
+                minor,
+                patch,
+                suffix: suffix.map(str::to_owned),
+            });
+        }
+        found.ok_or_else(|| "INFO server is missing redis_version".into())
+    }
+}
+
+fn parse_version_part(part: Option<&str>) -> Result<u64, Box<dyn Error>> {
+    let digits = part.ok_or("Redis version must have three numeric components")?;
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err("Redis version components must be decimal numbers".into());
+    }
+    Ok(digits.parse()?)
+}
+
+impl VersionRequirement {
+    pub(crate) fn matches(self, version: &RedisVersion) -> bool {
+        match self {
+            Self::Supported => version.major > 6 || (version.major == 6 && version.minor >= 2),
+            Self::Series(major, Some(minor)) => version.major == major && version.minor == minor,
+            Self::Series(major, None) => version.major == major,
+        }
+    }
+}
+
+fn version_requirement_for_tag(tag: &str) -> Result<VersionRequirement, Box<dyn Error>> {
+    let numeric = tag.split('-').next().ok_or("empty Redis image tag")?;
+    let mut parts = numeric.split('.');
+    let major = parse_version_part(parts.next())?;
+    let minor = parts.next().map(|part| parse_version_part(Some(part))).transpose()?;
+    if parts.next().is_some() {
+        return Err(format!("unsupported Redis image version tag: {tag}").into());
+    }
+    Ok(VersionRequirement::Series(major, minor))
+}
+
+impl std::fmt::Display for RedisVersion {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}.{}.{}", self.major, self.minor, self.patch)?;
+        if let Some(suffix) = &self.suffix {
+            write!(formatter, "-{suffix}")?;
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn probe_version_at(address: SocketAddr) -> Result<RedisVersion, Box<dyn Error>> {
+    let info = format!("redis://{address}/").parse::<redis::ConnectionInfo>()?;
+    let redis_settings = info.redis_settings().clone().set_skip_set_lib_name();
+    let client = Client::open(info.set_redis_settings(redis_settings))?;
+    let mut connection = client.get_connection_with_timeout(CONNECT_TIMEOUT)?;
+    connection.set_write_timeout(Some(IO_TIMEOUT))?;
+    connection.set_read_timeout(Some(IO_TIMEOUT))?;
+    let info: String = cmd("INFO").arg("server").query(&mut connection)?;
+    RedisVersion::parse_info(&info)
+}
+
+pub(crate) fn validate_version_at(
+    address: SocketAddr,
+    requirement: VersionRequirement,
+    backend: &str,
+    requested: &str,
+) -> Result<RedisVersion, Box<dyn Error>> {
+    let version = probe_version_at(address)?;
+    if !requirement.matches(&version) {
+        return Err(format!(
+            "Redis version mismatch: backend={backend}, requested={requested}, expected={requirement:?}, actual={version}"
+        )
+        .into());
+    }
+    Ok(version)
+}
 
 /// Repeatedly sends a bounded RESP PING until the loopback Redis endpoint is
 /// ready.
@@ -117,6 +234,11 @@ enum RedisBackend {
     },
 }
 
+enum DockerStartError {
+    Unavailable(String),
+    Fixture(Box<dyn Error>),
+}
+
 impl RedisServer {
     /// Starts an owned Redis 7 container with an ephemeral local host port.
     ///
@@ -124,17 +246,26 @@ impl RedisServer {
     /// returns port-bind, Docker, output-decoding, or readiness failure
     /// errors.
     pub fn start() -> Result<Self, Box<dyn Error>> {
-        match Self::start_version("7-alpine") {
+        match Self::start_docker("7-alpine", VersionRequirement::Supported) {
             Ok(server) => Ok(server),
-            Err(_) => Self::start_local(),
+            Err(DockerStartError::Fixture(error)) => Err(error),
+            Err(DockerStartError::Unavailable(docker_error)) => Self::start_local_with_binary(
+                OsString::from("redis-server"),
+                VersionRequirement::Supported,
+                "Supported (>=6.2)",
+            )
+            .map_err(|local_error| {
+                format!("Docker Redis 7 unavailable ({docker_error}); local Redis fallback failed: {local_error}")
+                    .into()
+            }),
         }
     }
 
-    fn start_local() -> Result<Self, Box<dyn Error>> {
-        Self::start_local_with_binary(OsString::from("redis-server"))
-    }
-
-    fn start_local_with_binary(server_binary: OsString) -> Result<Self, Box<dyn Error>> {
+    fn start_local_with_binary(
+        server_binary: OsString,
+        requirement: VersionRequirement,
+        requested: &str,
+    ) -> Result<Self, Box<dyn Error>> {
         let port = TcpListener::bind(("127.0.0.1", 0))?.local_addr()?.port();
         let directory = tempfile::tempdir()?;
         let child = start_local_process(port, directory.path(), &server_binary)?;
@@ -148,6 +279,7 @@ impl RedisServer {
             },
         };
         wait_until_ready(server.url(), Duration::from_secs(5))?;
+        server.validate_version(requirement, "local", requested)?;
         Ok(server)
     }
 
@@ -159,26 +291,49 @@ impl RedisServer {
     /// errors. The partially created fixture cleans up its container if
     /// readiness fails.
     pub fn start_version(image_tag: &str) -> Result<Self, Box<dyn Error>> {
-        let image = format!("redis:{image_tag}");
-        match start_mapped_container(&["run", "-d"], &[&image, "redis-server", "--appendonly", "yes"], 6379) {
-            Ok((container_id, port)) => {
-                let server = Self {
-                    backend: RedisBackend::Docker {
-                        container_id,
-                        url: format!("redis://127.0.0.1:{port}/"),
-                    },
-                };
-                wait_until_ready(server.url(), Duration::from_secs(5))
-                    .map_err(|error| format!("Redis container did not become ready: {error}"))?;
-                Ok(server)
-            }
-            Err(docker_error) => {
+        let requirement = version_requirement_for_tag(image_tag)?;
+        match Self::start_docker(image_tag, requirement) {
+            Ok(server) => Ok(server),
+            Err(DockerStartError::Fixture(error)) => Err(error),
+            Err(DockerStartError::Unavailable(docker_error)) => {
                 let server_binary = local_server_for_image(image_tag)
                     .ok_or_else(|| format!("{docker_error}; no local Redis binary configured for {image_tag}"))?;
-                Self::start_local_with_binary(server_binary)
+                Self::start_local_with_binary(server_binary, requirement, image_tag)
                     .map_err(|local_error| format!("{docker_error}; local Redis fallback failed: {local_error}").into())
             }
         }
+    }
+
+    fn start_docker(image_tag: &str, requirement: VersionRequirement) -> Result<Self, DockerStartError> {
+        let image = format!("redis:{image_tag}");
+        let (container_id, port) =
+            start_mapped_container(&["run", "-d"], &[&image, "redis-server", "--appendonly", "yes"], 6379)
+                .map_err(|error| DockerStartError::Unavailable(error.to_string()))?;
+        let server = Self {
+            backend: RedisBackend::Docker {
+                container_id,
+                url: format!("redis://127.0.0.1:{port}/"),
+            },
+        };
+        wait_until_ready(server.url(), Duration::from_secs(5)).map_err(|error| {
+            DockerStartError::Fixture(format!("Redis container did not become ready: {error}").into())
+        })?;
+        server
+            .validate_version(requirement, "docker", image_tag)
+            .map_err(DockerStartError::Fixture)?;
+        Ok(server)
+    }
+
+    fn validate_version(
+        &self,
+        requirement: VersionRequirement,
+        backend: &str,
+        requested: &str,
+    ) -> Result<(), Box<dyn Error>> {
+        let address = loopback_address(self.url())?;
+        let version = validate_version_at(address, requirement, backend, requested)?;
+        eprintln!("Redis fixture: backend={backend}, requested={requested}, actual_version={version}");
+        Ok(())
     }
 
     /// Restarts this fixture's owned Redis container and waits for readiness.
@@ -342,7 +497,17 @@ fn shutdown_local_process(child: &mut Child, url: &str) -> Result<(), Box<dyn Er
 
 #[cfg(test)]
 mod tests {
+    use std::net::TcpListener;
+    use std::process::Command;
+    use std::process::Stdio;
+    use std::time::Duration;
+
+    use super::RedisBackend;
+    use super::RedisServer;
+    use super::VersionRequirement;
     use super::is_port_allocation_conflict;
+    use super::start_local_process;
+    use super::wait_until_ready;
 
     #[test]
     fn test_port_allocation_conflict_is_retryable() {
@@ -354,5 +519,62 @@ mod tests {
     #[test]
     fn test_other_docker_failures_are_not_port_allocation_conflicts() {
         assert!(!is_port_allocation_conflict("Unable to find image redis:latest"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_local_fallback_diagnostic_preserves_requested_image_tag() {
+        if Command::new("redis-server").arg("--version").output().is_err() {
+            return;
+        }
+        let error = match RedisServer::start_local_with_binary(
+            std::ffi::OsString::from("redis-server"),
+            VersionRequirement::Series(999, Some(1)),
+            "6.2-alpine",
+        ) {
+            Ok(_) => panic!("fixture cannot satisfy an intentionally impossible version series"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("requested=6.2-alpine"),
+            "local fallback diagnostic lost its image tag: {error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_local_fixture_version_failure_reaps_owned_process() -> Result<(), Box<dyn std::error::Error>> {
+        if Command::new("redis-server").arg("--version").output().is_err() {
+            return Ok(());
+        }
+        let port = TcpListener::bind(("127.0.0.1", 0))?.local_addr()?.port();
+        let directory = tempfile::tempdir()?;
+        let binary = std::ffi::OsString::from("redis-server");
+        let child = start_local_process(port, directory.path(), &binary)?;
+        let process_id = child.id();
+        let server = RedisServer {
+            backend: RedisBackend::Local {
+                child,
+                directory,
+                port,
+                url: format!("redis://127.0.0.1:{port}/"),
+                server_binary: binary,
+            },
+        };
+        wait_until_ready(server.url(), Duration::from_secs(5))?;
+        let error = server
+            .validate_version(VersionRequirement::Series(6, Some(2)), "local", "6.2-alpine")
+            .expect_err("local Redis 7 must fail the explicit Redis 6.2 check");
+        assert!(error.to_string().contains("actual=7."));
+        drop(server);
+        let status = Command::new("kill")
+            .args(["-0", &process_id.to_string()])
+            .stderr(Stdio::null())
+            .status()?;
+        assert!(
+            !status.success(),
+            "Redis child {process_id} remained alive after fixture drop"
+        );
+        Ok(())
     }
 }
