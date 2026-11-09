@@ -116,6 +116,11 @@ impl std::fmt::Display for RedisVersion {
 }
 
 pub(crate) fn probe_version_at(address: SocketAddr) -> Result<RedisVersion, Box<dyn Error>> {
+    let info = probe_server_info_at(address)?;
+    RedisVersion::parse_info(&info)
+}
+
+fn probe_server_info_at(address: SocketAddr) -> Result<String, Box<dyn Error>> {
     let info = format!("redis://{address}/").parse::<redis::ConnectionInfo>()?;
     let redis_settings = info.redis_settings().clone().set_skip_set_lib_name();
     let client = Client::open(info.set_redis_settings(redis_settings))?;
@@ -123,7 +128,16 @@ pub(crate) fn probe_version_at(address: SocketAddr) -> Result<RedisVersion, Box<
     connection.set_write_timeout(Some(IO_TIMEOUT))?;
     connection.set_read_timeout(Some(IO_TIMEOUT))?;
     let info: String = cmd("INFO").arg("server").query(&mut connection)?;
-    RedisVersion::parse_info(&info)
+    Ok(info)
+}
+
+fn probe_process_id_at(address: SocketAddr) -> Result<u32, Box<dyn Error>> {
+    let info = probe_server_info_at(address)?;
+    let process_id = info
+        .lines()
+        .find_map(|line| line.strip_prefix("process_id:"))
+        .ok_or("Redis INFO omitted process_id")?;
+    Ok(process_id.parse()?)
 }
 
 pub(crate) fn validate_version_at(
@@ -161,6 +175,49 @@ pub(crate) fn wait_until_ready(url: &str, budget: Duration) -> Result<(), Box<dy
         };
         sleep(RETRY_DELAY.min(remaining));
     }
+}
+
+fn wait_until_local_ready(child: &mut Child, url: &str, budget: Duration) -> Result<(), Box<dyn Error>> {
+    let address = loopback_address(url)?;
+    let deadline = Instant::now()
+        .checked_add(budget)
+        .ok_or("Redis readiness deadline overflow")?;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AddrInUse,
+                format!("local Redis child exited before readiness: {status}"),
+            )
+            .into());
+        }
+        if ping_once(address, deadline) {
+            match probe_process_id_at(address) {
+                Ok(process_id) if process_id == child.id() => return Ok(()),
+                Ok(process_id) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::AddrInUse,
+                        format!(
+                            "local Redis port {} belongs to process {process_id}, not child {}",
+                            address.port(),
+                            child.id()
+                        ),
+                    )
+                    .into());
+                }
+                Err(_) => {}
+            }
+        }
+        let Some(remaining) = remaining_until(deadline) else {
+            return Err("local Redis readiness deadline expired before owned PONG".into());
+        };
+        sleep(RETRY_DELAY.min(remaining));
+    }
+}
+
+fn is_local_port_collision(error: &(dyn Error + 'static)) -> bool {
+    error
+        .downcast_ref::<std::io::Error>()
+        .is_some_and(|error| error.kind() == std::io::ErrorKind::AddrInUse)
 }
 
 fn remaining_until(deadline: Instant) -> Option<Duration> {
@@ -266,10 +323,32 @@ impl RedisServer {
         requirement: VersionRequirement,
         requested: &str,
     ) -> Result<Self, Box<dyn Error>> {
-        let port = TcpListener::bind(("127.0.0.1", 0))?.local_addr()?.port();
+        let mut collision = None;
+        for _ in 0..10 {
+            let port = TcpListener::bind(("127.0.0.1", 0))?.local_addr()?.port();
+            match Self::start_local_at_port(server_binary.clone(), port, requirement, requested) {
+                Ok(server) => return Ok(server),
+                Err(error) if is_local_port_collision(error.as_ref()) => collision = Some(error.to_string()),
+                Err(error) => return Err(error),
+            }
+        }
+        Err(format!(
+            "local Redis could not claim an ephemeral port after 10 attempts: {}",
+            collision.unwrap_or_else(|| "unknown port collision".into())
+        )
+        .into())
+    }
+
+    fn start_local_at_port(
+        server_binary: OsString,
+        port: u16,
+        requirement: VersionRequirement,
+        requested: &str,
+    ) -> Result<Self, Box<dyn Error>> {
         let directory = tempfile::tempdir()?;
         let child = start_local_process(port, directory.path(), &server_binary)?;
-        let server = Self {
+        let process_id = child.id();
+        let mut server = Self {
             backend: RedisBackend::Local {
                 child,
                 directory,
@@ -278,7 +357,14 @@ impl RedisServer {
                 server_binary,
             },
         };
-        wait_until_ready(server.url(), Duration::from_secs(5))?;
+        let url = server.url().to_owned();
+        let RedisBackend::Local { child, .. } = &mut server.backend else {
+            return Err("expected local Redis process".into());
+        };
+        wait_until_local_ready(child, &url, Duration::from_secs(5))?;
+        if child.id() != process_id {
+            return Err("local Redis child identity changed during startup".into());
+        }
         server.validate_version(requirement, "local", requested)?;
         Ok(server)
     }
@@ -372,7 +458,7 @@ impl RedisServer {
             } => {
                 shutdown_local_process(child, url)?;
                 *child = start_local_process(*port, directory.path(), server_binary)?;
-                wait_until_ready(url, Duration::from_secs(10))?;
+                wait_until_local_ready(child, url, Duration::from_secs(10))?;
             }
         }
         Ok(())
@@ -575,6 +661,34 @@ mod tests {
             !status.success(),
             "Redis child {process_id} remained alive after fixture drop"
         );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_local_fixture_does_not_claim_another_process_on_occupied_port() -> Result<(), Box<dyn std::error::Error>> {
+        if Command::new("redis-server").arg("--version").output().is_err() {
+            return Ok(());
+        }
+        let owner = RedisServer::start_local_with_binary(
+            std::ffi::OsString::from("redis-server"),
+            VersionRequirement::Supported,
+            "Supported (>=6.2)",
+        )?;
+        let RedisBackend::Local { port, .. } = &owner.backend else {
+            return Err("expected local Redis owner".into());
+        };
+        let collision = RedisServer::start_local_at_port(
+            std::ffi::OsString::from("redis-server"),
+            *port,
+            VersionRequirement::Supported,
+            "Supported (>=6.2)",
+        );
+        assert!(
+            collision.is_err(),
+            "fixture must reject a Redis process it did not start"
+        );
+        drop(owner);
         Ok(())
     }
 }
