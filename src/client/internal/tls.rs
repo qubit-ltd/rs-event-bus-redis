@@ -34,8 +34,11 @@ const MAX_TLS_FILE_BYTES: u64 = 1_048_576;
 ///
 /// # Returns
 ///
-/// `Some` contains the bounded PEM bytes for redis-rs; `None` selects system
-/// roots and no client identity. No file content or path is retained in errors.
+/// `Some` contains the bounded PEM bytes for redis-rs; `None` leaves the TLS
+/// dependency's default root selection unchanged and configures no client
+/// identity. With this crate's default feature graph, TLS uses built-in WebPKI
+/// roots. Downstream feature unification can enable additional root sources.
+/// No file content or path is retained in errors.
 ///
 /// # Errors
 ///
@@ -305,7 +308,8 @@ mod tests {
         );
     }
 
-    /// Leaves system roots selected when no custom TLS material is configured.
+    /// Leaves the dependency's default roots selected with no client identity
+    /// when no custom TLS material is configured.
     #[test]
     fn test_tls_certificates_are_optional() {
         assert!(

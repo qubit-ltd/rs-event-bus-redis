@@ -1,0 +1,25 @@
+# Server
+redis_version:7.0.15
+redis_git_sha1:00000000
+redis_git_dirty:0
+redis_build_id:d064f9f48c901a92
+redis_mode:standalone
+os:Linux 6.8.0-147-generic x86_64
+arch_bits:64
+monotonic_clock:POSIX clock_gettime
+multiplexing_api:epoll
+atomicvar_api:c11-builtin
+gcc_version:13.3.0
+process_id:3293396
+process_supervised:no
+run_id:ed8a8ebbbb1eb4b6b187d5ec134033019c76e90a
+tcp_port:40195
+server_time_usec:1794241216483661
+uptime_in_seconds:0
+uptime_in_days:0
+hz:10
+configured_hz:10
+lru_clock:15856320
+executable:/data/working/qubit/.worktrees/rs-event-bus-redis/tls-docs-20261109/redis-server
+config_file:/tmp/.tmpmg0uCS/redis.conf
+io_threads_active:0

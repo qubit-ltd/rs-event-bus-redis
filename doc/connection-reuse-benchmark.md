@@ -2,6 +2,12 @@
 
 Follow-up measurements against the integrated redesign source are in the [2026-10-03 redesign benchmark](redis-redesign-benchmark-2026-10-03.md). Its raw evidence is retained under `/tmp/redis-event-bus-redesign-benchmark-20261003`.
 
+## 2026-11-09 Sentinel control connection comparison
+
+A three-round sync/async Sentinel comparison (eight publish samples per round) counted sockets at a transparent Sentinel TCP proxy and candidate-master connections using Redis `ROLE` command statistics. Per mode and round, Sentinel connections fell from 18 to 1 while master `ROLE` probes remained 18. Thus Sentinel control handshakes fell by 17 per measured round; per-operation Sentinel discovery and fresh master connections remain. Normal publish rounds were 8/8 successful. Failover recovery rounds had one expected error/unknown result, followed by successful post-recovery publishes.
+
+Throughput samples varied substantially on the loaded host, so this run supports the connection-count reduction but does not establish a stable latency or throughput gain. Full raw samples, summaries, connection counts and Redis snapshots are in [the 2026-11-09 before/after evidence](connection-reuse-artifacts/rer-20261109/). Reproduction details and the measured ranges are in [implementation evidence](implementation-evidence-ee29363d.md).
+
 ## 2026-10-09 receive/recovery spot measurements
 
 The current uncommitted implementation was measured on x86_64 Linux with Rust 1.94.0 and owned Redis 7.4.8 fixtures. The source checkout was based on `ba8d26686f0ff6c059621bed6cf0d4284a4ce095`, with `rs-event-bus` fixed at `387f16df9a1b380946dd559ad7632c66b8c19fa1` and `rs-task` at `87148632e07ce4136ca1db5eef78db3365f2c27a`. Raw per-attempt CSV and summaries are under `/tmp/redis-provider-improvements-benchmark`.

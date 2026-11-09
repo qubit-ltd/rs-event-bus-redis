@@ -2,6 +2,12 @@
 
 集成重构源码的补充测量见[2026-10-03 重构基准](redis-redesign-benchmark-2026-10-03.zh_CN.md)。原始证据保存在 `/tmp/redis-event-bus-redesign-benchmark-20261003`。
 
+## 2026-11-09 Sentinel 控制连接对照
+
+本次进行了三轮 sync/async Sentinel 对照，每轮 8 次 publish；通过 Sentinel 透明 TCP 代理统计 socket，并通过 Redis `ROLE` 命令统计候选 master 建连。每种模式每轮的 Sentinel 连接数从 18 降至 1，master `ROLE` 探测仍为 18 次。因此每轮少建 17 条 Sentinel 控制连接；每次操作仍执行 Sentinel 发现并新建 master 连接。正常 publish 每轮均为 8/8 成功。故障切换恢复轮各有一次预期的 error/unknown，随后恢复后的 publish 成功。
+
+主机负载较高，吞吐样本波动明显；本次数据支持连接数下降，不足以证明稳定的延迟或吞吐收益。逐次样本、summary、连接计数及 Redis 快照见[2026-11-09 前后原始证据](connection-reuse-artifacts/rer-20261109/)，复现命令和测量范围见[实施证据](implementation-evidence-ee29363d.md)。
+
 ## 2026-10-09 接收/恢复抽样测量
 
 当前未提交实现运行于 x86_64 Linux、Rust 1.94.0 和独立 Redis 7.4.8 fixture。源码 checkout 基于 `ba8d26686f0ff6c059621bed6cf0d4284a4ce095`，`rs-event-bus` 固定为 `387f16df9a1b380946dd559ad7632c66b8c19fa1`，`rs-task` 固定为 `87148632e07ce4136ca1db5eef78db3365f2c27a`。逐次原始 CSV 和 summary 位于 `/tmp/redis-provider-improvements-benchmark`。
