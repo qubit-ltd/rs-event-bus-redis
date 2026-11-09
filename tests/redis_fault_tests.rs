@@ -359,7 +359,7 @@ fn test_sync_subscribe_retries_transport_loss_and_reports_reconnection_failure()
         let bus = sync_bus(&server);
         match bus.subscribe(request()) {
             Ok(mut subscription) if !refuse => subscription.close().expect("close succeeds"),
-            Err(error) if refuse => assert_failure(error, "subscribe", "transport", Some(true)),
+            Err(error) if refuse => assert_failure(error, "subscribe", "outcome_unknown", Some(false)),
             _ => panic!("unexpected subscribe result for refuse={refuse}"),
         }
         let commands = server.finish();
@@ -386,7 +386,7 @@ fn test_async_subscribe_retries_transport_loss_and_reports_reconnection_failure(
             let bus = async_bus(&server).await;
             match bus.subscribe(request()).await {
                 Ok(mut subscription) if !refuse => subscription.close().await.expect("close succeeds"),
-                Err(error) if refuse => assert_failure(error, "subscribe", "transport", Some(true)),
+                Err(error) if refuse => assert_failure(error, "subscribe", "outcome_unknown", Some(false)),
                 _ => panic!("unexpected subscribe result for refuse={refuse}"),
             }
             let commands = server.finish();

@@ -190,10 +190,13 @@ impl AsyncEventBusSpi for AsyncRedisEventBus {
     ///
     /// Returns an SPI error if subscription options are invalid, an existing
     /// group's cursor conflicts with an explicit start position, or Redis
-    /// cannot open a connection or create the requested consumer group. If
-    /// the first create result is unknown and its retry reports an existing
-    /// group, an explicit start position under the default policy returns
-    /// `subscribe/outcome_unknown` with `retryable=Some(false)`.
+    /// cannot open a connection or create the requested consumer group.
+    /// Only the RESP `+OK` reply confirms `XGROUP CREATE`; malformed replies
+    /// are reported as `subscribe/outcome_unknown` without another attempt.
+    /// After a sent command has an unknown result, a retry connection failure
+    /// or rejection also remains `subscribe/outcome_unknown`. The single
+    /// retry can succeed on `+OK`, or on `BUSYGROUP` when the request accepts
+    /// the existing cursor (`New` or explicit `resume`).
     fn subscribe<'a>(
         &'a self,
         request: SpiSubscriptionRequest,
@@ -250,45 +253,74 @@ impl AsyncEventBusSpi for AsyncRedisEventBus {
                 .get_async_connection(CommandClass::General)
                 .await
                 .map_err(|error| spi_error("subscribe", Some(&topic), error))?;
-            let result: Result<(), RedisError> = cmd("XGROUP")
+            let mut create_command = cmd("XGROUP");
+            create_command
                 .arg("CREATE")
                 .arg(&key)
                 .arg(&group)
                 .arg(start)
-                .arg("MKSTREAM")
-                .query_async(&mut connection)
-                .await;
+                .arg("MKSTREAM");
+            let (result, malformed_reply): (Result<(), RedisError>, bool) =
+                match connection.send_packed_command(&create_command).await {
+                    Ok(Value::Okay) => (Ok(()), false),
+                    Ok(Value::ServerError(error)) => (Err(error.into()), false),
+                    Ok(_) => {
+                        self.client.invalidate_async_connection(connection.generation).await;
+                        (Ok(()), true)
+                    }
+                    Err(error) if error.is_io_error() || error.is_timeout() => (Err(error), false),
+                    Err(error) => {
+                        self.client.invalidate_async_connection(connection.generation).await;
+                        (Err(error), true)
+                    }
+                };
             let first_result_unknown = result
                 .as_ref()
                 .is_err_and(|error| error.is_io_error() || error.is_timeout());
-            let result = if first_result_unknown {
+            let (result, malformed_reply) = if malformed_reply {
+                (result, true)
+            } else if first_result_unknown {
                 self.client.invalidate_async_connection(connection.generation).await;
                 drop(connection);
-                let mut retry_connection = self
-                    .client
-                    .get_async_connection(CommandClass::General)
-                    .await
-                    .map_err(|error| spi_error("subscribe", Some(&topic), error))?;
-                let retry_result: Result<(), RedisError> = cmd("XGROUP")
-                    .arg("CREATE")
-                    .arg(&key)
-                    .arg(&group)
-                    .arg(start)
-                    .arg("MKSTREAM")
-                    .query_async(&mut retry_connection)
-                    .await;
-                if retry_result
-                    .as_ref()
-                    .is_err_and(|error| error.is_io_error() || error.is_timeout())
-                {
+                let mut retry_connection =
                     self.client
-                        .invalidate_async_connection(retry_connection.generation)
-                        .await;
-                }
-                retry_result
+                        .get_async_connection(CommandClass::General)
+                        .await
+                        .map_err(|_| {
+                            spi_error(
+                                "subscribe",
+                                Some(&topic),
+                                RedisProviderError::OutcomeUnknown { operation: "subscribe" },
+                            )
+                        })?;
+                let (retry_result, malformed_reply) = match retry_connection.send_packed_command(&create_command).await
+                {
+                    Ok(Value::Okay) => (Ok(()), false),
+                    Ok(Value::ServerError(error)) => (Err(error.into()), false),
+                    Ok(_) => {
+                        self.client
+                            .invalidate_async_connection(retry_connection.generation)
+                            .await;
+                        (Ok(()), true)
+                    }
+                    Err(error) => {
+                        self.client
+                            .invalidate_async_connection(retry_connection.generation)
+                            .await;
+                        (Err(error), true)
+                    }
+                };
+                (retry_result, malformed_reply)
             } else {
-                result
+                (result, false)
             };
+            if malformed_reply {
+                return Err(spi_error(
+                    "subscribe",
+                    Some(&topic),
+                    RedisProviderError::OutcomeUnknown { operation: "subscribe" },
+                ));
+            }
             match result {
                 Ok(()) => {}
                 Err(error) if error.code() == Some("BUSYGROUP") => {
@@ -305,6 +337,13 @@ impl AsyncEventBusSpi for AsyncRedisEventBus {
                     }
                 }
                 Err(error) => {
+                    if first_result_unknown {
+                        return Err(spi_error(
+                            "subscribe",
+                            Some(&topic),
+                            RedisProviderError::OutcomeUnknown { operation: "subscribe" },
+                        ));
+                    }
                     return Err(spi_error(
                         "subscribe",
                         Some(&topic),
