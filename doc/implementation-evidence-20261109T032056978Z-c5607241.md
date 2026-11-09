@@ -17,6 +17,8 @@
 3. Sync and async recovery tests verify pre-send failures keep the original transport category, malformed replies discard/invalidate the connection, receiver capacity is released, and a subsequent healthy subscribe succeeds. Real Redis reply-loss tests and fault assertions verify the durable group/cursor behavior.
 4. Rustdoc, English and Chinese user guides, design documents, and affected README descriptions were updated. No public API, dependency, wire format, group name, or cursor semantics were changed.
 
+The regression tests were first run against the pre-fix implementation. The non-`+OK` RESP cases incorrectly returned successful subscriptions, and the retry-rejection cases returned the second attempt's Redis error instead of preserving `outcome_unknown`. After the adapter changes, those same assertions passed in sync-only, async-only, and default/all-feature runs.
+
 ## Validation record
 
 Redis-backed commands used the project-supported `RER_REDIS_6_2_SERVER=/tmp/codex-rer-20261109-redis-6.2.17/src/redis-server` and `RER_REDIS_7_SERVER=/usr/bin/redis-server` local server fallback because Docker socket access is unavailable in this environment. Redis 6.2.17 was built from the pre-existing `/tmp/redis-6.2.17.tar.gz` archive into the task-owned `/tmp/codex-rer-20261109-redis-6.2.17` directory. Redis 7 was `/usr/bin/redis-server` 7.0.15.
