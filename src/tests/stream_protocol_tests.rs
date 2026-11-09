@@ -186,6 +186,66 @@ fn test_parse_auto_claim_and_pending_entries_reject_invalid_replies() {
 }
 
 #[test]
+fn test_parse_auto_claim_validates_cursor_and_returned_ids() {
+    for invalid_id in ["bad", "", "1", "-1", "1-", "1-2-3", "18446744073709551616-0"] {
+        let reply = Value::Array(vec![
+            Value::BulkString(invalid_id.as_bytes().to_vec()),
+            Value::Array(vec![]),
+        ]);
+        assert!(
+            parse_auto_claim(reply).is_err(),
+            "accepted invalid cursor {invalid_id:?}"
+        );
+
+        let claimed = Value::Array(vec![
+            Value::BulkString(b"0-0".to_vec()),
+            Value::Array(vec![Value::BulkString(invalid_id.as_bytes().to_vec())]),
+        ]);
+        assert!(
+            parse_auto_claim(claimed).is_err(),
+            "accepted invalid claimed ID {invalid_id:?}"
+        );
+
+        let deleted = Value::Array(vec![
+            Value::BulkString(b"0-0".to_vec()),
+            Value::Array(vec![]),
+            Value::Array(vec![Value::BulkString(invalid_id.as_bytes().to_vec())]),
+        ]);
+        assert!(
+            parse_auto_claim(deleted).is_err(),
+            "accepted invalid deleted ID {invalid_id:?}"
+        );
+    }
+
+    let maximum = b"18446744073709551615-18446744073709551615".to_vec();
+    let (reply, _) = parse_auto_claim(Value::Array(vec![
+        Value::BulkString(maximum.clone()),
+        Value::Array(vec![Value::BulkString(maximum.clone())]),
+        Value::Array(vec![Value::BulkString(b"01-002".to_vec())]),
+    ]))
+    .expect("valid maximum and leading-zero IDs");
+    assert_eq!(reply.next_stream_id, String::from_utf8(maximum.clone()).unwrap());
+    assert_eq!(reply.claimed[0].id, String::from_utf8(maximum).unwrap());
+    assert_eq!(reply.deleted_ids, vec!["01-002"]);
+}
+
+#[test]
+fn test_read_group_and_range_reject_invalid_entry_ids() {
+    let invalid = Value::Array(vec![Value::Array(vec![
+        Value::BulkString(b"bad".to_vec()),
+        Value::Array(vec![]),
+    ])]);
+    assert!(parse_range(invalid.clone()).is_err());
+    assert!(
+        parse_read_group(Value::Array(vec![Value::Array(vec![
+            Value::BulkString(b"events".to_vec()),
+            invalid,
+        ])]))
+        .is_err()
+    );
+}
+
+#[test]
 fn test_parse_pending_entries_rejects_invalid_shapes() {
     assert!(parse_pending_entries(Value::Int(1)).is_err());
     assert!(parse_pending_entries(Value::Array(vec![Value::BulkString(b"bad".to_vec())])).is_err());

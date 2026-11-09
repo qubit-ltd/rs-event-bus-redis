@@ -305,6 +305,91 @@ fn test_sync_zero_timeout_skips_tombstone_maintenance() {
     assert!(!commands.iter().any(|command| command[0] == "EVAL"));
 }
 
+#[cfg(feature = "sync")]
+#[test]
+fn test_sync_invalid_claim_cursor_does_not_replace_last_valid_cursor() {
+    let server = ScriptedRedis::start(vec![
+        Step::reply("XGROUP", b"+OK\r\n"),
+        Step::reply("XAUTOCLAIM", b"*2\r\n$3\r\n5-0\r\n*0\r\n"),
+        Step::reply("XREADGROUP", b"*0\r\n"),
+        Step::reply("XREADGROUP", b"*0\r\n"),
+        Step::reply("XAUTOCLAIM", b"*2\r\n$3\r\nbad\r\n*0\r\n"),
+        Step::reply("XAUTOCLAIM", &claimed_record(false)),
+        Step::reply("XPENDING", TRUSTED_PENDING_ROW),
+    ])
+    .expect("start RESP endpoint");
+    let bus = sync_bus(&server);
+    let mut subscription = bus.subscribe(request()).expect("group creation succeeds");
+    assert!(matches!(
+        subscription.receive(Duration::ZERO),
+        Ok(ReceiveOutcome::TimedOut)
+    ));
+    let error = match subscription.receive(Duration::ZERO) {
+        Err(error) => error,
+        Ok(_) => panic!("bad cursor is a protocol failure"),
+    };
+    assert_failure(error, "receive", "outcome_unknown", Some(true));
+    let ReceiveOutcome::Message(message) = subscription.receive(Duration::ZERO).expect("healthy retry") else {
+        panic!("healthy claimed record must be delivered");
+    };
+    assert_eq!(message.id().as_str(), "claimed-event");
+    let commands = server.finish();
+    let claims: Vec<_> = commands.iter().filter(|command| command[0] == "XAUTOCLAIM").collect();
+    assert_eq!(claims.len(), 3);
+    assert_eq!(claims[0][5], "0-0");
+    assert_eq!(claims[1][5], "5-0");
+    assert_eq!(claims[2][5], "5-0");
+    assert!(
+        !commands
+            .iter()
+            .any(|command| command[0] == "XACK" || command[0] == "EVAL")
+    );
+}
+
+#[cfg(feature = "async")]
+#[test]
+fn test_async_invalid_claim_cursor_does_not_replace_last_valid_cursor() {
+    block_on(async {
+        let server = ScriptedRedis::start(vec![
+            Step::reply("XGROUP", b"+OK\r\n"),
+            Step::reply("XAUTOCLAIM", b"*2\r\n$3\r\n5-0\r\n*0\r\n"),
+            Step::reply("XREADGROUP", b"*0\r\n"),
+            Step::reply("XREADGROUP", b"*0\r\n"),
+            Step::reply("XAUTOCLAIM", b"*2\r\n$3\r\nbad\r\n*0\r\n"),
+            Step::reply("XAUTOCLAIM", &claimed_record(false)),
+            Step::reply("XPENDING", TRUSTED_PENDING_ROW),
+        ])
+        .expect("start RESP endpoint");
+        let bus = async_bus(&server).await;
+        let mut subscription = bus.subscribe(request()).await.expect("group creation succeeds");
+        assert!(matches!(
+            subscription.receive(Duration::ZERO).await,
+            Ok(ReceiveOutcome::TimedOut)
+        ));
+        let error = match subscription.receive(Duration::ZERO).await {
+            Err(error) => error,
+            Ok(_) => panic!("bad cursor is a protocol failure"),
+        };
+        assert_failure(error, "receive", "outcome_unknown", Some(true));
+        let ReceiveOutcome::Message(message) = subscription.receive(Duration::ZERO).await.expect("healthy retry")
+        else {
+            panic!("healthy claimed record must be delivered");
+        };
+        assert_eq!(message.id().as_str(), "claimed-event");
+        let commands = server.finish();
+        let claims: Vec<_> = commands.iter().filter(|command| command[0] == "XAUTOCLAIM").collect();
+        assert_eq!(claims.len(), 3);
+        assert_eq!(claims[0][5], "0-0");
+        assert_eq!(claims[1][5], "5-0");
+        assert_eq!(claims[2][5], "5-0");
+        assert!(
+            !commands
+                .iter()
+                .any(|command| command[0] == "XACK" || command[0] == "EVAL")
+        );
+    });
+}
+
 #[cfg(feature = "async")]
 #[test]
 fn test_async_zero_timeout_skips_tombstone_maintenance() {

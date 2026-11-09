@@ -20,6 +20,7 @@ use redis::streams::StreamRangeReply;
 use redis::streams::StreamReadReply;
 
 pub(crate) use crate::internal::PendingEntry;
+use crate::internal::valid_stream_id;
 
 /// Parses an XAUTOCLAIM reply and records Redis 6.2's nil tombstone markers.
 ///
@@ -44,7 +45,10 @@ pub(crate) fn parse_auto_claim(value: Value) -> Result<(StreamAutoClaimReply, bo
         return Err(invalid_reply());
     }
     let mut parts = parts.into_iter();
-    let next_stream_id = from_redis_value(parts.next().ok_or_else(invalid_reply)?)?;
+    let next_stream_id: String = from_redis_value(parts.next().ok_or_else(invalid_reply)?)?;
+    if !valid_stream_id(&next_stream_id) {
+        return Err(invalid_reply());
+    }
     let Value::Array(rows) = parts.next().ok_or_else(invalid_reply)? else {
         return Err(invalid_reply());
     };
@@ -63,13 +67,19 @@ pub(crate) fn parse_auto_claim(value: Value) -> Result<(StreamAutoClaimReply, bo
                 Value::BulkString(_) => {
                     let mut entry = StreamId::default();
                     entry.id = from_redis_value(row)?;
+                    if !valid_stream_id(&entry.id) {
+                        return Err(invalid_reply());
+                    }
                     entry
                 }
                 row => parse_stream_id(row)?,
             });
         }
     }
-    let deleted_ids = parts.next().map(from_redis_value).transpose()?.unwrap_or_default();
+    let deleted_ids: Vec<String> = parts.next().map(from_redis_value).transpose()?.unwrap_or_default();
+    if deleted_ids.iter().any(|id| !valid_stream_id(id)) {
+        return Err(invalid_reply());
+    }
     let mut reply = StreamAutoClaimReply::default();
     reply.next_stream_id = next_stream_id;
     reply.claimed = claimed;
@@ -157,6 +167,9 @@ fn parse_stream_id(value: Value) -> Result<StreamId, RedisError> {
     let (id, fields) = parse_pair(value)?;
     let mut entry = StreamId::default();
     entry.id = from_redis_value(id)?;
+    if !valid_stream_id(&entry.id) {
+        return Err(invalid_reply());
+    }
     entry.map = from_redis_value(fields)?;
     Ok(entry)
 }
