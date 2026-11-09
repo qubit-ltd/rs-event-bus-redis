@@ -15,6 +15,8 @@ use libfuzzer_sys::fuzz_target;
 // harness.
 #[path = "../../src/internal/bounded_wire_decoder.rs"]
 mod bounded_wire_decoder;
+// The harness constructs explicit limits and only exercises the decoder.
+#[allow(dead_code)]
 #[path = "../../src/internal/wire_limits.rs"]
 mod wire_limits;
 mod redis_event_bus_config {
