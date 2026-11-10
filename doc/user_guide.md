@@ -158,7 +158,7 @@ This entry exercise installs the billing handler, publishes `order-42`, waits fo
 
 Malformed in-limit version 1 wire records are handled by one Lua script that serially writes a group-specific quarantine record (`qubit:poison:*`) with `XADD`, then acknowledges the source entry with `XACK`. The quarantine record stores `source_stream`, `source_id`, `group`, a stable `reason`, the original `wire` bytes, and `wire_missing`. The script does not roll back a successful quarantine write if acknowledgement fails; if its reply is lost, the caller cannot determine from that reply alone which steps completed. Check the source ID, group, pending owner, and quarantine record before deciding what to do. A confirmed successful quarantine is returned as a `Gap` without exposing payload bytes. Inspect a page with `XRANGE <quarantine-key> - + COUNT 100`; monitor quarantine length, source stream length, and pending entries with `XLEN` and `XPENDING`. Page through the remaining IDs for a complete inspection. The provider never trims these streams automatically, so operators should archive or remove quarantine records under their retention policy.
 
-Delivery remains at least once. If a handler runs longer than `redis.claim_min_idle_ms`, another consumer may claim its pending entry. A publish whose `XADD` reply is lost has an unknown outcome; the default facade uncertainty gate prevents automatic resubmission, and manual or explicitly permitted retries may duplicate it. `redis.max_unsettled_per_subscription` bounds locally active deliveries (default 100).
+Pending entries that remain recoverable can be redelivered. If a handler runs longer than `redis.claim_min_idle_ms`, another consumer may claim its pending entry. A publish whose `XADD` reply is lost has an unknown outcome; the default facade uncertainty gate prevents automatic resubmission, and manual or explicitly permitted retries may duplicate it. `redis.max_unsettled_per_subscription` bounds locally active deliveries (default 100).
 
 The first `receive` on each subscription checks pending entries immediately. Later receive calls share a recovery deadline: calls before `redis.recovery_interval_ms` (default 1,000 ms, valid range 50–60,000) read new entries without repeating the scans; long-running receives still revisit recovery when the interval expires. Retry, a receive error, or cancellation after polling an async receive forces recovery on the next call. Shorter intervals reduce the wait before eligible idle pending entries can be reclaimed, at the cost of more Redis scan commands.
 
@@ -408,9 +408,20 @@ The provider stores one JSON wire record under the `wire` stream field. It conta
 | Close or drop | No implicit `XACK` | Unsettled messages remain recoverable. |
 | Cancel async receive | No implicit `XACK` | A consumed record remains in Redis PEL for a later receive/claim. |
 
+Terminal settlement uses one single-key `EVAL` that checks the exact PEL entry's current owner before calling `XACK`; it never sends a bare `XACK`. The local intent state determines how to interpret and retry the result:
+
+| Local state and result | Outcome |
+| --- | --- |
+| `AckPending(original)`; EVAL returns `0` or `1` | The original intent becomes `Applied`; both replies confirm completion. |
+| `AckPending(original)`; EVAL returns `-1` | Return non-retryable `settlement_ownership_changed` (`false`); keep `AckPending` and the active slot. Stop the affected subscription, then recover the group with a new receiver. |
+| `AckPending(original)`; reply is unknown | Keep the original intent and retry only that same intent. A conflicting intent is rejected. |
+| `Applied(original)`; same intent requested | Idempotent success with no I/O. A conflicting intent is rejected. |
+
+If the first EVAL receives a complete explicit Redis rejection, the intent remains open and can be attempted again; once an ACK outcome is uncertain, the original intent is fixed. The owner check protects Redis acknowledgement state only: it is not business fencing and cannot stop an old handler's external side effects.
+
 Redis Streams provide at-least-once delivery, so make handlers idempotent. A slow handler can exceed `redis.claim_min_idle_ms`; another consumer may claim the same pending event while the first handler is still running. Choose an idle threshold that fits handler latency and retain business-level deduplication where duplicates are costly.
 
-Settlement verifies the current Redis consumer owner atomically. If ownership changed, close or stop the affected subscription and resume with the same namespace/topic/group so the current owner can recover the PEL entry. This check protects Redis acknowledgement state only: it does not fence an old handler's external database or service side effects. If a settlement reply is unknown, retry only the identical terminal intent; an empty PEL remains idempotent success, while a PEL now owned by another consumer returns `settlement_ownership_changed`.
+Still-resident Redis stream entries can be delivered again, so handlers must be idempotent. For `qubit-task` notifications, use a durable consumer checkpoint, retain the highest `state_version`, and query authoritative task state when a version gap appears.
 
 Each subscription stops receiving new entries while its unsettled count reaches `redis.max_unsettled_per_subscription`. Settling or retrying an entry frees capacity. This bounds in-process delivery pressure; it does not limit Redis stream growth.
 
@@ -489,7 +500,7 @@ Inspect `SpiError::Operation` fields (`operation`, `kind`, `retryable`) in your 
 | --- | --- | --- |
 | Publish sent, but reply lost, timeout or malformed | `outcome_unknown` / `Some(false)` | Redis may have stored the event. Reconcile by business ID; republish only when the application explicitly accepts duplicate risk. No transparent XADD replay. |
 | Receive/claim sent, but outcome unknown | `outcome_unknown` / `Some(true)` | No invented delivery is returned. Resume receive and recover through own PEL or claim. |
-| XACK sent, but outcome unknown | `outcome_unknown` / `Some(true)` | Retry the same token with its original `Accept` or `Reject` intent; never switch to `Retry` or the other terminal intent. |
+| Settlement EVAL sent, but outcome unknown | `outcome_unknown` / `Some(true)` | Retry the same token with its original `Accept` or `Reject` intent; never switch to `Retry` or the other terminal intent. |
 | Quarantine script unknown/possibly partial | `outcome_unknown` / `Some(false)` | Inspect source/PEL/owner and existing copies; do not blindly replay the script. |
 | Admission exhausted before I/O | `resource_limit` / `Some(true)` | Back off, lower concurrency or close unused receivers; no business command was sent by this rejected operation. |
 | Publish exceeds raw payload / full wire limit | `payload_too_large` / `wire_too_large`, `Some(false)` | Reduce the encoded payload/metadata or deliberately raise limits. No XADD is sent. |
@@ -500,12 +511,12 @@ At the SPI boundary, settlement follows this receiver/token-local state machine:
 | Progress | Allowed request | Result |
 | --- | --- | --- |
 | Open | `Retry` | Release the local active slot; leave Redis PEL intact; commit Retry locally. |
-| Open | `Accept` / `Reject` | Acquire connection and command admission first, then fix intent immediately before XACK can be sent. |
-| AckPending(original) | Original terminal intent only | Repeat XACK; a valid integer reply 0 or 1 completes local settlement. |
+| Open | `Accept` / `Reject` | Acquire connection and command admission first, then fix intent immediately before the owner-check EVAL can be sent. |
+| AckPending(original) | Original terminal intent only | Repeat the same owner-check EVAL; reply 0 or 1 completes local settlement, while -1 returns `settlement_ownership_changed` and preserves AckPending. |
 | Applied(original) | Original intent only | Idempotent success without Redis I/O. |
 | AckPending / Applied | Any conflicting intent | Invalid settlement token; no Redis command. |
 
-An unpolled settle future or failed/cancelled connection acquisition leaves Open. A first XACK attempt receiving a complete **top-level Redis rejection** can return to Open because that command was not applied. Socket failure, timeout, malformed replies, nested RESP errors, or cancellation preserve AckPending; once any earlier attempt was unknown, a later explicit rejection cannot reopen the token. Unknown ACK keeps its active slot until the same intent completes or the receiver closes. This constraint does not survive a process restart as persisted intent, and it provides no cross-consumer fencing.
+An unpolled settle future or failed/cancelled connection acquisition leaves Open. A first owner-check EVAL receiving a complete **top-level Redis rejection** can return to Open because that command was not applied. Socket failure, timeout, malformed replies, nested RESP errors, or cancellation preserve AckPending; once any earlier attempt was unknown, a later explicit rejection cannot reopen the token. Unknown ACK keeps its active slot until the same intent completes or the receiver closes. This constraint does not survive a process restart as persisted intent, and it provides no cross-consumer fencing.
 
 ## 10. Bound resources and message sizes
 
@@ -583,9 +594,9 @@ Before rollout and after a Redis failover, review the deployment's recovery obje
 | Consumer-group progress | `XINFO GROUPS <stream-key>` | Check the groups that actually exist, their pending counts and last-delivered positions; use `lag` only when the server version provides it. Compare group progress with application processing and replay needs. |
 | Pending delivery and recovery ownership | `XPENDING <stream-key> <group>` and `XPENDING <stream-key> <group> - + 100` | Review pending count, consumer ownership, delivery age, and entries across pages. Continue each page after its last returned ID without repeating the boundary entry. Decide whether work is progressing or needs investigation against handler duration and recovery policy. |
 
-Keep the stages of completion separate when setting expectations: `Accepted` means Redis replied that `XADD` was accepted; persistence and fsync depend on Redis deployment settings; replica confirmation is a separate replication event and does not itself prove replica disk persistence; consumer ACK (`XACK`) settles delivery after handling but is not an application database commit; and the business commit is owned by the application. The provider does not make these stages atomic. Delivery is at least once, so make consumer side effects idempotent—for example, deduplicate by business ID and retain the highest `state_version` where versioned notifications are used. Treat `XADD MAXLEN ~` as explicitly lossy: it can remove unread or pending history, so enable it only after the retention review above accepts that loss.
+Keep the stages of completion separate when setting expectations. `Accepted` means Redis replied that `XADD` was accepted; it does not mean fsync, replication, consumer receipt, or business commit. For task notifications, the task state and outbox row commit in one SQLite transaction. Before `Accepted`, the outbox row is retained and retried, so publication can duplicate; after `Accepted`, the row is deleted. A Redis failure before persistence can therefore lose a notification whose outbox row was already deleted. Consumer receipt is not guaranteed at least once. Still-resident stream entries can redeliver, so make consumers idempotent with a durable checkpoint, retain the highest `state_version`, and query authoritative task state when a version gap appears. The provider does not make task state, Redis persistence, consumer receipt, and business commit atomic. Treat `XADD MAXLEN ~` as explicitly lossy: it can remove unread or pending history, so enable it only after the retention review above accepts that loss.
 
-With typed `qubit-task` notifications, consumers should deduplicate by `TaskId` and retain the highest `state_version`, ignoring duplicate/older notifications and querying the task service for authoritative state. The typed SQLite task service can use its optional outbox integration to capture lifecycle changes with its own state transaction and retry Redis publication. Delivery remains at least once, and this does not make unrelated application business transactions atomic with task state or Redis.
+With typed `qubit-task` notifications, consumers should deduplicate by `TaskId`, retain the highest `state_version`, ignore duplicate or older notifications, and query the task service for authoritative state after a version gap. The typed SQLite task service can use its optional outbox integration to capture lifecycle changes in the same transaction as task state and retry Redis publication until `Accepted`; after that acknowledgement it deletes the outbox row. This does not guarantee consumer receipt at least once or make unrelated application business transactions atomic with task state or Redis.
 
 ## 12. Upgrade from provider 0.6
 

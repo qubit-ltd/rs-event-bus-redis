@@ -158,7 +158,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 限额内格式错误的版本 1 wire 记录由单条 Lua 脚本串行处理：先用 `XADD` 写入按 group 隔离的记录（`qubit:poison:*`），再用 `XACK` 确认源记录。隔离记录包含 `source_stream`、`source_id`、`group`、稳定的 `reason`、原始 `wire` 字节和 `wire_missing`。确认失败时脚本不会回滚已成功写入的隔离记录；如果回复丢失，仅凭回复无法判断哪些步骤已完成。应检查源 ID、group、pending owner 和隔离记录，再决定如何处理。确认隔离成功后返回 `Gap`，不会把 payload 放进错误信息。可用 `XRANGE <quarantine-key> - + COUNT 100` 读取一页记录，并用 `XLEN`、`XPENDING` 监控隔离流、源 stream 和 pending 数量；完整检查须继续翻页。provider 不会自动裁剪这些 stream；运维应按保留策略归档或清理隔离数据。
 
-投递语义仍是至少一次。如果 handler 运行时间超过 `redis.claim_min_idle_ms`，其他 consumer 可能接管该 pending 记录。若 `XADD` 回复丢失，发布结果未知，facade 默认安全门阻止自动重发；人工或明确允许的重试仍可能重复。`redis.max_unsettled_per_subscription` 限制本地活跃投递数，默认值为 100。
+仍可恢复的 pending 记录可能再次投递。如果 handler 运行时间超过 `redis.claim_min_idle_ms`，其他 consumer 可能接管该记录。若 `XADD` 回复丢失，发布结果未知，facade 默认安全门阻止自动重发；人工或明确允许的重试仍可能重复。`redis.max_unsettled_per_subscription` 限制本地活跃投递数，默认值为 100。
 
 默认不限制 stream 长度。只有在完成下文的保留评估并接受历史丢失后，才在上方 `ProviderOptions` map 中同时加入 `("redis.stream_maxlen_approx".into(), "100000".into())` 和 `("redis.allow_lossy_retention".into(), "true".into())`。此后每次发布都会使用 `XADD MAXLEN ~ 100000`。Redis 可能裁剪尚未消费的记录，或消费组 pending 列表仍引用的记录；裁剪不保证投递，旧消息可能无法恢复。需要保留 pending 历史用于恢复时应保持此选项关闭。格式错误记录的隔离 stream 遵循单独的运维保留策略。
 
@@ -406,9 +406,20 @@ provider 将一条 JSON wire record 写入 Redis Stream 的 `wire` 字段。内�
 | 关闭或 drop | 不会隐式执行 `XACK` | 未结算消息仍可恢复。 |
 | 取消异步 receive | 不会隐式执行 `XACK` | 已读记录留在 PEL 中，供后续读取或认领。 |
 
+终态结算通过一条单 key `EVAL` 检查指定 PEL 项的当前 owner，然后才调用 `XACK`；不会单独发送裸 `XACK`。本地意图状态决定如何解释和重试结果：
+
+| 本地状态与结果 | 处理结果 |
+| --- | --- |
+| `AckPending(original)`；EVAL 返回 `0` 或 `1` | 原意图变为 `Applied`；两个回复都确认完成。 |
+| `AckPending(original)`；EVAL 返回 `-1` | 返回不可重试的 `settlement_ownership_changed`（`false`）；保留 `AckPending` 和活跃槽。停止受影响的订阅，再用新 receiver 恢复消费组。 |
+| `AckPending(original)`；回复未知 | 保留原意图，只能重试同一意图；冲突意图会被拒绝。 |
+| `Applied(original)`；再次请求相同意图 | 幂等成功且不执行 I/O；冲突意图会被拒绝。 |
+
+首次 EVAL 收到完整、明确的 Redis 拒绝时，意图仍保持开放，可以再次尝试；ACK 结果一旦不确定，原意图就固定。owner 检查只保护 Redis 确认状态，不是业务 fencing，也不能阻止旧 handler 产生外部副作用。
+
 Redis 提供至少一次投递，因此 handler 应具备幂等性。新消息经 `XREADGROUP >` 读取时，`delivery.context().provider_attempt()` 为 `Some(1)`。每条 pending 或 `XAUTOCLAIM` 恢复消息交付前，provider 会针对该 ID 查询 Redis `XPENDING` 明细；只有恰好一条明细的 ID 和当前 consumer owner 都匹配，且非零次数可由 SPI 的 `u32` 表示时，才报告 Redis 投递次数。查询失败、无结果、格式错误、次数为零或不可表示、以及校验不匹配时均为 `None`。每条恢复消息因此多一次 Redis 命令，新消息不增加查询。facade 本地重试次数请读取 `retry_attempt`。如果 handler 运行时间超过 `redis.claim_min_idle_ms`，另一个 consumer 可能在原 handler 仍执行时认领同一事件。idle threshold 应覆盖常见和最慢的处理时间；重复代价高时，应用还应按业务 ID 去重。
 
-终态结算会原子检查 Redis 当前 consumer owner。如果 owner 已改变，关闭或停止受影响的订阅，再以相同 namespace/topic/group 和新 receiver 恢复 PEL。此校验只保护 Redis 确认状态，不会阻止旧 handler 对外部数据库或服务产生副作用。结算回复未知时只重试原终态意图；PEL 已为空仍按幂等成功处理，PEL 已归其他 consumer 时返回 `settlement_ownership_changed`。
+仍保留在 Redis 中的 stream entry 可能再次投递，因此 handler 必须具备幂等性。处理 `qubit-task` 通知时，应使用持久 consumer checkpoint、保留最高 `state_version`，并在发现版本缺口时查询任务服务的权威状态。
 
 每个订阅的未结算消息达到 `redis.max_unsettled_per_subscription` 后会暂停接收新记录。结算或 retry 后会释放容量。该设置限制进程内的投递压力，不会限制 Redis stream 增长。
 
@@ -489,7 +500,7 @@ provider 和 Redis Streams 都不按 EventId 自动去重，消费者应保证�
 | --- | --- | --- |
 | 发布已发送，但回复丢失、超时或畸形 | `outcome_unknown` / `Some(false)` | Redis 可能已保存事件。按业务 ID 核对；只有明确接受重复风险时才重新发布。provider 不透明重放 XADD。 |
 | 接收/claim 已发送，结果未知 | `outcome_unknown` / `Some(true)` | 本次不会虚构投递。继续 receive，通过本 consumer PEL 或 claim 恢复。 |
-| XACK 已发送，结果未知 | `outcome_unknown` / `Some(true)` | 对同一 token 重试原来的 `Accept` 或 `Reject`；不能改为 `Retry` 或另一终结决定。 |
+| 结算 EVAL 已发送，结果未知 | `outcome_unknown` / `Some(true)` | 对同一 token 重试原来的 `Accept` 或 `Reject`；不能改为 `Retry` 或另一终结决定。 |
 | 隔离脚本结果未知或可能部分执行 | `outcome_unknown` / `Some(false)` | 检查源记录、PEL、owner 及隔离副本，不盲目重放脚本。 |
 | I/O 前准入名额耗尽 | `resource_limit` / `Some(true)` | 退避、降低并发或关闭闲置 receiver；被拒绝的操作没有发送业务命令。 |
 | 发布超过 payload / wire 限额 | `payload_too_large` / `wire_too_large`，`Some(false)` | 缩小编码 payload/元数据，或有意提高配置；不会发送 XADD。 |
@@ -500,12 +511,12 @@ SPI 的结算状态只约束当前 receiver/token：
 | 状态 | 允许的请求 | 结果 |
 | --- | --- | --- |
 | Open | `Retry` | 释放本地活跃名额，保留 Redis PEL，在本地提交 Retry。 |
-| Open | `Accept` / `Reject` | 先取得连接与命令名额，在 XACK 可能发送前固定意图。 |
-| AckPending(原意图) | 仅原来的终结意图 | 重发 XACK；合法整数回复 0 或 1 后完成本地结算。 |
+| Open | `Accept` / `Reject` | 先取得连接与命令名额，在 owner-check EVAL 可能发送前固定意图。 |
+| AckPending(原意图) | 仅原来的终结意图 | 重发相同 owner-check EVAL；回复 0 或 1 后完成本地结算，-1 则返回 `settlement_ownership_changed` 并保留 AckPending。 |
 | Applied(原意图) | 仅原意图 | 幂等成功，不执行 Redis I/O。 |
 | AckPending / Applied | 冲突意图 | 返回无效结算 token，不发送 Redis 命令。 |
 
-尚未 poll 的 settle future，以及连接获取失败或取消，都保留 Open。首个 XACK 尝试若收到完整的 **Redis 顶层拒绝回复**，可以恢复 Open，因为该命令未执行。断线、超时、畸形回复、嵌套 RESP 错误或取消会保留 AckPending；只要此前已有结果未知的尝试，后续明确拒绝也不能重新开放 token。未知 ACK 保留活跃名额，直到相同意图完成或 receiver 关闭。意图没有跨进程持久化，重启后不能据此推断历史，也不提供跨 consumer fencing。
+尚未 poll 的 settle future，以及连接获取失败或取消，都保留 Open。首个 owner-check EVAL 若收到完整的 **Redis 顶层拒绝回复**，可以恢复 Open，因为该命令未执行。断线、超时、畸形回复、嵌套 RESP 错误或取消会保留 AckPending；只要此前已有结果未知的尝试，后续明确拒绝也不能重新开放 token。未知 ACK 保留活跃名额，直到相同意图完成或 receiver 关闭。意图没有跨进程持久化，重启后不能据此推断历史，也不提供跨 consumer fencing。
 
 ## 10. 怎样限制资源和消息尺寸
 
@@ -583,9 +594,9 @@ Redis 持久化和复制由部署负责。`Accepted` 只证明 XADD 被接受，
 | 消费组进度 | `XINFO GROUPS <stream-key>` | 检查实际存在的消费组、pending 数量和最后投递位置；只有服务端版本提供 `lag` 时才查看该字段。将组进度与应用处理情况、回放需求对照。 |
 | 待处理投递与恢复归属 | `XPENDING <stream-key> <group>` 和 `XPENDING <stream-key> <group> - + 100` | 检查 pending 数量、consumer 归属、投递等待时间，并翻页覆盖所有记录；后续页从上一页最后返回的 ID 之后继续，避免重复边界记录。结合 handler 时长和恢复策略判断工作是否持续推进，或需要调查。 |
 
-验收时要区分不同完成阶段：`Accepted` 表示 Redis 已回复接受 `XADD`；持久化和 fsync 取决于 Redis 部署设置；副本确认是独立的复制事件，本身也不代表副本已落盘；消费者 ACK（`XACK`）是在处理后结算投递，不等于应用数据库事务提交；业务提交由应用负责。provider 不会把这些阶段合并成原子操作。投递语义是至少一次，因此消费者的业务副作用应可幂等，例如按业务 ID 去重，并在使用带版本通知时只保留最高 `state_version`。`XADD MAXLEN ~` 明确属于有损保留策略，可能裁掉未读或 pending 历史；只有完成上文的保留评估并接受相应丢失后才能启用。
+设置预期时要区分各完成阶段：`Accepted` 表示 Redis 已回复接受 `XADD`，不表示 fsync、复制、消费者收到通知或业务提交。任务状态与 outbox 行在同一 SQLite 事务中提交。收到 `Accepted` 前 outbox 行会保留并重试，因此可能重复发布；收到后 outbox 行会被删除。Redis 在持久化前故障，可能丢失已删除 outbox 行对应的通知。不能保证消费者端到端至少一次收到通知。仍保留在 stream 中的 entry 可能再次投递，因此消费者应使用持久 checkpoint 保证幂等，保留最高 `state_version`，并在发现版本缺口时查询权威任务状态。provider 不会原子提交任务状态、Redis 持久化、消费者收件和业务提交。`XADD MAXLEN ~` 明确属于有损保留策略，可能裁掉未读或 pending 历史；只有完成上文的保留评估并接受相应丢失后才能启用。
 
-处理 typed `qubit-task` 通知时，consumer 应按 `TaskId` 去重并保留最高 `state_version`，忽略重复、旧版本通知，并查询任务服务取得权威状态。typed SQLite task service 可启用可选 outbox，在自己的状态事务中捕获生命周期变更，并重试向 Redis 发布。投递仍是至少一次；这不会令无关的应用业务事务与任务状态或 Redis 原子提交。
+处理 typed `qubit-task` 通知时，consumer 应按 `TaskId` 去重并保留最高 `state_version`，忽略重复、旧版本通知，并在版本缺口时查询任务服务取得权威状态。typed SQLite task service 可启用可选 outbox，在与任务状态相同的事务中捕获生命周期变更；收到 `Accepted` 前重试发布，收到后删除 outbox 行。这不能保证消费者端到端至少一次收到通知，也不会令无关的应用业务事务与任务状态或 Redis 原子提交。
 
 ## 12. 从 provider 0.6 升级
 
