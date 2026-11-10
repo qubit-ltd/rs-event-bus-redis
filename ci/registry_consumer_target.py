@@ -42,9 +42,9 @@ def core_minor(manifest: dict) -> tuple[int, int]:
     dependencies = manifest.get("dependencies", {})
     value = dependencies.get("qubit-event-bus")
     requirement = value.get("version") if isinstance(value, dict) else value
-    if not isinstance(requirement, str) or not re.fullmatch(r"0[.]\d+(?:[.]\d+)?", requirement):
+    if not isinstance(requirement, str) or not re.fullmatch(r"\^?0[.]\d+(?:[.]\d+)?", requirement):
         raise TargetError("dependencies.qubit-event-bus.version: unsupported requirement; expected a single 0.x minor")
-    parts = requirement.split(".")
+    parts = requirement.removeprefix("^").split(".")
     return int(parts[0]), int(parts[1])
 
 
@@ -102,6 +102,8 @@ def prepare(args) -> None:
                 package = key_match.group(1)
                 if "{" in line:
                     line = re.sub(r'version\s*=\s*"[^"]+"', replacements[package], line, count=1)
+                    line = re.sub(r',\s*path\s*=\s*"[^"]+"', "", line)
+                    line = re.sub(r'path\s*=\s*"[^"]+"\s*,\s*', "", line)
                 else:
                     line = f'{package} = "={versions[next(role for role, name in PACKAGES.items() if name == package)]}"'
         rewritten.append(line)
