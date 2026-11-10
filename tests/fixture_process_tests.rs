@@ -308,11 +308,7 @@ fn test_poll_error_reaps_running_child_and_logs_its_path() -> Result<(), Box<dyn
     assert!(error.to_string().contains(log.to_str().unwrap()));
     let output = std::fs::read_to_string(&stdout_log)?;
     assert!(output.contains("child ready"));
-    let child_pid: i32 = output
-        .lines()
-        .find_map(|line| line.strip_prefix("child pid="))
-        .ok_or("child pid was not recorded")?
-        .parse()?;
+    let child_pid = recorded_pid(&output, "child pid=", "child pid was not recorded")?;
     assert!(!process_is_live(child_pid), "poll-error child {child_pid} survived");
     Ok(())
 }
@@ -329,8 +325,7 @@ fn test_timeout_reclaims_child_process_group() -> Result<(), Box<dyn Error>> {
     // The watchdog owns the command's process group. The live grandchild must
     // disappear when the deadline kills that group.
     let text = std::fs::read_to_string(temp.path().join("tree.log.stdout.log"))?;
-    let pid = text.lines().find_map(|line| line.strip_prefix("grandchild pid="));
-    let pid: i32 = pid.ok_or("grandchild pid was not recorded")?.parse()?;
+    let pid = recorded_pid(&text, "grandchild pid=", "grandchild pid was not recorded")?;
     for _ in 0..250 {
         if !process_is_live(pid) {
             return Ok(());
@@ -347,11 +342,7 @@ fn test_successful_leader_reclaims_its_process_group() -> Result<(), Box<dyn Err
     let temp = tempfile::tempdir()?;
     let log = temp.path().join("leader-success.log");
     let output = run_logged(&mut child_command("grandchild-success"), &log, Duration::from_secs(5))?;
-    let pid: i32 = output
-        .lines()
-        .find_map(|line| line.strip_prefix("grandchild pid="))
-        .ok_or("grandchild pid was not recorded")?
-        .parse()?;
+    let pid = recorded_pid(&output, "grandchild pid=", "grandchild pid was not recorded")?;
     assert_process_stops(pid);
     Ok(())
 }
@@ -364,11 +355,7 @@ fn test_failing_leader_reclaims_its_process_group() -> Result<(), Box<dyn Error>
     let error = run_logged(&mut child_command("grandchild-failure"), &log, Duration::from_secs(5)).unwrap_err();
     assert!(error.to_string().contains("17"));
     let output = std::fs::read_to_string(temp.path().join("leader-failure.log.stdout.log"))?;
-    let pid: i32 = output
-        .lines()
-        .find_map(|line| line.strip_prefix("grandchild pid="))
-        .ok_or("grandchild pid was not recorded")?
-        .parse()?;
+    let pid = recorded_pid(&output, "grandchild pid=", "grandchild pid was not recorded")?;
     assert_process_stops(pid);
     Ok(())
 }
@@ -412,11 +399,7 @@ fn test_timeout_kills_only_its_own_process_group() -> Result<(), Box<dyn Error>>
     assert!(process_is_live(unrelated_pid), "unrelated process was killed");
 
     let text = std::fs::read_to_string(temp.path().join("isolated-tree.log.stdout.log"))?;
-    let own_pid: i32 = text
-        .lines()
-        .find_map(|line| line.strip_prefix("grandchild pid="))
-        .ok_or("grandchild pid was not recorded")?
-        .parse()?;
+    let own_pid = recorded_pid(&text, "grandchild pid=", "grandchild pid was not recorded")?;
     for _ in 0..250 {
         if !process_is_live(own_pid) {
             guard.terminate_and_wait()?;
@@ -447,6 +430,30 @@ fn wait_for_marker(path: &std::path::Path, marker: &str, timeout: Duration) -> s
         std::io::ErrorKind::TimedOut,
         format!("process did not write readiness marker {marker:?}"),
     ))
+}
+
+#[cfg(target_os = "linux")]
+fn recorded_pid(output: &str, marker: &str, missing: &'static str) -> Result<i32, Box<dyn Error>> {
+    let pid = output
+        .split(marker)
+        .nth(1)
+        .and_then(|tail| tail.split_whitespace().next())
+        .ok_or(missing)?;
+    Ok(pid.parse()?)
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn test_recorded_pid_accepts_libtest_output_prefix() {
+    assert_eq!(
+        recorded_pid(
+            "test test_child_process_entrypoint ... grandchild pid=42\nok\n",
+            "grandchild pid=",
+            "grandchild pid missing",
+        )
+        .expect("PID marker can follow libtest's status prefix"),
+        42
+    );
 }
 
 #[cfg(target_os = "linux")]
