@@ -97,3 +97,7 @@ class RegistryConsumerExecutionTests(unittest.TestCase):
                 self.assertIn(f"failed during {stage}", result.stderr)
                 self.assertNotIn("registry consumer checks passed", result.stdout)
                 self.assertIn(command, calls)
+
+
+if __name__ == "__main__":
+    unittest.main()
