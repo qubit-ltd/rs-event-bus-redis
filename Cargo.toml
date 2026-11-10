@@ -37,7 +37,7 @@ serde = { version = "^1.0", features = ["derive"] }
 serde_json = "^1.0"
 thiserror = "^2.0"
 rustls = { version = "^0.23", default-features = false, features = ["ring", "std", "tls12"] }
-async-lock = { version = "^3", optional = true }
+async-lock = { version = "^3.5", optional = true }
 redis = {
   package = "qubit-redis",
   version = "=2.0.0-rc.2",
@@ -45,25 +45,25 @@ redis = {
   features = ["streams", "sentinel", "tls-rustls-webpki-roots"]
 }
 
-qubit-event-bus = { version = "0.21" }
-qubit-spi = "0.14"
-qubit-id = { version = "0.7", default-features = false, features = ["uuid"] }
+qubit-event-bus = { version = "^0.21" }
+qubit-spi = "^0.14"
+qubit-id = { version = "^0.7", default-features = false, features = ["uuid"] }
 
 [dev-dependencies]
-futures-lite = "^2"
+futures-lite = "^2.6"
 futures-channel = "^0.3"
 tempfile = "^3.27"
-tokio = { version = "^1.53", features = ["rt", "macros"] }
+tokio = { version = "^1.54", features = ["rt", "macros"] }
 redis = {
   package = "qubit-redis",
   version = "=2.0.0-rc.2",
   default-features = false,
   features = ["tokio-rustls-comp", "streams", "sentinel", "tls-rustls-webpki-roots"]
 }
-qubit-retry = "0.26"
+qubit-retry = "^0.26"
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
-nix = { version = "0.31", default-features = false, features = ["process", "signal"] }
+nix = { version = "^0.31", default-features = false, features = ["process", "signal"] }
 
 [[example]]
 name = "sync_orders"

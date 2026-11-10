@@ -11,8 +11,8 @@ async = ["qubit-event-bus-redis/async"]
 discovery = ["qubit-event-bus/discovery", "qubit-event-bus-redis/discovery"]
 
 [dependencies]
-qubit-event-bus = { version = "=0.20.1", default-features = false }
-qubit-event-bus-redis = { version = "=0.7.0", default-features = false }
-qubit-spi = "=0.14.0"
+qubit-event-bus = { version = "^0.21", default-features = false }
+qubit-event-bus-redis = { version = "^0.7", default-features = false , path = "../../../" }
+qubit-spi = "^0.14"
 
 [workspace]

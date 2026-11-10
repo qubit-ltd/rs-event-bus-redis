@@ -7,9 +7,9 @@ publish = false
 [workspace]
 
 [dependencies]
-qubit-event-bus = { version = "0.21", path = "../../../../rs-event-bus", default-features = false, features = ["discovery"] }
-qubit-event-bus-redis = { path = "../../..", default-features = false, features = ["sync", "discovery"] }
-qubit-spi = "0.14"
+qubit-event-bus = { version = "^0.21", default-features = false, features = ["discovery"] }
+qubit-event-bus-redis = { path = "../../../", default-features = false, features = ["sync", "discovery"] , version = "^0.7" }
+qubit-spi = "^0.14"
 
 [patch.crates-io]
 qubit-event-bus = { path = "../../../../rs-event-bus" }
