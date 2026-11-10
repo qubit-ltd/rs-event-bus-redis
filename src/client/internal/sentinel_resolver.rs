@@ -77,6 +77,59 @@ pub(crate) struct SentinelResolver {
     /// Finite setup and per-command waiting budgets used for every probe.
     policy: TransportPolicy,
 }
+
+/// Invalidates an interrupted in-flight Sentinel query without clearing a
+/// replacement.
+#[cfg(feature = "async")]
+struct SentinelQueryGuard<'a> {
+    /// Cached Sentinel connection whose query is in flight.
+    cache: &'a AsyncConnectionCache,
+    /// Generation of the cached connection used by this query.
+    generation: u64,
+    /// Whether polling reached the Redis query command.
+    started: bool,
+    /// Whether the query produced a complete response.
+    completed: bool,
+}
+
+#[cfg(feature = "async")]
+impl<'a> SentinelQueryGuard<'a> {
+    /// Creates a guard for one cached connection generation.
+    ///
+    /// # Parameters
+    ///
+    /// - `cache`: Cache that owns the query connection.
+    /// - `generation`: Generation leased for this query.
+    fn new(cache: &'a AsyncConnectionCache, generation: u64) -> Self {
+        Self {
+            cache,
+            generation,
+            started: false,
+            completed: false,
+        }
+    }
+
+    /// Marks the query as started when its command future is first polled.
+    fn mark_started(&mut self) {
+        self.started = true;
+    }
+
+    /// Marks the query complete after receiving a response.
+    fn mark_completed(&mut self) {
+        self.completed = true;
+    }
+}
+
+#[cfg(feature = "async")]
+impl Drop for SentinelQueryGuard<'_> {
+    /// Invalidates only this generation when a started query is interrupted.
+    fn drop(&mut self) {
+        if self.started && !self.completed {
+            self.cache.invalidate_if_current(self.generation);
+        }
+    }
+}
+
 impl SentinelResolver {
     /// Parses endpoints and preserves independent Sentinel/master ACL and DB
     /// setup. Returns parse errors without connecting to the network.
@@ -300,7 +353,9 @@ impl SentinelResolver {
 
     /// Runs one Sentinel query through a single-flight async control socket.
     /// Redis errors retain only their stable category before returning to the
-    /// resolver's discovery loop.
+    /// resolver's discovery loop. Dropping an in-flight command invalidates
+    /// only the generation used by that query; a completed success remains
+    /// cached for reuse.
     ///
     /// # Parameters
     ///
@@ -315,11 +370,14 @@ impl SentinelResolver {
                     .map_err(|error| from_redis_error("connect", &error))
             })
             .await?;
+        let mut guard = SentinelQueryGuard::new(cache, generation);
         let result = async {
-            let raw = sentinel
+            guard.mark_started();
+            let query_result = sentinel
                 .send_packed_command(cmd("SENTINEL").arg("get-master-addr-by-name").arg(&self.service))
-                .await?;
-            self.target(raw)
+                .await;
+            guard.mark_completed();
+            query_result.and_then(|raw| self.target(raw))
         }
         .await;
         if result.is_err() {
@@ -491,12 +549,11 @@ pub(crate) async fn open_async(
 
 #[cfg(all(test, feature = "sync"))]
 mod tests {
-    #[cfg(feature = "async")]
-    use std::time::Duration;
-
     use qubit_event_bus::model::ProviderOptions;
     use redis::ErrorKind;
 
+    #[cfg(feature = "async")]
+    use super::SentinelQueryGuard;
     use super::SentinelResolver;
     use crate::config::RedisEventBusConfig;
     use crate::tests::support::redis_support::scripted_redis::ScriptedRedis;
@@ -680,45 +737,61 @@ mod tests {
 
     #[cfg(feature = "async")]
     #[test]
-    fn test_async_canceled_sentinel_query_keeps_multiplexed_connection_usable() {
+    fn test_async_sentinel_query_guard_tracks_generation_and_stale_drop() {
         use futures_lite::future::block_on;
-        use futures_lite::future::or;
 
-        let master = ScriptedRedis::start(role_steps(1)).expect("scripted master");
+        let master = ScriptedRedis::start(role_steps(2)).expect("scripted master");
         let sentinel = ScriptedRedis::start(vec![
-            Step::delayed_reply("SENTINEL", &discovery_reply(&master), Duration::from_millis(100)),
+            Step::reply("SENTINEL", &discovery_reply(&master)),
             Step::reply("SENTINEL", &discovery_reply(&master)),
         ])
         .expect("scripted Sentinel");
         let config = RedisEventBusConfig::from_provider_options(&resolver_settings(&sentinel, "master"))
             .expect("valid settings");
         let resolver = SentinelResolver::new(&config).expect("resolver");
-        let (cancel, canceled) = futures_channel::oneshot::channel();
-        let query = std::thread::spawn(move || {
-            block_on(or(
-                async {
-                    let _ = resolver.connect_async(None).await;
-                },
-                async {
-                    let _ = canceled.await;
-                },
-            ));
-            drop(block_on(resolver.connect_async(None)).expect("next query uses a live connection"));
-        });
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        while sentinel.finish_allow_remaining().is_empty() && std::time::Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(1));
-        }
+        let cache = &resolver.async_control_connections[0];
+
+        drop(block_on(resolver.connect_async(None)).expect("first master connection"));
+        assert_eq!(cache.published_generation(), Some(1));
+
+        let unpolled_query = resolver.query_target_async(0);
+        drop(unpolled_query);
         assert_eq!(
-            sentinel.finish_allow_remaining().len(),
-            1,
-            "query reached Sentinel before cancellation"
+            cache.published_generation(),
+            Some(1),
+            "unpolled query leaves lease intact"
         );
-        cancel.send(()).expect("cancel signal receiver is alive");
-        query.join().expect("query worker completes");
+
+        drop(SentinelQueryGuard::new(cache, 1));
+        assert_eq!(
+            cache.published_generation(),
+            Some(1),
+            "unstarted query leaves lease intact"
+        );
+
+        let mut stale_guard = SentinelQueryGuard::new(cache, 1);
+        stale_guard.mark_started();
+        let mut canceled_guard = SentinelQueryGuard::new(cache, 1);
+        canceled_guard.mark_started();
+        drop(canceled_guard);
+        assert_eq!(
+            cache.published_generation(),
+            None,
+            "started abandoned query invalidates its lease"
+        );
+
+        drop(block_on(resolver.connect_async(None)).expect("replacement master connection"));
+        assert_eq!(cache.published_generation(), Some(2));
+        drop(stale_guard);
+        assert_eq!(
+            cache.published_generation(),
+            Some(2),
+            "stale guard cannot invalidate replacement"
+        );
 
         sentinel.finish();
         master.finish();
-        assert_eq!(sentinel.connection_count(), 1);
+        assert_eq!(sentinel.connection_count(), 2);
+        assert_eq!(master.connection_count(), 2);
     }
 }

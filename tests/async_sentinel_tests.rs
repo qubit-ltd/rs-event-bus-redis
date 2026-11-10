@@ -45,6 +45,7 @@ use qubit_event_bus_redis::naming::group_name;
 use qubit_event_bus_redis::naming::stream_key;
 use qubit_id::Id;
 use qubit_spi::AsyncServiceProvider;
+use support::controlled_redis::proxy::ControlledRedis;
 use support::sentinel::SentinelServer;
 
 #[test]
@@ -191,6 +192,96 @@ fn test_async_sentinel_claims_unsettled_record_after_promotion() -> Result<(), B
         receiver.close().await?;
         Ok(())
     })
+}
+
+#[test]
+fn test_async_canceled_sentinel_query_opens_replacement_while_old_reply_is_held() {
+    use futures_lite::future::or;
+
+    let sentinel = SentinelServer::start().expect("real Sentinel fixture");
+    let upstream = format!(
+        "redis://{}/",
+        sentinel.endpoints().split(',').next().expect("Sentinel endpoint")
+    );
+    let proxy = ControlledRedis::start(&upstream).expect("controlled Sentinel proxy");
+    let gate = proxy.pause_after_reply("SENTINEL");
+    let proxy_url = proxy.url();
+    let proxy_node = proxy_url
+        .strip_prefix("redis://")
+        .expect("proxy Redis URL")
+        .trim_end_matches('/');
+    let options: ProviderOptions = [
+        ("redis.namespace".into(), "sentinel-cancel-probe".into()),
+        ("redis.sentinel.nodes".into(), proxy_node.into()),
+        ("redis.sentinel.service_name".into(), "qeventbus".into()),
+        ("redis.connect_timeout_ms".into(), "1000".into()),
+        ("redis.command_timeout_ms".into(), "3000".into()),
+    ]
+    .into();
+    let config = EventBusConfig::default().with_provider_options(options);
+    let (cancel, canceled) = futures_channel::oneshot::channel();
+    let (finished, result) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let bus =
+            block_on(AsyncRedisEventBusProvider.create_configured(&config)).expect("Sentinel provider configuration");
+        block_on(async {
+            let _ = or(
+                async {
+                    let _ = bus
+                        .publish(message("events", "canceled-sentinel-probe", b"first").expect("message"))
+                        .await;
+                },
+                async {
+                    let _ = canceled.await;
+                },
+            )
+            .await;
+            let succeeded = bus
+                .publish(message("events", "after-canceled-sentinel-probe", b"second").expect("message"))
+                .await
+                .is_ok();
+            let _ = finished.send(succeeded);
+        });
+    });
+
+    let started = std::time::Instant::now();
+    let reached = gate.wait_until_reached(Duration::from_secs(15));
+    if reached {
+        cancel.send(()).expect("first query is waiting for cancellation");
+    } else {
+        gate.release();
+    }
+    let observations = proxy.wait_for_requests("SENTINEL", 2, Duration::from_secs(5));
+    let second_request_elapsed = started.elapsed();
+    let before_release = result.recv_timeout(Duration::from_secs(2)).ok();
+    let held_wait_elapsed = started.elapsed();
+    let sentinel_requests = observations
+        .iter()
+        .filter(|entry| entry.command.eq_ignore_ascii_case(b"SENTINEL"))
+        .map(|entry| entry.connection_id)
+        .collect::<Vec<_>>();
+    gate.release();
+    let after_release = before_release.or_else(|| result.recv_timeout(Duration::from_secs(5)).ok());
+    let released_wait_elapsed = started.elapsed();
+    worker.join().expect("canceled query and retry worker exits");
+
+    assert!(reached, "first SENTINEL reply reached the held gate");
+    assert_eq!(sentinel_requests.len(), 2, "both requests reached the real Sentinel");
+    assert_eq!(
+        before_release,
+        Some(true),
+        "retry completes before old reply release; requests={sentinel_requests:?}, second_request_elapsed={second_request_elapsed:?}, held_wait_elapsed={held_wait_elapsed:?}, after_release={after_release:?}, total={released_wait_elapsed:?}"
+    );
+    assert_ne!(
+        sentinel_requests[0], sentinel_requests[1],
+        "cancellation publishes a new Sentinel socket/generation"
+    );
+    assert_eq!(
+        proxy.connection_count(),
+        2,
+        "replacement opens one new proxy connection"
+    );
+    assert_eq!(after_release, Some(true));
 }
 
 /// Builds an encoded event for `topic` and `id` with `bytes`; returns metadata

@@ -159,6 +159,12 @@ impl AsyncConnectionCache {
             state.connection = None;
         }
     }
+
+    #[cfg(all(test, feature = "sync", feature = "async"))]
+    pub(crate) fn published_generation(&self) -> Option<u64> {
+        let state = self.state.lock().ok()?;
+        state.connection.as_ref().map(|_| state.generation)
+    }
 }
 
 #[cfg(test)]
