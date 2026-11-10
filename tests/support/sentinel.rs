@@ -13,6 +13,7 @@ use std::net::TcpListener;
 use std::process::Child;
 use std::process::Command;
 use std::process::Stdio;
+use std::sync::Mutex;
 use std::thread::sleep;
 use std::time::Duration;
 use std::time::Instant;
@@ -22,6 +23,8 @@ use redis::cmd;
 use redis::streams::StreamInfoGroupsReply;
 use redis::streams::StreamPendingCountReply;
 use tempfile::TempDir;
+
+static SENTINEL_START_LOCK: Mutex<()> = Mutex::new(());
 
 /// Owns the Redis and Sentinel containers used by a failover test.
 pub struct SentinelServer {
@@ -42,6 +45,11 @@ impl SentinelServer {
     /// configuration-write, container-start, output-decoding, or readiness
     /// errors. Owned partial state is cleaned on failure.
     pub fn start() -> Result<Self, Box<dyn Error>> {
+        // free_port closes its listener before Redis binds; serialize fixture
+        // creation so concurrent Sentinel fixtures cannot select the same port.
+        let _guard = SENTINEL_START_LOCK
+            .lock()
+            .map_err(|_| "Sentinel fixture start lock is poisoned")?;
         Self::start_docker().or_else(|_| Self::start_local())
     }
 

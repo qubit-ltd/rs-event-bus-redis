@@ -343,6 +343,37 @@ async fn assert_outside_namespace_denied_async(namespace: &str) -> Result<(), Bo
 
 #[cfg(feature = "sync")]
 #[test]
+fn test_concurrent_sentinel_fixture_starts_use_distinct_ports() {
+    let start = || std::thread::spawn(|| SentinelServer::start().map_err(|error| error.to_string()));
+    let first_thread = start();
+    let second_thread = start();
+    let first = first_thread
+        .join()
+        .expect("first fixture thread")
+        .expect("first Sentinel fixture");
+    let second = second_thread
+        .join()
+        .expect("second fixture thread")
+        .expect("second Sentinel fixture");
+    let first_ports: Vec<_> = first
+        .endpoints()
+        .split(',')
+        .map(|endpoint| endpoint.rsplit(':').next().expect("endpoint port").to_owned())
+        .collect();
+    let second_ports: Vec<_> = second
+        .endpoints()
+        .split(',')
+        .map(|endpoint| endpoint.rsplit(':').next().expect("endpoint port").to_owned())
+        .collect();
+
+    assert!(
+        first_ports.iter().all(|port| !second_ports.contains(port)),
+        "concurrent Sentinel fixtures must own disjoint ports"
+    );
+}
+
+#[cfg(feature = "sync")]
+#[test]
 fn test_sync_sentinel_acl_workflow() {
     let sentinel = SentinelServer::start().expect("isolated Sentinel fixture");
     run_sentinel_checks(&sentinel, "test_sync_sentinel_acl_child")
