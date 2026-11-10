@@ -11,9 +11,9 @@
 <!-- current-source-dependencies -->
 ```toml
 [dependencies]
-qubit-event-bus = { version = "0.21", path = "../rs-event-bus", features = ["discovery"] }
+qubit-event-bus = { version = "^0.21", path = "../rs-event-bus", features = ["discovery"] }
 qubit-event-bus-redis = { version = "0.7.0", path = "../rs-event-bus-redis" }
-qubit-spi = "0.14"
+qubit-spi = "^0.14"
 
 [patch.crates-io]
 qubit-event-bus = { path = "../rs-event-bus" }
@@ -390,7 +390,7 @@ ACL SETUSER event-worker reset on >replace-with-managed-secret \\
   +eval +type
 ```
 
-这里的 `+eval` 和 `+type` 用于畸形记录隔离；只有部署明确不允许这条处理路径时才省略。若 URL 指向非零数据库，还要按 Redis ACL 策略允许客户端初始化时的 `SELECT`。如果 Redis 支持 `CLIENT SETINFO` 且希望记录客户端元数据，可以授予对应的 `setinfo` 子命令；拒绝该命令不会阻止 provider 完成连接初始化。不要用 `+@all` 代替逐项授权。Sentinel 需要单独配置发现权限；master 账号配置应用命令和 `ROLE`；运维观察则使用另一身份。
+正常终态结算和隔离均需要 `+eval`；终态结算还需要脚本内 `XPENDING` 与 `XACK` 权限。`+type` 用于隔离路径；省略它会使该路径不可用，但不能因此省略 `+eval`。缺少隔离权限会使畸形记录无法完成处理，必须按运维流程处置。若 URL 指向非零数据库，还要按 Redis ACL 策略允许客户端初始化时的 `SELECT`。如果 Redis 支持 `CLIENT SETINFO` 且希望记录客户端元数据，可以授予对应的 `setinfo` 子命令；拒绝该命令不会阻止 provider 完成连接初始化。不要用 `+@all` 代替逐项授权。Sentinel 需要单独配置发现权限；master 账号配置应用命令和 `ROLE`；运维观察则使用另一身份。
 
 遇到 `NOPERM` 时，先从 Redis 错误或服务端审计日志确认被拒的命令和 key，再按上表检查对应路径。尤其确认 stream 和隔离 key pattern 都已授权、EVAL 及脚本实际调用的命令均可执行，并核对非零数据库 URL 是否触发了 `SELECT`。Sentinel 模式还要分别验证发现命令，以及使用正确凭据的 master `ROLE` 和 stream 权限。provider 会将 Redis `NOPERM` 归为不可重试的 `authentication` 错误；仅更换密码不能补上缺失的命令或 key 权限。隔离被拒后，用管理员或 observer 账号检查 `XPENDING` 和隔离 stream；脚本失败不能算作隔离成功。Redis Lua 不会在后续 `XACK` 失败时回滚已执行的隔离 `XADD`。
 

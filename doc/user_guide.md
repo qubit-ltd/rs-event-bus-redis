@@ -11,9 +11,9 @@ For a consumer in the Qubit source workspace, add both sibling checkouts as dire
 <!-- current-source-dependencies -->
 ```toml
 [dependencies]
-qubit-event-bus = { version = "0.21", path = "../rs-event-bus", features = ["discovery"] }
+qubit-event-bus = { version = "^0.21", path = "../rs-event-bus", features = ["discovery"] }
 qubit-event-bus-redis = { version = "0.7.0", path = "../rs-event-bus-redis" }
-qubit-spi = "0.14"
+qubit-spi = "^0.14"
 
 [patch.crates-io]
 qubit-event-bus = { path = "../rs-event-bus" }
@@ -392,7 +392,7 @@ ACL SETUSER event-worker reset on >replace-with-managed-secret \\
   +eval +type
 ```
 
-`+eval` and `+type` are included for malformed-record quarantine; omit them only if the deployment intentionally does not permit that path. An installation that uses a nonzero database must also authorize the client's setup-time `SELECT` according to its Redis ACL policy. If the Redis server supports `CLIENT SETINFO` and you want client metadata to be recorded, you may grant its `setinfo` subcommand; denial does not block provider setup. Do not replace this list with `+@all`. A separately provisioned Sentinel account needs the Sentinel discovery permission above, while the master account needs its own application rules and `ROLE`; observer permissions belong to a separate operational identity.
+`+eval` is required for normal terminal settlement as well as quarantine. Terminal settlement also requires the script's `XPENDING` and `XACK` permissions. `+type` is used by quarantine; omitting it disables that path, but does not make `+eval` optional. Missing quarantine permissions leave malformed records unresolved and must be handled operationally. An installation that uses a nonzero database must also authorize the client's setup-time `SELECT` according to its Redis ACL policy. If the Redis server supports `CLIENT SETINFO` and you want client metadata to be recorded, you may grant its `setinfo` subcommand; denial does not block provider setup. Do not replace this list with `+@all`. A separately provisioned Sentinel account needs the Sentinel discovery permission above, while the master account needs its own application rules and `ROLE`; observer permissions belong to a separate operational identity.
 
 When an operation fails with `NOPERM`, check the failing command and key in the Redis error or server audit log, then compare them with the path-specific rows above. Verify both the stream and quarantine key patterns, `EVAL` plus each command executed by its script, and whether a nonzero URL database caused `SELECT`. In Sentinel mode, verify Sentinel discovery permission and master `ROLE`/stream permissions with the right credential pair. Provider errors classify Redis `NOPERM` as non-retryable `authentication`; changing credentials alone will not fix a missing command or key rule. Use an administrator/observer connection to inspect `XPENDING` and the quarantine stream after a denied quarantine attempt: a failed script must not be treated as confirmed quarantine, and Redis Lua does not roll back a quarantine `XADD` if a later `XACK` fails.
 
