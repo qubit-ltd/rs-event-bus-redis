@@ -4,3 +4,14 @@
 ../rs-codec	https://github.com/qubit-ltd/rs-codec	dev-starfish
 ../rs-metadata	https://github.com/qubit-ltd/rs-metadata	main
 ../rs-model-metadata	https://github.com/qubit-ltd/rs-model-metadata	dev-starfish
+../rs-datatype	https://github.com/qubit-ltd/rs-datatype	main
+../../rust-common/rs-datatype	https://github.com/qubit-ltd/rs-datatype	main
+../rs-id	https://github.com/qubit-ltd/rs-id	main
+../rs-progress	https://github.com/qubit-ltd/rs-progress	main
+../rs-redact	https://github.com/qubit-ltd/rs-redact	main
+../../rust-common/rs-redact	https://github.com/qubit-ltd/rs-redact	main
+../rs-reflect	https://github.com/qubit-ltd/rs-reflect	main
+../rs-validation-rules	https://github.com/qubit-ltd/rs-validation-rules	main
+../../rust-common/rs-validation-rules	https://github.com/qubit-ltd/rs-validation-rules	main
+../rs-validator	https://github.com/qubit-ltd/rs-validator	dev-starfish
+../../rust-common/rs-validator	https://github.com/qubit-ltd/rs-validator	dev-starfish
