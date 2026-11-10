@@ -526,7 +526,7 @@ claim、pending、attempt 明细和 tombstone 维护命令通过 receiver 专用
 
 `max_idle_connections` 默认为 8，且不得超过 `max_concurrent_commands`。短操作上限设为 8 以下时，应同时降低空闲保留数，例如同时设置 `redis.max_concurrent_commands=4` 和 `redis.max_idle_connections=4`；只降低前者会被配置校验拒绝。新增字节、时间、数量配置均为有限范围内的正十进制数，不能用 0 关闭限制。
 
-默认 1MiB payload 限额按编码字节计量，8MiB wire 限额计入完整 JSON，包括 byte-array 膨胀和元数据。payload 合法不代表任意 headers 都能装入 wire。发布先检查 payload，再通过有界 sink 写出 JSON；中间 headers JSON 也受限。provider 编码借用调用方元数据和 payload，分配的 headers/wire String 都有界；直接调用 `WireFields::from_outbound` 转换不会应用这些 provider 配置限额。接收先检查完整 wire 字节限额，再解析 JSON；完整 JSON 语法和 Serde 递归保护适用于所有版本及被忽略字段。完整有效的未知版本跳过版本 1 字段校验，而无效或嵌套过深的 JSON 按 poison 策略处理。版本 1 随后应用有界字段、payload 和 headers 校验。可读取历史记录超过 wire、payload 或 headers 容量时返回 `receive_limit_exceeded` 并保留 pending；确定性格式错误进入隔离。专用 receiver 的 RESP 帧上限与这些解码记录限额相互独立。
+默认 1MiB payload 限额按编码字节计量，8MiB wire 限额计入完整 JSON，包括 byte-array 膨胀和元数据。payload 合法不代表任意 headers 都能装入 wire。发布会先检查 event type 和原始 payload 大小，再取得一个普通命令名额，然后通过有界 sink 编码 wire；该名额覆盖 wire 编码、连接建立和 `XADD` 操作。普通名额已满时，`resource_limit` 会先于只能在编码阶段发现的错误（例如无效 headers 或 wire 超限）；event type 和原始 payload 错误仍优先返回。命令并发上限也限制了同时编码的发布数，但不能据此推断进程 RSS 上限。中间 headers JSON 同样受限。provider 编码借用调用方元数据和 payload，分配的 headers/wire String 都有界；直接调用 `WireFields::from_outbound` 转换不会应用这些 provider 配置限额。接收先检查完整 wire 字节限额，再解析 JSON；完整 JSON 语法和 Serde 递归保护适用于所有版本及被忽略字段。完整有效的未知版本跳过版本 1 字段校验，而无效或嵌套过深的 JSON 按 poison 策略处理。版本 1 随后应用有界字段、payload 和 headers 校验。可读取历史记录超过 wire、payload 或 headers 容量时返回 `receive_limit_exceeded` 并保留 pending；确定性格式错误进入隔离。专用 receiver 的 RESP 帧上限与这些解码记录限额相互独立。
 
 解码预算约束 provider 追加的序列化和解析分配。专用 receiver 连接另有 `redis.max_wire_bytes + 65,536` 字节的 RESP 响应帧限制，并在构造响应值前执行。该帧限制不适用于其他连接，也不是进程 RSS 上限。应结合可信 Redis/网络、server `maxmemory`、应用并发及源 stream/隔离流保留策略管理资源。隔离流没有自动保留上限。
 
