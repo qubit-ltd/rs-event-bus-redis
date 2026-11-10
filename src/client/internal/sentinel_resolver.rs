@@ -318,7 +318,7 @@ impl SentinelResolver {
         }
         .await;
         if result.is_err() {
-            cache.invalidate_if_current(generation).await;
+            cache.invalidate_if_current(generation);
         }
         result
     }

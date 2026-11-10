@@ -132,11 +132,177 @@ fn test_async_command_cap_fails_before_second_xadd_and_cancel_releases() {
             "cancelled operation releases application permit"
         );
         assert_eq!(snapshot(instance_id).general_in_flight(), 1);
-        assert_eq!(snapshot(instance_id).connection_attempts(), 1);
+        assert_eq!(
+            snapshot(instance_id).connection_attempts(),
+            2,
+            "cancelled transport generation is retired"
+        );
         drop(next);
         assert_eq!(snapshot(instance_id).general_in_flight(), 0);
         assert_eq!(snapshot(instance_id).command_rejections(), 1);
     });
+}
+
+#[cfg(feature = "async")]
+#[test]
+fn test_async_repeated_post_send_cancellation_resource_boundary() {
+    let server = BlackholeRedis::start(true, None);
+    let mut settings = options(server.url(), 2);
+    let namespace = "diagnostics-async-repeated-cancellation";
+    settings.insert("redis.namespace".into(), namespace.into());
+    settings.insert("redis.command_timeout_ms".into(), "2000".into());
+    let previous_id = latest_instance_id();
+    let bus = block_on(
+        AsyncRedisEventBusProvider.create_configured(&EventBusConfig::default().with_provider_options(settings)),
+    )
+    .expect("provider");
+    let instance_id = new_instance_id(previous_id, namespace);
+
+    block_on(async {
+        for expected in [1, 16, 128, 1024] {
+            while server.commands() < expected {
+                let target = server.commands() + 1;
+                let mut operation = bus.publish(message());
+                assert!(poll_once(&mut operation).await.is_none());
+                let deadline = Instant::now() + Duration::from_secs(1);
+                while server.commands() < target && Instant::now() < deadline {
+                    assert!(poll_once(&mut operation).await.is_none());
+                    sleep(Duration::from_millis(1));
+                }
+                assert_eq!(server.commands(), target, "each command must reach Redis before drop");
+                assert_eq!(snapshot(instance_id).general_in_flight(), 1);
+                drop(operation);
+                assert_eq!(snapshot(instance_id).general_in_flight(), 0);
+                let deadline = Instant::now() + Duration::from_secs(1);
+                while server.active_connections() != 0 && Instant::now() < deadline {
+                    sleep(Duration::from_millis(1));
+                }
+                assert_eq!(server.active_connections(), 0, "retired driver closes its socket");
+            }
+            assert_eq!(server.commands(), expected);
+            assert_eq!(
+                server.connections(),
+                expected,
+                "each cancellation retires its transport generation"
+            );
+            assert_eq!(snapshot(instance_id).connection_attempts(), expected as u64);
+            assert_eq!(snapshot(instance_id).general_in_flight(), 0);
+        }
+    });
+    assert_eq!(server.commands(), 1024, "no provider-side XADD replay");
+}
+
+#[cfg(feature = "async")]
+#[test]
+fn test_async_cancelled_old_lease_preserves_replacement_generation() {
+    let server = BlackholeRedis::start(true, None);
+    let mut settings = options(server.url(), 4);
+    let namespace = "diagnostics-async-cancel-generation";
+    settings.insert("redis.namespace".into(), namespace.into());
+    settings.insert("redis.command_timeout_ms".into(), "2000".into());
+    settings.insert("redis.reserved_settlement_commands".into(), "1".into());
+    let previous_id = latest_instance_id();
+    let bus = block_on(
+        AsyncRedisEventBusProvider.create_configured(&EventBusConfig::default().with_provider_options(settings)),
+    )
+    .expect("provider");
+    let instance_id = new_instance_id(previous_id, namespace);
+
+    block_on(async {
+        let mut first = bus.publish(message());
+        assert!(poll_once(&mut first).await.is_none());
+        wait_for_commands(&server, 1, &mut first).await;
+        let mut second = bus.publish(message());
+        let second_poll = poll_once(&mut second).await;
+        assert!(
+            second_poll.is_none(),
+            "second request unexpectedly completed: {second_poll:?}"
+        );
+        wait_for_commands(&server, 2, &mut second).await;
+        assert_eq!(server.connections(), 1, "concurrent leases share generation one");
+        assert_eq!(snapshot(instance_id).connection_attempts(), 1);
+
+        drop(first);
+        let mut replacement = bus.publish(message());
+        assert!(poll_once(&mut replacement).await.is_none());
+        wait_for_commands(&server, 3, &mut replacement).await;
+        assert_eq!(server.connections(), 2, "cancelled generation is replaced");
+        assert_eq!(snapshot(instance_id).connection_attempts(), 2);
+
+        drop(second);
+        wait_for_active_connections(&server, 1);
+        let mut current = bus.publish(message());
+        assert!(poll_once(&mut current).await.is_none());
+        wait_for_commands(&server, 4, &mut current).await;
+        assert_eq!(server.connections(), 2, "stale lease drop preserves replacement cache");
+        assert_eq!(snapshot(instance_id).connection_attempts(), 2);
+        assert_eq!(
+            server.active_connections(),
+            1,
+            "only the replacement driver remains live"
+        );
+
+        drop(replacement);
+        drop(current);
+        wait_for_active_connections(&server, 0);
+        assert_eq!(snapshot(instance_id).general_in_flight(), 0);
+    });
+}
+
+#[cfg(feature = "async")]
+#[test]
+fn test_async_post_send_timeout_retires_transport_generation() {
+    let server = BlackholeRedis::start(true, None);
+    let mut settings = options(server.url(), 2);
+    let namespace = "diagnostics-async-post-send-timeout";
+    settings.insert("redis.namespace".into(), namespace.into());
+    settings.insert("redis.command_timeout_ms".into(), "100".into());
+    let previous_id = latest_instance_id();
+    let bus = block_on(
+        AsyncRedisEventBusProvider.create_configured(&EventBusConfig::default().with_provider_options(settings)),
+    )
+    .expect("provider");
+    let instance_id = new_instance_id(previous_id, namespace);
+
+    for expected in [1, 2] {
+        let error = block_on(bus.publish(message())).expect_err("withheld reply times out");
+        assert_error(error, "outcome_unknown", false);
+        assert_eq!(server.commands(), expected, "timeout must not replay XADD");
+        wait_for_active_connections(&server, 0);
+        assert_eq!(snapshot(instance_id).general_in_flight(), 0);
+        assert_eq!(snapshot(instance_id).connection_attempts(), expected as u64);
+    }
+}
+
+#[cfg(feature = "async")]
+async fn wait_for_commands<F: std::future::Future + Unpin>(
+    server: &BlackholeRedis,
+    expected: usize,
+    operation: &mut F,
+) {
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while server.commands() < expected && Instant::now() < deadline {
+        assert!(poll_once(&mut *operation).await.is_none());
+        sleep(Duration::from_millis(1));
+    }
+    assert_eq!(
+        server.commands(),
+        expected,
+        "request reached the blackhole before cancellation"
+    );
+}
+
+#[cfg(feature = "async")]
+fn wait_for_active_connections(server: &BlackholeRedis, expected: usize) {
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while server.active_connections() != expected && Instant::now() < deadline {
+        sleep(Duration::from_millis(1));
+    }
+    assert_eq!(
+        server.active_connections(),
+        expected,
+        "driver closure is observable at the socket"
+    );
 }
 
 #[cfg(feature = "sync")]

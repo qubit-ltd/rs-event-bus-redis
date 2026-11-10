@@ -76,11 +76,11 @@ pub(crate) struct Client {
     /// Single-flight standalone short-command connection cache with
     /// generations.
     #[cfg(feature = "async")]
-    async_general_cache: AsyncConnectionCache,
+    async_general_cache: Arc<AsyncConnectionCache>,
     /// Settlement EVALs use an independent standalone connection to avoid
     /// waiting behind general-command response traffic.
     #[cfg(feature = "async")]
-    async_settlement_cache: AsyncConnectionCache,
+    async_settlement_cache: Arc<AsyncConnectionCache>,
 }
 impl Client {
     /// Parses validated endpoint/ACL options without performing network I/O.
@@ -141,9 +141,9 @@ impl Client {
             #[cfg(feature = "sync")]
             sync_pool: Arc::new(SyncConnectionPool::new(config.max_idle_connections())),
             #[cfg(feature = "async")]
-            async_general_cache: AsyncConnectionCache::new(),
+            async_general_cache: Arc::new(AsyncConnectionCache::new()),
             #[cfg(feature = "async")]
-            async_settlement_cache: AsyncConnectionCache::new(),
+            async_settlement_cache: Arc::new(AsyncConnectionCache::new()),
         })
     }
     /// Registers diagnostics exactly once before a provider shares this client.
@@ -347,22 +347,31 @@ impl Client {
             }
         })?;
         let role = AsyncConnectionRole::from(class);
-        let (generation, connection) = if self.standalone.is_some() {
+        let (generation, connection, cache) = if self.standalone.is_some() {
             match role {
-                AsyncConnectionRole::General => self.async_general_cache.get_or_connect(self.open_async(None)).await?,
+                AsyncConnectionRole::General => {
+                    let (generation, connection) =
+                        self.async_general_cache.get_or_connect(self.open_async(None)).await?;
+                    (generation, connection, Some(Arc::clone(&self.async_general_cache)))
+                }
                 AsyncConnectionRole::Settlement => {
-                    self.async_settlement_cache
+                    let (generation, connection) = self
+                        .async_settlement_cache
                         .get_or_connect(self.open_async(None))
-                        .await?
+                        .await?;
+                    (generation, connection, Some(Arc::clone(&self.async_settlement_cache)))
                 }
             }
         } else {
-            (0, self.open_async(None).await?)
+            (0, self.open_async(None).await?, None)
         };
         Ok(AsyncCommandConnection {
             role,
             generation,
             connection,
+            cache,
+            request_started: false,
+            request_complete: false,
             _permit: permit,
         })
     }
@@ -395,8 +404,8 @@ impl Client {
     #[cfg(feature = "async")]
     pub(crate) async fn invalidate_async_connection(&self, role: AsyncConnectionRole, generation: u64) {
         match role {
-            AsyncConnectionRole::General => self.async_general_cache.invalidate_if_current(generation).await,
-            AsyncConnectionRole::Settlement => self.async_settlement_cache.invalidate_if_current(generation).await,
+            AsyncConnectionRole::General => self.async_general_cache.invalidate_if_current(generation),
+            AsyncConnectionRole::Settlement => self.async_settlement_cache.invalidate_if_current(generation),
         }
     }
     /// Opens controlled standalone or freshly discovered Sentinel transport.

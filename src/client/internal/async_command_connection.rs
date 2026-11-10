@@ -6,6 +6,8 @@
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 //! Generation-tagged async connection lease holding command admission.
+use std::sync::Arc;
+
 use redis::Cmd;
 use redis::Pipeline;
 use redis::RedisFuture;
@@ -14,6 +16,7 @@ use redis::Value;
 use redis::aio::ConnectionLike;
 use redis::aio::MultiplexedConnection;
 
+use super::async_connection_cache::AsyncConnectionCache;
 use super::async_connection_role::AsyncConnectionRole;
 use super::command_permit::CommandPermit;
 /// Owns admission and one connection generation until completion or
@@ -28,6 +31,13 @@ pub(crate) struct AsyncCommandConnection {
     /// Multiplexed transport configured with finite short-command waiting
     /// budgets.
     pub(crate) connection: MultiplexedConnection,
+    /// Standalone cache whose generation this lease may retire if a sent
+    /// request is abandoned. Sentinel transports are not cached.
+    pub(crate) cache: Option<Arc<AsyncConnectionCache>>,
+    /// Whether a command request was polled through this lease.
+    pub(crate) request_started: bool,
+    /// Whether that request returned a response or error.
+    pub(crate) request_complete: bool,
     /// Non-cloneable admission retained for the lifetime of this operation
     /// lease.
     pub(crate) _permit: CommandPermit,
@@ -49,7 +59,25 @@ impl AsyncCommandConnection {
     /// Returns Redis transport/protocol failures. Cancellation can leave
     /// execution unknown.
     pub(crate) async fn send_packed_command(&mut self, command: &Cmd) -> RedisResult<Value> {
-        self.connection.send_packed_command(command).await
+        self.request_complete = false;
+        self.request_started = true;
+        let result = self.connection.send_packed_command(command).await;
+        self.request_complete = true;
+        result
+    }
+}
+impl Drop for AsyncCommandConnection {
+    /// Retires the cached generation when its request future is dropped before
+    /// the transport returns a result. Dropping this lease then releases its
+    /// multiplexed connection clone; stale generations cannot clear a newer
+    /// cache publication.
+    fn drop(&mut self) {
+        if self.request_started
+            && !self.request_complete
+            && let Some(cache) = &self.cache
+        {
+            cache.invalidate_if_current(self.generation);
+        }
     }
 }
 impl ConnectionLike for AsyncCommandConnection {
@@ -75,7 +103,13 @@ impl ConnectionLike for AsyncCommandConnection {
     /// The returned future propagates Redis transport, protocol, and command
     /// errors.
     fn req_packed_command<'a>(&'a mut self, cmd: &'a Cmd) -> RedisFuture<'a, Value> {
-        self.connection.req_packed_command(cmd)
+        Box::pin(async move {
+            self.request_complete = false;
+            self.request_started = true;
+            let result = self.connection.req_packed_command(cmd).await;
+            self.request_complete = true;
+            result
+        })
     }
     /// Delegates `cmd`, skipping `offset` replies and returning at most
     /// `count`.
@@ -107,7 +141,13 @@ impl ConnectionLike for AsyncCommandConnection {
         offset: usize,
         count: usize,
     ) -> RedisFuture<'a, Vec<Value>> {
-        self.connection.req_packed_commands(cmd, offset, count)
+        Box::pin(async move {
+            self.request_complete = false;
+            self.request_started = true;
+            let result = self.connection.req_packed_commands(cmd, offset, count).await;
+            self.request_complete = true;
+            result
+        })
     }
     /// Returns the configured database without I/O or allocation.
     ///

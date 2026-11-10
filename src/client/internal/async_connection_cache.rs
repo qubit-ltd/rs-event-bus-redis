@@ -151,7 +151,7 @@ impl AsyncConnectionCache {
     ///   state intact.
     ///
     /// Acquires only the short directory mutex; no Redis command is issued.
-    pub(crate) async fn invalidate_if_current(&self, generation: u64) {
+    pub(crate) fn invalidate_if_current(&self, generation: u64) {
         let Ok(mut state) = self.state.lock() else {
             return;
         };

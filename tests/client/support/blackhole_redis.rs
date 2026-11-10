@@ -35,6 +35,8 @@ pub struct BlackholeRedis {
     #[cfg(feature = "async")]
     accepted: Arc<AtomicUsize>,
     #[cfg(feature = "async")]
+    active: Arc<AtomicUsize>,
+    #[cfg(feature = "async")]
     setup_commands: Arc<AtomicUsize>,
     commands: Arc<AtomicUsize>,
     worker: Option<JoinHandle<()>>,
@@ -53,6 +55,7 @@ impl BlackholeRedis {
         let stop = Arc::new(AtomicBool::new(false));
         let sockets = Arc::new(Mutex::new(Vec::new()));
         let accepted = Arc::new(AtomicUsize::new(0));
+        let active = Arc::new(AtomicUsize::new(0));
         let setup_commands = Arc::new(AtomicUsize::new(0));
         let commands = Arc::new(AtomicUsize::new(0));
         let setup_reply = Arc::new(AtomicBool::new(setup_reply));
@@ -60,6 +63,7 @@ impl BlackholeRedis {
         let thread_stop = Arc::clone(&stop);
         let thread_sockets = Arc::clone(&sockets);
         let thread_accepted = Arc::clone(&accepted);
+        let thread_active = Arc::clone(&active);
         let thread_setup_commands = Arc::clone(&setup_commands);
         let thread_commands = Arc::clone(&commands);
         let worker = spawn(move || {
@@ -75,10 +79,12 @@ impl BlackholeRedis {
                             .expect("socket registry")
                             .push(stream.try_clone().expect("clone socket"));
                         thread_accepted.fetch_add(1, Ordering::SeqCst);
+                        thread_active.fetch_add(1, Ordering::SeqCst);
                         let commands = Arc::clone(&thread_commands);
                         let setup_commands = Arc::clone(&thread_setup_commands);
                         let setup_reply = Arc::clone(&thread_setup_reply);
                         let stop = Arc::clone(&thread_stop);
+                        let active = Arc::clone(&thread_active);
                         workers.push(spawn(move || {
                             let mut reader = BufReader::new(stream);
                             while let Ok(Some(command)) = read_command(&mut reader) {
@@ -98,6 +104,7 @@ impl BlackholeRedis {
                                     }
                                 }
                             }
+                            active.fetch_sub(1, Ordering::SeqCst);
                         }));
                     }
                     Err(error) if error.kind() == ErrorKind::WouldBlock => sleep(Duration::from_millis(1)),
@@ -114,6 +121,8 @@ impl BlackholeRedis {
             sockets,
             #[cfg(feature = "async")]
             accepted,
+            #[cfg(feature = "async")]
+            active,
             #[cfg(feature = "async")]
             setup_commands,
             commands,
@@ -135,6 +144,11 @@ impl BlackholeRedis {
     #[cfg(feature = "async")]
     pub fn connections(&self) -> usize {
         self.accepted.load(Ordering::SeqCst)
+    }
+    /// Returns the number of accepted sockets whose read workers remain live.
+    #[cfg(feature = "async")]
+    pub fn active_connections(&self) -> usize {
+        self.active.load(Ordering::SeqCst)
     }
     /// Returns the number of Redis setup commands received by socket workers.
     #[cfg(feature = "async")]

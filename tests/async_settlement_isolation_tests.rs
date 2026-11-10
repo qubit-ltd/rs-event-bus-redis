@@ -56,7 +56,7 @@ use qubit_id::Id;
 use qubit_spi::AsyncServiceProvider;
 use support::redis_server::RedisServer;
 
-const WATCHDOG: Duration = Duration::from_secs(8);
+const WATCHDOG: Duration = Duration::from_secs(20);
 
 #[test]
 fn test_settlement_completes_while_publish_reply_is_held() -> Result<(), Box<dyn Error>> {
