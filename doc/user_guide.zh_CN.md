@@ -598,6 +598,8 @@ Redis 持久化和复制由部署负责。`Accepted` 只证明 XADD 被接受，
 
 处理 typed `qubit-task` 通知时，consumer 应按 `TaskId` 去重并保留最高 `state_version`，忽略重复、旧版本通知，并在版本缺口时查询任务服务取得权威状态。typed SQLite task service 可启用可选 outbox，在与任务状态相同的事务中捕获生命周期变更；收到 `Accepted` 前重试发布，收到后删除 outbox 行。这不能保证消费者端到端至少一次收到通知，也不会令无关的应用业务事务与任务状态或 Redis 原子提交。
 
+尾部通知丢失后可能再无后续事件暴露缺口。若应用需要有界恢复投影，可以把已接纳的任务 ID 保存在自己的跟踪表中，并按应用设定的周期分批核对。先在投影事务外查询任务服务 checkpoint，再在事务内重读 consumer 版本，仅权威版本更高时写入。查询失败、返回 `None` 或版本落后时继续保留跟踪；终态投影提交后再退役。对账只能修复当前状态：Redis 接纳不保证消费者收到通知，对账也无法重建缺失的状态迁移或副作用，更不提供 exactly-once 处理保证。
+
 ## 12. 从 provider 0.6 升级
 
 当前源码 manifest 版本为 provider 0.7.0/core 0.21。2026-11-04 registry 查询只是历史观察，不能证明当前 registry 可用性；当前发布安装证据见[安装与验证状态](design.zh_CN.md#安装与验证状态)。`RedisSubscriptionProfile` 根据明确的 `StartPosition` 构造 durable 订阅选项；创建新订阅时使用它，并保留预期的消费组。核心 codec 注册现在会拒绝重复载荷类型并返回 `Result`；要传播错误，使用 `?`，确需替换时才调用 `replace`。`InboundMessage` 增加可选 provider attempt 元数据，但 `into_parts` tuple 保持原样。保留 wire 版本 1 数据和现有消费组；发布前应验证 pending 记录，并按上文分别采集 provider 快照与 Redis PEL/内存。[迁移指南](migration.zh_CN.md)列出完整变更。
