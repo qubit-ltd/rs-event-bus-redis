@@ -289,6 +289,10 @@ pub fn run_sentinel_checks(
     set_master_user(&mut master, &source, true)?;
     configure_sentinel_users(&endpoints, false)?;
     run_sentinel_child(helper, &endpoints, namespace, "sentinel_denied")?;
+    configure_sentinel_users(&endpoints, true)?;
+    require_sentinel_authentication(&endpoints)?;
+    run_sentinel_child(helper, &endpoints, namespace, "wrong_password")?;
+    run_sentinel_child(helper, &endpoints, namespace, "missing_auth")?;
     Ok(())
 }
 
@@ -318,20 +322,46 @@ fn configure_sentinel_users(endpoints: &str, allow_lookup: bool) -> Result<(), B
     Ok(())
 }
 
+fn require_sentinel_authentication(endpoints: &str) -> Result<(), Box<dyn Error>> {
+    for endpoint in endpoints.split(',') {
+        let mut connection = redis::Client::open(format!("redis://{endpoint}/"))?.get_connection()?;
+        cmd("ACL")
+            .arg("SETUSER")
+            .arg("default")
+            .arg("off")
+            .query::<()>(&mut connection)?;
+    }
+    Ok(())
+}
+
 fn run_sentinel_child(helper: &str, endpoints: &str, namespace: &str, case: &str) -> Result<(), Box<dyn Error>> {
-    let child = Command::new(std::env::current_exe()?)
+    let mut command = Command::new(std::env::current_exe()?);
+    command
         .args(["--ignored", "--exact", helper, "--nocapture"])
         .env("RER_ACL_NAMESPACE", namespace)
         .env("RER_ACL_CASE", "workflow")
         .env("RER_ACL_USER", "qubit_master_test")
         .env("RER_ACL_PASSWORD", PASSWORD)
-        .env("RER_SENTINEL_USER", "qubit_sentinel_test")
-        .env("RER_SENTINEL_PASSWORD", PASSWORD)
         .env("RER_SENTINEL_NODES", endpoints)
         .env("RER_SENTINEL_CASE", case)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
+        .stderr(Stdio::piped());
+    if case == "missing_auth" {
+        command.env("RER_SENTINEL_CREDENTIALS", "omitted");
+        command.env_remove("RER_SENTINEL_USER");
+        command.env_remove("RER_SENTINEL_PASSWORD");
+    } else {
+        command.env("RER_SENTINEL_USER", "qubit_sentinel_test");
+        command.env(
+            "RER_SENTINEL_PASSWORD",
+            if case == "wrong_password" {
+                "incorrect-sentinel-password"
+            } else {
+                PASSWORD
+            },
+        );
+    }
+    let child = command.spawn()?;
     let output = wait_child(child, TIMEOUT)?;
     if !output.status.success() {
         return Err(format!(

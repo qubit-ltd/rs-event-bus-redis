@@ -148,8 +148,10 @@ fn config(namespace: &str) -> EventBusConfig {
     if let Ok(nodes) = std::env::var("RER_SENTINEL_NODES") {
         options.insert("redis.sentinel.nodes".into(), nodes);
         options.insert("redis.sentinel.service_name".into(), "qeventbus".into());
-        options.insert("redis.sentinel.username_env".into(), "RER_SENTINEL_USER".into());
-        options.insert("redis.sentinel.password_env".into(), "RER_SENTINEL_PASSWORD".into());
+        if std::env::var_os("RER_SENTINEL_CREDENTIALS").is_none() {
+            options.insert("redis.sentinel.username_env".into(), "RER_SENTINEL_USER".into());
+            options.insert("redis.sentinel.password_env".into(), "RER_SENTINEL_PASSWORD".into());
+        }
     }
     EventBusConfig::default().with_provider_options(options)
 }
@@ -380,6 +382,32 @@ fn sync_sentinel_child() -> Result<(), Box<dyn Error>> {
     let result = bus.publish(message("events", "sentinel-acl", b"x")?);
     if case == "success" {
         let _ = result?;
+    } else if case == "wrong_password" || case == "missing_auth" {
+        let error = result.expect_err("invalid Sentinel setup credentials must fail");
+        match error {
+            SpiError::Publish {
+                kind: "authentication",
+                retryable: Some(false),
+                ..
+            } => {}
+            error => return Err(format!("Sentinel setup failure had unexpected category: {error}").into()),
+        }
+        let display = error.to_string();
+        assert!(
+            !display.contains("qubit_sentinel_test"),
+            "error leaked username: {display}"
+        );
+        assert!(
+            !display.contains("ephemeral-acl-test-password"),
+            "error leaked password: {display}"
+        );
+        assert!(
+            !display.contains("incorrect-sentinel-password"),
+            "error leaked incorrect password: {display}"
+        );
+        for endpoint in std::env::var("RER_SENTINEL_NODES")?.split(',') {
+            assert!(!display.contains(endpoint), "error leaked Sentinel endpoint: {display}");
+        }
     } else {
         match result {
             Err(SpiError::Publish {
@@ -408,6 +436,32 @@ async fn async_sentinel_child() -> Result<(), Box<dyn Error>> {
     let result = bus.publish(message("events", "sentinel-acl", b"x")?).await;
     if case == "success" {
         let _ = result?;
+    } else if case == "wrong_password" || case == "missing_auth" {
+        let error = result.expect_err("invalid Sentinel setup credentials must fail");
+        match error {
+            SpiError::Publish {
+                kind: "authentication",
+                retryable: Some(false),
+                ..
+            } => {}
+            error => return Err(format!("Sentinel setup failure had unexpected category: {error}").into()),
+        }
+        let display = error.to_string();
+        assert!(
+            !display.contains("qubit_sentinel_test"),
+            "error leaked username: {display}"
+        );
+        assert!(
+            !display.contains("ephemeral-acl-test-password"),
+            "error leaked password: {display}"
+        );
+        assert!(
+            !display.contains("incorrect-sentinel-password"),
+            "error leaked incorrect password: {display}"
+        );
+        for endpoint in std::env::var("RER_SENTINEL_NODES")?.split(',') {
+            assert!(!display.contains(endpoint), "error leaked Sentinel endpoint: {display}");
+        }
     } else {
         match result {
             Err(SpiError::Publish {

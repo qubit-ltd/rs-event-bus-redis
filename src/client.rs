@@ -476,7 +476,9 @@ impl Client {
                 if let Some(diagnostics) = self.diagnostics() {
                     diagnostics.increment(RedisDiagnosticCounter::ConnectionAttempts);
                 }
-                open_async_connection(client, self.policy, max_response_bytes).await
+                open_async_connection(client, self.policy, max_response_bytes)
+                    .await
+                    .map_err(|error| from_redis_error("connect", &error))
             }
             (_, Some(resolver)) => {
                 if let Some(diagnostics) = self.diagnostics() {
@@ -491,7 +493,7 @@ impl Client {
         {
             diagnostics.increment(RedisDiagnosticCounter::ConnectionFailures);
         }
-        result.map_err(|error| from_redis_error("connect", &error))
+        result
     }
 }
 

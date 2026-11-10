@@ -42,6 +42,8 @@ use crate::config::RedisEventBusConfig;
 #[cfg(feature = "async")]
 use crate::error::RedisProviderError;
 use crate::internal::TransportPolicy;
+#[cfg(feature = "async")]
+use crate::redis_provider_error::from_redis_error;
 
 /// Finite RESP frame budget for Sentinel discovery and non-receiver master
 /// sockets.
@@ -224,15 +226,15 @@ impl SentinelResolver {
     ///
     /// # Errors
     ///
-    /// Returns the last endpoint, timeout, role, or protocol failure.
+    /// Returns the last sanitized endpoint, timeout, role, or protocol failure.
     /// Cancellation drops the active probe; no hidden election, write
     /// replay, or replacement task is started.
     #[cfg(feature = "async")]
     pub(crate) async fn connect_async(
         &self,
         max_response_bytes: Option<usize>,
-    ) -> Result<MultiplexedConnection, RedisError> {
-        let mut last_error = discovery_error();
+    ) -> Result<MultiplexedConnection, RedisProviderError> {
+        let mut last_error = from_redis_error("connect", &discovery_error());
         let start = self.preferred.load(Ordering::Relaxed);
         for offset in 0..self.endpoints.len() {
             let index = (start + offset) % self.endpoints.len();
@@ -243,13 +245,17 @@ impl SentinelResolver {
                     self.policy,
                     Some(max_response_bytes.unwrap_or(DISCOVERY_MAX_RESPONSE_BYTES)),
                 )
-                .await?;
-                let role = connection.send_packed_command(&cmd("ROLE")).await?;
+                .await
+                .map_err(|error| from_redis_error("connect", &error))?;
+                let role = connection
+                    .send_packed_command(&cmd("ROLE"))
+                    .await
+                    .map_err(|error| from_redis_error("connect", &error))?;
                 if let Value::ServerError(error) = role {
-                    return Err(error.into());
+                    return Err(from_redis_error("connect", &RedisError::from(error)));
                 }
                 if !is_master(&role) {
-                    return Err(discovery_error());
+                    return Err(from_redis_error("connect", &discovery_error()));
                 }
                 Ok(connection)
             }
@@ -293,23 +299,22 @@ impl SentinelResolver {
     }
 
     /// Runs one Sentinel query through a single-flight async control socket.
-    /// Redis errors are sanitized at this boundary before returning to the
+    /// Redis errors retain only their stable category before returning to the
     /// resolver's discovery loop.
     ///
     /// # Parameters
     ///
     /// - `index`: Endpoint index selected by the resolver's discovery loop.
     #[cfg(feature = "async")]
-    async fn query_target_async(&self, index: usize) -> Result<Client, RedisError> {
+    async fn query_target_async(&self, index: usize) -> Result<Client, RedisProviderError> {
         let cache = &self.async_control_connections[index];
         let (generation, mut sentinel) = cache
             .get_or_connect(async {
                 open_async(&self.endpoints[index], self.policy, Some(DISCOVERY_MAX_RESPONSE_BYTES))
                     .await
-                    .map_err(|_| RedisProviderError::Operation("Sentinel control connection"))
+                    .map_err(|error| from_redis_error("connect", &error))
             })
-            .await
-            .map_err(|_| RedisError::from((ErrorKind::Io, "Sentinel control connection failed")))?;
+            .await?;
         let result = async {
             let raw = sentinel
                 .send_packed_command(cmd("SENTINEL").arg("get-master-addr-by-name").arg(&self.service))
@@ -320,7 +325,7 @@ impl SentinelResolver {
         if result.is_err() {
             cache.invalidate_if_current(generation);
         }
-        result
+        result.map_err(|error| from_redis_error("connect", &error))
     }
     /// Builds a target client only from a validated Sentinel host/port reply.
     /// Preserves top-level Redis rejections for sanitized error classification.
