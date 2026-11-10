@@ -49,6 +49,7 @@ use crate::naming::group_name;
 use crate::naming::poison_key;
 use crate::naming::stream_key;
 use crate::redis_provider_error::from_redis_error;
+use crate::wire_fields::check_publish_payload;
 use crate::wire_fields::encode_bounded;
 
 /// Client and validated settings shared by asynchronous SPI operations.
@@ -94,17 +95,25 @@ impl AsyncEventBusSpi for AsyncRedisEventBus {
     ///
     /// Returns an SPI error if the payload is not encoded, serialization fails,
     /// admission is exhausted, a connection cannot be opened, or Redis rejects
-    /// `XADD`. A missing or malformed reply after send returns
-    /// outcome-unknown without replay.
+    /// `XADD`. Payload type and payload size are checked before admission;
+    /// admission then covers wire encoding and connection setup. A missing or
+    /// malformed reply after send returns outcome-unknown without replay.
     fn publish<'a>(&'a self, message: OutboundMessage) -> SpiFuture<'a, Result<PublishAcknowledgement, SpiError>> {
         Box::pin(async move {
             let topic = message.topic().clone();
-            let payload = encode_bounded(&message, WireLimits::from_config(&self.settings))
+            let limits = WireLimits::from_config(&self.settings);
+            check_publish_payload(&message, limits)
+                .map_err(|error| to_publish_error(&topic, error, PublishEffect::NotAccepted))?;
+            let permit = self
+                .client
+                .try_command_permit(CommandClass::General)
+                .map_err(|error| to_publish_error(&topic, error, PublishEffect::NotAccepted))?;
+            let payload = encode_bounded(&message, limits)
                 .map_err(|error| to_publish_error(&topic, error, PublishEffect::NotAccepted))?;
             let key = stream_key(self.settings.namespace(), topic.as_str());
             let mut connection = self
                 .client
-                .get_async_connection(CommandClass::General)
+                .get_async_connection_with_permit(CommandClass::General, permit)
                 .await
                 .map_err(|error| to_publish_error(&topic, error, PublishEffect::NotAccepted))?;
             let mut command = cmd("XADD");
@@ -420,11 +429,23 @@ impl AsyncEventBusSpi for AsyncRedisEventBus {
 mod tests {
     use std::sync::Arc;
     use std::sync::Mutex;
+    use std::thread;
     use std::time::Duration;
+    use std::time::SystemTime;
 
     use futures_lite::future::block_on;
+    use qubit_event_bus::error::SpiError;
+    use qubit_event_bus::model::ContentType;
+    use qubit_event_bus::model::EventId;
+    use qubit_event_bus::model::Headers;
+    use qubit_event_bus::model::ProviderOptions;
+    use qubit_event_bus::model::PublishEffect;
+    use qubit_event_bus::spi::AsyncEventBusSpi;
     use qubit_event_bus::spi::AsyncEventSubscriptionSpi;
+    use qubit_event_bus::spi::EncodedPayload;
+    use qubit_event_bus::spi::OutboundMessage;
     use qubit_event_bus::spi::TopicAddress;
+    use qubit_event_bus::spi::TransportPayload;
     use qubit_id::Id;
 
     use super::AsyncRedisEventBus;
@@ -432,6 +453,392 @@ mod tests {
     use crate::config::RedisEventBusConfig;
     use crate::internal::RecoveryState;
     use crate::internal::WireLimits;
+
+    fn outbound(payload: Vec<u8>) -> OutboundMessage {
+        OutboundMessage::new(
+            TopicAddress::new("events").expect("topic"),
+            EventId::new("event-1").expect("event id"),
+            SystemTime::UNIX_EPOCH,
+            Headers::new(),
+            None,
+            None,
+            TransportPayload::Encoded(EncodedPayload::new(
+                Arc::from(payload),
+                ContentType::new("application/octet-stream").expect("content type"),
+                None,
+            )),
+        )
+    }
+
+    fn outbound_with_large_headers() -> OutboundMessage {
+        OutboundMessage::new(
+            TopicAddress::new("events").expect("topic"),
+            EventId::new("event-headers").expect("event id"),
+            SystemTime::UNIX_EPOCH,
+            [("large".into(), "x".repeat(256))].into(),
+            None,
+            None,
+            TransportPayload::Encoded(EncodedPayload::new(
+                Arc::from(&b"payload"[..]),
+                ContentType::new("application/octet-stream").expect("content type"),
+                None,
+            )),
+        )
+    }
+
+    fn outbound_native() -> OutboundMessage {
+        OutboundMessage::new(
+            TopicAddress::new("events").expect("topic"),
+            EventId::new("event-native").expect("event id"),
+            SystemTime::UNIX_EPOCH,
+            Headers::new(),
+            None,
+            None,
+            TransportPayload::Native(Arc::new(vec![1, 2, 3])),
+        )
+    }
+
+    fn small_header_settings() -> RedisEventBusConfig {
+        let options: ProviderOptions = [
+            ("redis.url".into(), "redis://127.0.0.1:1/".into()),
+            ("redis.namespace".into(), "publish-wire-limit".into()),
+            ("redis.max_payload_bytes".into(), "128".into()),
+            ("redis.max_wire_bytes".into(), "1024".into()),
+            ("redis.max_headers_bytes".into(), "8".into()),
+        ]
+        .into();
+        RedisEventBusConfig::from_provider_options(&options).expect("valid limits")
+    }
+
+    fn small_wire_settings() -> RedisEventBusConfig {
+        let options: ProviderOptions = [
+            ("redis.url".into(), "redis://127.0.0.1:1/".into()),
+            ("redis.namespace".into(), "publish-wire-limit".into()),
+            ("redis.max_payload_bytes".into(), "128".into()),
+            ("redis.max_wire_bytes".into(), "128".into()),
+            ("redis.max_headers_bytes".into(), "64".into()),
+        ]
+        .into();
+        RedisEventBusConfig::from_provider_options(&options).expect("valid limits")
+    }
+
+    fn one_general_slot_settings() -> RedisEventBusConfig {
+        let options: ProviderOptions = [
+            ("redis.url".into(), "redis://127.0.0.1:1/".into()),
+            ("redis.namespace".into(), "publish-encode-gate".into()),
+            ("redis.max_concurrent_commands".into(), "2".into()),
+            ("redis.reserved_settlement_commands".into(), "1".into()),
+            ("redis.max_idle_connections".into(), "1".into()),
+        ]
+        .into();
+        RedisEventBusConfig::from_provider_options(&options).expect("one general slot")
+    }
+
+    fn gated_outbound() -> OutboundMessage {
+        OutboundMessage::new(
+            TopicAddress::new("events").expect("topic"),
+            EventId::new("test-encoding-gate").expect("event id"),
+            SystemTime::UNIX_EPOCH,
+            Headers::new(),
+            None,
+            None,
+            TransportPayload::Encoded(EncodedPayload::new(
+                Arc::from(&b"payload"[..]),
+                ContentType::new("application/octet-stream").expect("content type"),
+                None,
+            )),
+        )
+    }
+
+    fn assert_publish_error(error: SpiError, expected_kind: &str) {
+        match error {
+            SpiError::Publish { kind, effect, .. } => {
+                assert_eq!(kind, expected_kind);
+                assert_eq!(effect, PublishEffect::NotAccepted);
+            }
+            other => panic!("expected publish error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_publish_rejects_full_admission_before_wire_encoding() {
+        block_on(async {
+            let settings = RedisEventBusConfig::default();
+            let capacity = settings.max_concurrent_commands() - settings.reserved_settlement_commands();
+            let client = Arc::new(Client::new(&settings).expect("client"));
+            let permits: Vec<_> = (0..capacity)
+                .map(|_| {
+                    client
+                        .try_command(crate::client::CommandClass::General)
+                        .expect("fill general admission")
+                })
+                .collect();
+            crate::wire_fields::reset_encode_count();
+            let bus = AsyncRedisEventBus {
+                client: Arc::clone(&client),
+                settings,
+            };
+
+            let result = bus.publish(outbound(vec![1; 1024])).await;
+
+            assert_publish_error(
+                result.expect_err("full admission must reject publish"),
+                "resource_limit",
+            );
+            assert_eq!(crate::wire_fields::encode_count(), 0);
+            drop(permits);
+            let permits: Vec<_> = (0..capacity)
+                .map(|_| {
+                    client
+                        .try_command(crate::client::CommandClass::General)
+                        .expect("admission was released")
+                })
+                .collect();
+            assert_eq!(permits.len(), capacity);
+        });
+    }
+
+    #[test]
+    fn test_publish_reports_oversized_payload_before_full_admission() {
+        block_on(async {
+            let settings = RedisEventBusConfig::default();
+            let capacity = settings.max_concurrent_commands() - settings.reserved_settlement_commands();
+            let client = Arc::new(Client::new(&settings).expect("client"));
+            let permits: Vec<_> = (0..capacity)
+                .map(|_| {
+                    client
+                        .try_command(crate::client::CommandClass::General)
+                        .expect("fill general admission")
+                })
+                .collect();
+            crate::wire_fields::reset_encode_count();
+            let bus = AsyncRedisEventBus { client, settings };
+
+            let result = bus.publish(outbound(vec![1; 1_048_577])).await;
+
+            assert_publish_error(result.expect_err("oversized payload must fail"), "payload_too_large");
+            assert_eq!(crate::wire_fields::encode_count(), 0);
+            drop(permits);
+        });
+    }
+
+    #[test]
+    fn test_publish_preserves_native_payload_error_when_admission_is_full() {
+        block_on(async {
+            let settings = RedisEventBusConfig::default();
+            let capacity = settings.max_concurrent_commands() - settings.reserved_settlement_commands();
+            let client = Arc::new(Client::new(&settings).expect("client"));
+            let permits: Vec<_> = (0..capacity)
+                .map(|_| {
+                    client
+                        .try_command(crate::client::CommandClass::General)
+                        .expect("fill general admission")
+                })
+                .collect();
+            crate::wire_fields::reset_encode_count();
+            let bus = AsyncRedisEventBus { client, settings };
+
+            assert_publish_error(
+                bus.publish(outbound_native())
+                    .await
+                    .expect_err("native payload is invalid"),
+                "configuration",
+            );
+
+            assert_eq!(crate::wire_fields::encode_count(), 0);
+            drop(permits);
+        });
+    }
+
+    #[test]
+    fn test_unpolled_publish_does_not_reserve_admission_or_encode() {
+        let settings = RedisEventBusConfig::default();
+        let capacity = settings.max_concurrent_commands() - settings.reserved_settlement_commands();
+        let client = Arc::new(Client::new(&settings).expect("client"));
+        let bus = AsyncRedisEventBus {
+            client: Arc::clone(&client),
+            settings,
+        };
+        crate::wire_fields::reset_encode_count();
+
+        let publish = bus.publish(outbound(vec![1; 16]));
+        drop(publish);
+
+        assert_eq!(crate::wire_fields::encode_count(), 0);
+        let permits: Vec<_> = (0..capacity)
+            .map(|_| {
+                client
+                    .try_command(crate::client::CommandClass::General)
+                    .expect("unpolled future reserved nothing")
+            })
+            .collect();
+        assert_eq!(permits.len(), capacity);
+    }
+
+    #[test]
+    fn test_publish_connection_failure_releases_its_admission() {
+        block_on(async {
+            let settings = RedisEventBusConfig::new("redis://127.0.0.1:1/", "publish-connect-failure")
+                .expect("valid offline endpoint");
+            let capacity = settings.max_concurrent_commands() - settings.reserved_settlement_commands();
+            let client = Arc::new(Client::new(&settings).expect("client"));
+            let bus = AsyncRedisEventBus {
+                client: Arc::clone(&client),
+                settings,
+            };
+            crate::wire_fields::reset_encode_count();
+
+            assert!(bus.publish(outbound(vec![1; 16])).await.is_err());
+
+            assert_eq!(crate::wire_fields::encode_count(), 1);
+            let permits: Vec<_> = (0..capacity)
+                .map(|_| {
+                    client
+                        .try_command(crate::client::CommandClass::General)
+                        .expect("failed setup released permit")
+                })
+                .collect();
+            assert_eq!(permits.len(), capacity);
+        });
+    }
+
+    #[test]
+    fn test_publish_header_limit_is_checked_after_admission() {
+        block_on(async {
+            let settings = small_header_settings();
+            let capacity = settings.max_concurrent_commands() - settings.reserved_settlement_commands();
+            let client = Arc::new(Client::new(&settings).expect("client"));
+            let bus = AsyncRedisEventBus {
+                client: Arc::clone(&client),
+                settings,
+            };
+
+            crate::wire_fields::reset_encode_count();
+            assert_publish_error(
+                bus.publish(outbound_with_large_headers())
+                    .await
+                    .expect_err("header limit"),
+                "wire_too_large",
+            );
+            assert_eq!(crate::wire_fields::encode_count(), 1);
+            let permits: Vec<_> = (0..capacity)
+                .map(|_| {
+                    client
+                        .try_command(crate::client::CommandClass::General)
+                        .expect("encoding failure released permit")
+                })
+                .collect();
+            drop(permits);
+
+            let permits: Vec<_> = (0..capacity)
+                .map(|_| {
+                    client
+                        .try_command(crate::client::CommandClass::General)
+                        .expect("fill general admission")
+                })
+                .collect();
+            crate::wire_fields::reset_encode_count();
+            assert_publish_error(
+                bus.publish(outbound_with_large_headers())
+                    .await
+                    .expect_err("full admission"),
+                "resource_limit",
+            );
+            assert_eq!(crate::wire_fields::encode_count(), 0);
+            drop(permits);
+        });
+    }
+
+    #[test]
+    fn test_publish_wire_limit_is_checked_after_admission() {
+        block_on(async {
+            let settings = small_wire_settings();
+            let capacity = settings.max_concurrent_commands() - settings.reserved_settlement_commands();
+            let client = Arc::new(Client::new(&settings).expect("client"));
+            let bus = AsyncRedisEventBus {
+                client: Arc::clone(&client),
+                settings,
+            };
+
+            crate::wire_fields::reset_encode_count();
+            assert_publish_error(
+                bus.publish(outbound(vec![42; 100])).await.expect_err("wire limit"),
+                "wire_too_large",
+            );
+            assert_eq!(crate::wire_fields::encode_count(), 1);
+            let permits: Vec<_> = (0..capacity)
+                .map(|_| {
+                    client
+                        .try_command(crate::client::CommandClass::General)
+                        .expect("encoding failure released permit")
+                })
+                .collect();
+            drop(permits);
+
+            let permits: Vec<_> = (0..capacity)
+                .map(|_| {
+                    client
+                        .try_command(crate::client::CommandClass::General)
+                        .expect("fill general admission")
+                })
+                .collect();
+            crate::wire_fields::reset_encode_count();
+            assert_publish_error(
+                bus.publish(outbound(vec![42; 100])).await.expect_err("full admission"),
+                "resource_limit",
+            );
+            assert_eq!(crate::wire_fields::encode_count(), 0);
+            drop(permits);
+        });
+    }
+
+    #[test]
+    fn test_publish_holds_one_general_permit_during_concurrent_encoding() {
+        let _gate_lock = crate::wire_fields::encode_gate_test_lock();
+        let settings = one_general_slot_settings();
+        let client = Arc::new(Client::new(&settings).expect("client"));
+        let bus = Arc::new(AsyncRedisEventBus {
+            client: Arc::clone(&client),
+            settings,
+        });
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        crate::wire_fields::install_encode_gate("test-encoding-gate", entered_tx, release_rx);
+        let first_bus = Arc::clone(&bus);
+        let first = thread::spawn(move || {
+            crate::wire_fields::reset_encode_count();
+            let result = block_on(first_bus.publish(gated_outbound()));
+            (result, crate::wire_fields::encode_count())
+        });
+
+        if entered_rx.recv_timeout(Duration::from_secs(5)).is_err() {
+            let _ = release_tx.send(());
+            crate::wire_fields::clear_encode_gate();
+            let _ = first.join();
+            panic!("publisher did not reach the encoding gate");
+        }
+        let second_bus = Arc::clone(&bus);
+        let second = thread::spawn(move || {
+            crate::wire_fields::reset_encode_count();
+            let result = block_on(second_bus.publish(gated_outbound()));
+            (result, crate::wire_fields::encode_count())
+        });
+        let (second_result, second_encode_count) = second.join().expect("second publisher thread");
+        let _ = release_tx.send(());
+        let (first_result, first_encode_count) = first.join().expect("first publisher thread");
+        crate::wire_fields::clear_encode_gate();
+        assert_publish_error(
+            second_result.expect_err("occupied encoding slot rejects another publish"),
+            "resource_limit",
+        );
+        assert_eq!(second_encode_count, 0);
+        assert!(first_result.is_err(), "offline endpoint fails after encoding");
+        assert_eq!(first_encode_count, 1);
+        let permit = client
+            .try_command(crate::client::CommandClass::General)
+            .expect("first publisher releases its permit after setup failure");
+        drop(permit);
+    }
 
     #[test]
     fn test_stream_id_validation_rejects_malformed_components() {

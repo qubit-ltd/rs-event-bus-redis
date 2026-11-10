@@ -28,6 +28,88 @@ use serde::Serialize;
 use serde_json::from_str;
 use serde_json::to_string;
 
+#[cfg(all(test, any(feature = "sync", feature = "async")))]
+thread_local! {
+    static ENCODE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(all(test, any(feature = "sync", feature = "async")))]
+type EncodeGateRelease = std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Receiver<()>>>;
+
+#[cfg(all(test, any(feature = "sync", feature = "async")))]
+type EncodeGate = Option<(
+    String,
+    std::sync::mpsc::Sender<()>,
+    EncodeGateRelease,
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
+)>;
+
+#[cfg(all(test, any(feature = "sync", feature = "async")))]
+static ENCODE_GATE: std::sync::OnceLock<std::sync::Mutex<EncodeGate>> = std::sync::OnceLock::new();
+
+#[cfg(all(test, any(feature = "sync", feature = "async")))]
+static ENCODE_GATE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(all(test, any(feature = "sync", feature = "async")))]
+pub(crate) fn reset_encode_count() {
+    ENCODE_COUNT.set(0);
+}
+
+#[cfg(all(test, any(feature = "sync", feature = "async")))]
+pub(crate) fn encode_count() -> usize {
+    ENCODE_COUNT.get()
+}
+
+#[cfg(all(test, any(feature = "sync", feature = "async")))]
+pub(crate) fn install_encode_gate(
+    event_id: &str,
+    entered: std::sync::mpsc::Sender<()>,
+    release: std::sync::mpsc::Receiver<()>,
+) {
+    *ENCODE_GATE
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .expect("encoding gate lock") = Some((
+        event_id.to_owned(),
+        entered,
+        std::sync::Arc::new(std::sync::Mutex::new(release)),
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    ));
+}
+
+#[cfg(all(test, any(feature = "sync", feature = "async")))]
+pub(crate) fn clear_encode_gate() {
+    *ENCODE_GATE
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .expect("encoding gate lock") = None;
+}
+
+#[cfg(all(test, any(feature = "sync", feature = "async")))]
+pub(crate) fn encode_gate_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    ENCODE_GATE_TEST_LOCK.lock().expect("encoding gate test lock")
+}
+
+#[cfg(all(test, any(feature = "sync", feature = "async")))]
+fn wait_at_encode_gate(message: &OutboundMessage) {
+    let gate = ENCODE_GATE
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .expect("encoding gate lock")
+        .as_ref()
+        .filter(|(event_id, _, _, used)| {
+            event_id == message.id().as_str() && !used.swap(true, std::sync::atomic::Ordering::AcqRel)
+        })
+        .map(|(_, entered, release, _)| (entered.clone(), std::sync::Arc::clone(release)));
+    if let Some((entered, release)) = gate {
+        let _ = entered.send(());
+        let _ = release
+            .lock()
+            .expect("encoding gate release lock")
+            .recv_timeout(std::time::Duration::from_secs(10));
+    }
+}
+
 #[cfg(any(feature = "sync", feature = "async"))]
 use self::internal::BorrowedWireFields;
 #[cfg(any(feature = "sync", feature = "async"))]
@@ -265,6 +347,10 @@ impl WireFields {
 /// external I/O is performed.
 #[cfg(any(feature = "sync", feature = "async"))]
 pub(crate) fn encode_bounded(message: &OutboundMessage, limits: WireLimits) -> Result<String, RedisProviderError> {
+    #[cfg(all(test, any(feature = "sync", feature = "async")))]
+    ENCODE_COUNT.set(ENCODE_COUNT.get() + 1);
+    #[cfg(all(test, any(feature = "sync", feature = "async")))]
+    wait_at_encode_gate(message);
     let TransportPayload::Encoded(payload) = message.payload() else {
         return Err(RedisProviderError::Configuration("encoded payload required"));
     };
@@ -277,4 +363,27 @@ pub(crate) fn encode_bounded(message: &OutboundMessage, limits: WireLimits) -> R
         .as_millis();
     let fields = BorrowedWireFields::new(message, payload, &headers_json, timestamp_ms);
     BoundedWriter::new(limits.wire).serialize(&fields)
+}
+
+/// Checks the encoded-payload variant and byte length without wire encoding.
+///
+/// This keeps cheap input validation ahead of command admission while leaving
+/// all header and complete-wire checks to `encode_bounded`.
+///
+/// # Parameters
+///
+/// - `message`: Outbound event whose payload variant and raw length are
+///   checked.
+/// - `limits`: Provider payload limit applied before wire encoding.
+///
+/// # Errors
+///
+/// Returns an error when the message is not encoded or its payload exceeds the
+/// configured limit.
+#[cfg(any(feature = "sync", feature = "async"))]
+pub(crate) fn check_publish_payload(message: &OutboundMessage, limits: WireLimits) -> Result<(), RedisProviderError> {
+    let TransportPayload::Encoded(payload) = message.payload() else {
+        return Err(RedisProviderError::Configuration("encoded payload required"));
+    };
+    limits.check_payload(payload.bytes().len())
 }

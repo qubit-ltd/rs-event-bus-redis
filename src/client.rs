@@ -33,7 +33,6 @@ use self::internal::AsyncConnectionCache;
 #[cfg(feature = "async")]
 pub(crate) use self::internal::AsyncConnectionRole;
 pub(crate) use self::internal::CommandClass;
-#[cfg(test)]
 use self::internal::CommandPermit;
 #[cfg(feature = "sync")]
 pub(crate) use self::internal::PooledConnection;
@@ -193,9 +192,16 @@ impl Client {
     /// Returns `ResourceLimit` immediately when the shared command cap is
     /// reached.
     #[inline]
+    pub(crate) fn try_command_permit(&self, class: CommandClass) -> Result<CommandPermit, RedisProviderError> {
+        self.budget.try_command(class).inspect_err(|_| {
+            if let Some(diagnostics) = self.diagnostics() {
+                diagnostics.increment(RedisDiagnosticCounter::CommandRejections);
+            }
+        })
+    }
     #[cfg(test)]
     pub(crate) fn try_command(&self, class: CommandClass) -> Result<CommandPermit, RedisProviderError> {
-        self.budget.try_command(class)
+        self.try_command_permit(class)
     }
     /// Reserves receiver capacity before subscription setup I/O.
     ///
@@ -270,11 +276,29 @@ impl Client {
     /// rejection counter once.
     #[cfg(feature = "sync")]
     pub(crate) fn get_connection(&self, class: CommandClass) -> Result<PooledConnection, RedisProviderError> {
-        let permit = self.budget.try_command(class).inspect_err(|_| {
-            if let Some(diagnostics) = self.diagnostics() {
-                diagnostics.increment(RedisDiagnosticCounter::CommandRejections);
-            }
-        })?;
+        self.get_connection_with_permit(self.try_command_permit(class)?)
+    }
+    /// Checks out a short-command connection while retaining prior admission.
+    ///
+    /// Connection setup runs outside the pool mutex. The supplied permit is
+    /// moved into the returned lease or released automatically on failure.
+    ///
+    /// # Parameters
+    ///
+    /// - `permit`: Admission already acquired for this operation.
+    ///
+    /// # Returns
+    ///
+    /// A lease owning `permit` until drop.
+    ///
+    /// # Errors
+    ///
+    /// Returns pool poisoning or a sanitized endpoint/setup failure.
+    #[cfg(feature = "sync")]
+    pub(crate) fn get_connection_with_permit(
+        &self,
+        permit: CommandPermit,
+    ) -> Result<PooledConnection, RedisProviderError> {
         if self.standalone.is_some() {
             let idle = self
                 .sync_pool
@@ -341,11 +365,33 @@ impl Client {
         &self,
         class: CommandClass,
     ) -> Result<AsyncCommandConnection, RedisProviderError> {
-        let permit = self.budget.try_command(class).inspect_err(|_| {
-            if let Some(diagnostics) = self.diagnostics() {
-                diagnostics.increment(RedisDiagnosticCounter::CommandRejections);
-            }
-        })?;
+        let permit = self.try_command_permit(class)?;
+        self.get_async_connection_with_permit(class, permit).await
+    }
+    /// Opens a class-specific command connection while retaining prior
+    /// admission.
+    ///
+    /// The host executor polls all I/O; dropping this future releases the
+    /// supplied permit, including while cold connection setup is pending.
+    ///
+    /// # Parameters
+    ///
+    /// - `class`: Admission class selecting the general or settlement cache.
+    /// - `permit`: Permit acquired for the same class before this call.
+    ///
+    /// # Returns
+    ///
+    /// A connection generation owning the permit until drop.
+    ///
+    /// # Errors
+    ///
+    /// Returns generation overflow or a sanitized setup failure.
+    #[cfg(feature = "async")]
+    pub(crate) async fn get_async_connection_with_permit(
+        &self,
+        class: CommandClass,
+        permit: CommandPermit,
+    ) -> Result<AsyncCommandConnection, RedisProviderError> {
         let role = AsyncConnectionRole::from(class);
         let (generation, connection, cache) = if self.standalone.is_some() {
             match role {

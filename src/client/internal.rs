@@ -35,7 +35,6 @@ pub(crate) use async_connection_cache::AsyncConnectionCache;
 #[cfg(feature = "async")]
 pub(crate) use async_connection_role::AsyncConnectionRole;
 pub(crate) use command_class::CommandClass;
-#[cfg(test)]
 pub(crate) use command_permit::CommandPermit;
 #[cfg(feature = "sync")]
 pub(crate) use pooled_connection::PooledConnection;
