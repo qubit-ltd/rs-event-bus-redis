@@ -49,10 +49,14 @@ impl SettlementProgress {
     #[inline]
     pub(crate) fn action(self, requested: DeliveryDisposition) -> Result<SettlementAction, ()> {
         match self {
-            Self::Applied(previous) if previous == requested => Ok(SettlementAction::AlreadyApplied),
+            Self::Applied(previous) if previous == requested => {
+                Ok(SettlementAction::AlreadyApplied)
+            }
             Self::AckPending(previous) if previous == requested => Ok(SettlementAction::RepeatAck),
             Self::Applied(_) | Self::AckPending(_) => Err(()),
-            Self::Open if requested == DeliveryDisposition::Retry => Ok(SettlementAction::ApplyRetry),
+            Self::Open if requested == DeliveryDisposition::Retry => {
+                Ok(SettlementAction::ApplyRetry)
+            }
             Self::Open => Ok(SettlementAction::PrepareAck),
         }
     }

@@ -128,7 +128,9 @@ impl RedisDiagnosticsState {
             RedisDiagnosticCounter::QuarantineSucceeded => &self.quarantine_succeeded,
             RedisDiagnosticCounter::DeliveryGaps => &self.delivery_gaps,
         };
-        let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| Some(n.saturating_add(1)));
+        let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+            Some(n.saturating_add(1))
+        });
     }
 
     /// Reads independent atomic values into a secret-safe public snapshot.

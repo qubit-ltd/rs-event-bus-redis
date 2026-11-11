@@ -42,7 +42,8 @@ impl RedisProviderDiagnostics {
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .live()
             };
-            let mut snapshots: Vec<RedisProviderSnapshot> = live.iter().map(|state| state.snapshot()).collect();
+            let mut snapshots: Vec<RedisProviderSnapshot> =
+                live.iter().map(|state| state.snapshot()).collect();
             snapshots.sort_unstable_by_key(RedisProviderSnapshot::instance_id);
             snapshots
         }

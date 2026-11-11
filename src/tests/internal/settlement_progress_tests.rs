@@ -32,7 +32,11 @@ fn test_settlement_progress_action_fixes_pending_intent() {
             DeliveryDisposition::Retry,
         ] {
             if other != terminal {
-                assert!(SettlementProgress::AckPending(terminal).action(other).is_err());
+                assert!(
+                    SettlementProgress::AckPending(terminal)
+                        .action(other)
+                        .is_err()
+                );
                 assert!(SettlementProgress::Applied(terminal).action(other).is_err());
             }
         }

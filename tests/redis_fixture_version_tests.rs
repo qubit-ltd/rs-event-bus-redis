@@ -32,9 +32,13 @@ fn test_versions_match_requested_series_and_supported_floor() {
         ("6.0.16", VersionRequirement::Supported, false),
     ];
     for (version, requirement, expected) in cases {
-        let parsed =
-            RedisVersion::parse_info(&format!("# Server\r\nredis_version:{version}\r\n")).expect("valid Redis version");
-        assert_eq!(requirement.matches(&parsed), expected, "{version} vs {requirement:?}");
+        let parsed = RedisVersion::parse_info(&format!("# Server\r\nredis_version:{version}\r\n"))
+            .expect("valid Redis version");
+        assert_eq!(
+            requirement.matches(&parsed),
+            expected,
+            "{version} vs {requirement:?}"
+        );
     }
 }
 
@@ -52,14 +56,16 @@ fn test_info_parser_rejects_missing_duplicate_malformed_and_overflow() {
 }
 
 #[test]
-fn test_scripted_info_endpoint_returns_version_and_reports_missing_field() -> Result<(), Box<dyn Error>> {
+fn test_scripted_info_endpoint_returns_version_and_reports_missing_field()
+-> Result<(), Box<dyn Error>> {
     assert_eq!(scripted_probe("redis_version:7.2.1\r\n")?, "7.2.1");
     assert!(scripted_probe("# Server\r\n").is_err());
     Ok(())
 }
 
 #[test]
-fn test_scripted_info_endpoint_version_mismatch_reports_backend_request_and_actual() -> Result<(), Box<dyn Error>> {
+fn test_scripted_info_endpoint_version_mismatch_reports_backend_request_and_actual()
+-> Result<(), Box<dyn Error>> {
     let listener = TcpListener::bind(("127.0.0.1", 0))?;
     let addr = listener.local_addr()?;
     let worker = thread::spawn(move || -> std::io::Result<()> {
@@ -77,12 +83,18 @@ fn test_scripted_info_endpoint_version_mismatch_reports_backend_request_and_actu
     )
     .expect_err("7.x must not satisfy the explicit 6.2 request");
     let message = error.to_string();
-    assert!(message.contains("backend=docker"), "unexpected diagnostic: {message}");
+    assert!(
+        message.contains("backend=docker"),
+        "unexpected diagnostic: {message}"
+    );
     assert!(
         message.contains("requested=6.2-alpine"),
         "unexpected diagnostic: {message}"
     );
-    assert!(message.contains("actual=7.2.1"), "unexpected diagnostic: {message}");
+    assert!(
+        message.contains("actual=7.2.1"),
+        "unexpected diagnostic: {message}"
+    );
     worker.join().expect("scripted endpoint thread")?;
     Ok(())
 }

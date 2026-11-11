@@ -64,7 +64,10 @@ impl AsyncConnectionCache {
     ///
     /// Returns the initializer failure without publication, or generation
     /// overflow before I/O.
-    pub(crate) async fn get_or_connect<F>(&self, connect: F) -> Result<(u64, MultiplexedConnection), RedisProviderError>
+    pub(crate) async fn get_or_connect<F>(
+        &self,
+        connect: F,
+    ) -> Result<(u64, MultiplexedConnection), RedisProviderError>
     where
         F: Future<Output = Result<MultiplexedConnection, RedisProviderError>>,
     {
@@ -76,7 +79,11 @@ impl AsyncConnectionCache {
             if let Some(connection) = &state.connection {
                 return Ok((state.generation, connection.clone()));
             }
-            match state.current_round.as_ref().and_then(std::sync::Weak::upgrade) {
+            match state
+                .current_round
+                .as_ref()
+                .and_then(std::sync::Weak::upgrade)
+            {
                 Some(round) => round,
                 None => {
                     let round = Arc::new(InitializationRound {
@@ -96,7 +103,9 @@ impl AsyncConnectionCache {
             let mut state = match self.state.lock() {
                 Ok(state) => state,
                 Err(_) => {
-                    let result = Err(RedisProviderError::Operation("connection cache lock poisoned"));
+                    let result = Err(RedisProviderError::Operation(
+                        "connection cache lock poisoned",
+                    ));
                     *terminal = Some(result.clone());
                     return result;
                 }
@@ -112,7 +121,9 @@ impl AsyncConnectionCache {
                     {
                         state.current_round = None;
                     }
-                    let result = Err(RedisProviderError::Operation("connection generation overflow"));
+                    let result = Err(RedisProviderError::Operation(
+                        "connection generation overflow",
+                    ));
                     *terminal = Some(result.clone());
                     return result;
                 }
@@ -205,7 +216,10 @@ mod tests {
                             if gate.0.load(Ordering::SeqCst) {
                                 Poll::Ready(())
                             } else {
-                                gate.1.lock().expect("gate waiters").push(context.waker().clone());
+                                gate.1
+                                    .lock()
+                                    .expect("gate waiters")
+                                    .push(context.waker().clone());
                                 Poll::Pending
                             }
                         })
@@ -258,7 +272,11 @@ mod tests {
                 ..
             }
         ));
-        assert_eq!(polls.load(Ordering::SeqCst), 2, "completed failure is not cached");
+        assert_eq!(
+            polls.load(Ordering::SeqCst),
+            2,
+            "completed failure is not cached"
+        );
     }
 
     #[test]
@@ -297,11 +315,19 @@ mod tests {
         let mut follower = follower;
         assert!(block_on(poll_once(leader.as_mut())).is_none());
         assert!(block_on(poll_once(follower.as_mut())).is_none());
-        assert_eq!(polls.load(Ordering::SeqCst), 1, "only the leader initialized");
+        assert_eq!(
+            polls.load(Ordering::SeqCst),
+            1,
+            "only the leader initialized"
+        );
         drop(leader);
         let result = block_on(follower).expect_err("joined caller takes over");
         assert!(matches!(result, RedisProviderError::Transport { .. }));
-        assert_eq!(polls.load(Ordering::SeqCst), 2, "takeover polls its own initializer");
+        assert_eq!(
+            polls.load(Ordering::SeqCst),
+            2,
+            "takeover polls its own initializer"
+        );
     }
 
     #[test]
@@ -331,7 +357,11 @@ mod tests {
             })
         }));
         assert!(matches!(result, Err(RedisProviderError::Transport { .. })));
-        assert_eq!(polls.load(Ordering::SeqCst), 2, "the fresh round polls its initializer");
+        assert_eq!(
+            polls.load(Ordering::SeqCst),
+            2,
+            "the fresh round polls its initializer"
+        );
     }
 
     #[test]
@@ -345,12 +375,16 @@ mod tests {
         };
         block_on(async {
             let mut initialize =
-                Box::pin(cache.get_or_connect(pending::<Result<MultiplexedConnection, RedisProviderError>>()));
+                Box::pin(cache.get_or_connect(pending::<
+                    Result<MultiplexedConnection, RedisProviderError>,
+                >()));
             let ready = poll_once(&mut initialize).await;
             assert!(
                 matches!(
                     ready,
-                    Some(Err(RedisProviderError::Operation("connection generation overflow")))
+                    Some(Err(RedisProviderError::Operation(
+                        "connection generation overflow"
+                    )))
                 ),
                 "overflow must reject before polling the pending initializer"
             );

@@ -144,7 +144,10 @@ impl ConnectionLike for AsyncCommandConnection {
         Box::pin(async move {
             self.request_complete = false;
             self.request_started = true;
-            let result = self.connection.req_packed_commands(cmd, offset, count).await;
+            let result = self
+                .connection
+                .req_packed_commands(cmd, offset, count)
+                .await;
             self.request_complete = true;
             result
         })

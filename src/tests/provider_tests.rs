@@ -61,12 +61,16 @@ fn test_sync_and_async_provider_descriptors_and_factories() {
     let async_provider = AsyncRedisEventBusProvider;
     let sync_descriptor = sync_provider.descriptor();
     let async_descriptor = async_provider.descriptor();
-    assert_eq!(format!("{sync_descriptor:?}"), format!("{async_descriptor:?}"));
+    assert_eq!(
+        format!("{sync_descriptor:?}"),
+        format!("{async_descriptor:?}")
+    );
 
     sync_provider
         .create_configured(&EventBusConfig::default())
         .expect("create lazy sync provider");
-    block_on(async_provider.create_configured(&EventBusConfig::default())).expect("create lazy async provider");
+    block_on(async_provider.create_configured(&EventBusConfig::default()))
+        .expect("create lazy async provider");
 
     let invalid_options: ProviderOptions = [("redis.unknown".into(), "invalid".into())].into();
     let invalid_config = EventBusConfig::default().with_provider_options(invalid_options);
@@ -115,7 +119,10 @@ fn test_async_publish_sends_one_encoded_command_with_one_general_slot() {
 
         for _ in 0..2 {
             crate::wire_fields::reset_encode_count();
-            let _ = bus.publish(publish_message()).await.expect("XADD is accepted");
+            let _ = bus
+                .publish(publish_message())
+                .await
+                .expect("XADD is accepted");
             assert_eq!(crate::wire_fields::encode_count(), 1);
         }
 

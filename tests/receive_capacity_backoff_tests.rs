@@ -56,7 +56,8 @@ static SUBSCRIPTION_IDS: AtomicU64 = AtomicU64::new(1);
 
 #[cfg(feature = "sync")]
 #[test]
-fn test_sync_full_capacity_returns_within_bounded_time_and_can_settle() -> Result<(), Box<dyn Error>> {
+fn test_sync_full_capacity_returns_within_bounded_time_and_can_settle() -> Result<(), Box<dyn Error>>
+{
     use std::time::Instant;
 
     let server = RedisServer::start()?;
@@ -75,7 +76,9 @@ fn test_sync_full_capacity_returns_within_bounded_time_and_can_settle() -> Resul
             let token = first.settlement().ok_or("missing first settlement token")?;
             let started = Instant::now();
             if !matches!(
-                receiver.receive(Duration::MAX).map_err(|error| error.to_string())?,
+                receiver
+                    .receive(Duration::MAX)
+                    .map_err(|error| error.to_string())?,
                 ReceiveOutcome::TimedOut
             ) {
                 return Err("full-capacity receive did not return TimedOut".into());
@@ -93,7 +96,9 @@ fn test_sync_full_capacity_returns_within_bounded_time_and_can_settle() -> Resul
                 return Err("short full-capacity receive did not return TimedOut".into());
             }
             let short_elapsed = short_started.elapsed();
-            if short_elapsed < Duration::from_millis(1) || short_elapsed >= Duration::from_millis(250) {
+            if short_elapsed < Duration::from_millis(1)
+                || short_elapsed >= Duration::from_millis(250)
+            {
                 return Err("short full-capacity receive did not honor its bounded delay".into());
             }
             let finite_started = Instant::now();
@@ -119,12 +124,17 @@ fn test_sync_full_capacity_returns_within_bounded_time_and_can_settle() -> Resul
             };
             receiver
                 .settle(
-                    second.settlement().ok_or("missing second settlement token")?,
+                    second
+                        .settlement()
+                        .ok_or("missing second settlement token")?,
                     DeliveryDisposition::Accept,
                 )
                 .map_err(|error| error.to_string())?;
-            let third_message = message_for("sync-full-capacity", "third").map_err(|error| error.to_string())?;
-            let _ = bus.publish(third_message).map_err(|error| error.to_string())?;
+            let third_message =
+                message_for("sync-full-capacity", "third").map_err(|error| error.to_string())?;
+            let _ = bus
+                .publish(third_message)
+                .map_err(|error| error.to_string())?;
             let ReceiveOutcome::Message(third) = receiver
                 .receive(Duration::from_secs(1))
                 .map_err(|error| error.to_string())?
@@ -133,10 +143,14 @@ fn test_sync_full_capacity_returns_within_bounded_time_and_can_settle() -> Resul
             };
             receiver.close().map_err(|error| error.to_string())?;
             if !matches!(
-                receiver.receive(Duration::MAX).map_err(|error| error.to_string())?,
+                receiver
+                    .receive(Duration::MAX)
+                    .map_err(|error| error.to_string())?,
                 ReceiveOutcome::Closed
             ) {
-                return Err("closed receiver must return Closed even with unsettled capacity".into());
+                return Err(
+                    "closed receiver must return Closed even with unsettled capacity".into(),
+                );
             }
             drop(third);
             Ok(())
@@ -153,7 +167,8 @@ fn test_sync_full_capacity_returns_within_bounded_time_and_can_settle() -> Resul
 
 #[cfg(feature = "async")]
 #[test]
-fn test_async_full_capacity_receive_is_pending_before_short_timeout() -> Result<(), Box<dyn Error>> {
+fn test_async_full_capacity_receive_is_pending_before_short_timeout() -> Result<(), Box<dyn Error>>
+{
     use futures_lite::future::block_on;
     use futures_lite::future::poll_once;
     use qubit_event_bus_redis::r#async::AsyncRedisEventBusProvider;
@@ -183,7 +198,11 @@ fn test_async_full_capacity_receive_is_pending_before_short_timeout() -> Result<
                     Headers::new(),
                     None,
                     None,
-                    TransportPayload::Encoded(EncodedPayload::new(payload, ContentType::new("text/plain")?, None)),
+                    TransportPayload::Encoded(EncodedPayload::new(
+                        payload,
+                        ContentType::new("text/plain")?,
+                        None,
+                    )),
                 ))
                 .await?;
         }
@@ -257,12 +276,15 @@ fn test_async_full_capacity_receive_is_pending_before_short_timeout() -> Result<
                 DeliveryDisposition::Accept,
             )
             .await?;
-        let ReceiveOutcome::Message(second) = receiver.receive(Duration::from_secs(1)).await? else {
+        let ReceiveOutcome::Message(second) = receiver.receive(Duration::from_secs(1)).await?
+        else {
             return Err("second event was not received after settlement".into());
         };
         receiver
             .settle(
-                second.settlement().ok_or("missing second settlement token")?,
+                second
+                    .settlement()
+                    .ok_or("missing second settlement token")?,
                 DeliveryDisposition::Accept,
             )
             .await?;
@@ -285,7 +307,10 @@ fn test_async_full_capacity_receive_is_pending_before_short_timeout() -> Result<
             return Err("third event was not received".into());
         };
         receiver.close().await?;
-        assert!(matches!(receiver.receive(Duration::MAX).await?, ReceiveOutcome::Closed));
+        assert!(matches!(
+            receiver.receive(Duration::MAX).await?,
+            ReceiveOutcome::Closed
+        ));
         drop(third);
         Ok::<(), Box<dyn Error>>(())
     })
@@ -324,11 +349,21 @@ fn message_for(topic: &str, id: &str) -> Result<OutboundMessage, Box<dyn Error>>
 }
 
 #[cfg(feature = "async")]
-fn pending_count(url: &str, namespace: &str, topic: &str, subscriber: &str) -> Result<usize, Box<dyn Error>> {
+fn pending_count(
+    url: &str,
+    namespace: &str,
+    topic: &str,
+    subscriber: &str,
+) -> Result<usize, Box<dyn Error>> {
     let mut connection = Client::open(url)?.get_connection()?;
     let (count, _, _, _): (usize, String, String, Vec<(String, usize)>) = cmd("XPENDING")
         .arg(stream_key(namespace, topic))
-        .arg(group_name(namespace, topic, subscriber, Some("async-full-capacity")))
+        .arg(group_name(
+            namespace,
+            topic,
+            subscriber,
+            Some("async-full-capacity"),
+        ))
         .query(&mut connection)?;
     Ok(count)
 }
@@ -344,7 +379,11 @@ fn publish_two(bus: &dyn EventBusSpi, topic: &str) -> Result<(), Box<dyn Error>>
             Headers::new(),
             None,
             None,
-            TransportPayload::Encoded(EncodedPayload::new(payload, ContentType::new("text/plain")?, None)),
+            TransportPayload::Encoded(EncodedPayload::new(
+                payload,
+                ContentType::new("text/plain")?,
+                None,
+            )),
         ))?;
     }
     Ok(())

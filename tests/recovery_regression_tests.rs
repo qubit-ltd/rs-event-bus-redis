@@ -89,7 +89,11 @@ fn command_calls(connection: &mut Connection, command: &str) -> Result<u64, Box<
     let stats: String = cmd("INFO").arg("commandstats").query(connection)?;
     let prefix = format!("cmdstat_{command}:calls=");
     match stats.lines().find_map(|line| line.strip_prefix(&prefix)) {
-        Some(value) => Ok(value.split(',').next().ok_or("missing call count")?.parse()?),
+        Some(value) => Ok(value
+            .split(',')
+            .next()
+            .ok_or("missing call count")?
+            .parse()?),
         None => Ok(0),
     }
 }
@@ -249,7 +253,12 @@ fn observe_isolated_scan_metadata(
         pending_calls, 1,
         "isolated own-pending experiment must issue exactly one XREADGROUP"
     );
-    assert_scan_metadata_increment(&pending_before, &pending_after, &pending_id, pending_consumer);
+    assert_scan_metadata_increment(
+        &pending_before,
+        &pending_after,
+        &pending_id,
+        pending_consumer,
+    );
     eprintln!(
         "Redis {redis_version} own-pending XREADGROUP idle observation: {} -> {} ms",
         pending_before.idle_ms, pending_after.idle_ms
@@ -289,12 +298,16 @@ fn test_async_polled_receive_cancellation_forces_recovery() -> Result<(), Box<dy
             completed_claims
         );
         drop(receiver.receive(Duration::from_secs(1)));
-        let _ = bus.publish(event("events", "unpolled", b"payload")?).await?;
+        let _ = bus
+            .publish(event("events", "unpolled", b"payload")?)
+            .await?;
         let ReceiveOutcome::Message(first) = receiver.receive(Duration::ZERO).await? else {
             return Err("new record lost after unpolled receive drop".into());
         };
         let first_token = first.settlement().ok_or("first settlement token missing")?;
-        receiver.settle(first_token, DeliveryDisposition::Accept).await?;
+        receiver
+            .settle(first_token, DeliveryDisposition::Accept)
+            .await?;
         assert_eq!(
             command_calls(&mut observer, "xautoclaim")?,
             completed_claims,
@@ -306,7 +319,9 @@ fn test_async_polled_receive_cancellation_forces_recovery() -> Result<(), Box<dy
             "receive should await an empty stream"
         );
         drop(in_flight);
-        let _ = bus.publish(event("events", "after-cancel", b"payload")?).await?;
+        let _ = bus
+            .publish(event("events", "after-cancel", b"payload")?)
+            .await?;
         let ReceiveOutcome::Message(second) = receiver.receive(Duration::ZERO).await? else {
             return Err("cancelled receive did not recover the next message".into());
         };
@@ -327,7 +342,8 @@ fn test_async_polled_receive_cancellation_forces_recovery() -> Result<(), Box<dy
 /// rather than claiming on every message.
 #[cfg(feature = "sync")]
 #[test]
-fn test_sync_hot_path_avoids_repeated_autoclaim_for_one_thousand_messages() -> Result<(), Box<dyn Error>> {
+fn test_sync_hot_path_avoids_repeated_autoclaim_for_one_thousand_messages()
+-> Result<(), Box<dyn Error>> {
     let server = RedisServer::start()?;
     let mut settings = provider_options(&server, "hot-recovery-clock", 1);
     settings.insert("redis.recovery_interval_ms".into(), "60000".into());
@@ -347,16 +363,24 @@ fn test_sync_hot_path_avoids_repeated_autoclaim_for_one_thousand_messages() -> R
         let id = format!("hot-{index}");
         let _ = bus.publish(event("events", &id, b"payload")?)?;
         let ReceiveOutcome::Message(message) = receiver.receive(Duration::ZERO)? else {
-            return Err(format!("message {index} was not delivered by the zero-timeout read").into());
+            return Err(
+                format!("message {index} was not delivered by the zero-timeout read").into(),
+            );
         };
         assert_eq!(message.id().as_str(), id);
         let token = message.settlement().ok_or("settlement token missing")?;
         receiver.settle(token, DeliveryDisposition::Accept)?;
     }
     let claims = command_calls(&mut observer, "xautoclaim")? - before_claim;
-    assert_eq!(snapshot("hot-recovery-clock").recovery_claim_commands(), claims);
+    assert_eq!(
+        snapshot("hot-recovery-clock").recovery_claim_commands(),
+        claims
+    );
     let reads = command_calls(&mut observer, "xreadgroup")? - before_read;
-    assert!(claims < 1_000, "hot path issued {claims} XAUTOCLAIM commands");
+    assert!(
+        claims < 1_000,
+        "hot path issued {claims} XAUTOCLAIM commands"
+    );
     assert!(
         reads >= 1_000,
         "new-entry reads must cover the thousand published messages"
@@ -368,7 +392,8 @@ fn test_sync_hot_path_avoids_repeated_autoclaim_for_one_thousand_messages() -> R
 /// expires, even if no new stream record arrives to wake a blocking read.
 #[cfg(feature = "sync")]
 #[test]
-fn test_sync_idle_pending_entry_reclaimed_after_subscription_clock_expires() -> Result<(), Box<dyn Error>> {
+fn test_sync_idle_pending_entry_reclaimed_after_subscription_clock_expires()
+-> Result<(), Box<dyn Error>> {
     let server = RedisServer::start()?;
     let mut settings = provider_options(&server, "periodic-pending-reclaim", 1);
     settings.insert("redis.recovery_interval_ms".into(), "50".into());
@@ -382,7 +407,10 @@ fn test_sync_idle_pending_entry_reclaimed_after_subscription_clock_expires() -> 
         "periodic-group",
         SubscriptionDurability::Durable,
     )?)?;
-    assert!(matches!(recovering.receive(Duration::ZERO)?, ReceiveOutcome::TimedOut));
+    assert!(matches!(
+        recovering.receive(Duration::ZERO)?,
+        ReceiveOutcome::TimedOut
+    ));
     let mut original = bus.subscribe(request_at(
         "events",
         "original-worker",
@@ -408,12 +436,19 @@ fn test_sync_idle_pending_entry_reclaimed_after_subscription_clock_expires() -> 
 
 /// Builds settings for `server`, `topic_namespace`, and `max_unsettled`;
 /// returns options without I/O and uses immediate pending reclaim.
-fn provider_options(server: &RedisServer, topic_namespace: &str, max_unsettled: usize) -> ProviderOptions {
+fn provider_options(
+    server: &RedisServer,
+    topic_namespace: &str,
+    max_unsettled: usize,
+) -> ProviderOptions {
     [
         ("redis.url".into(), server.url().into()),
         ("redis.namespace".into(), topic_namespace.into()),
         ("redis.claim_min_idle_ms".into(), "0".into()),
-        ("redis.max_unsettled_per_subscription".into(), max_unsettled.to_string()),
+        (
+            "redis.max_unsettled_per_subscription".into(),
+            max_unsettled.to_string(),
+        ),
         ("redis.max_idle_connections".into(), "2".into()),
     ]
     .into()
@@ -445,7 +480,13 @@ fn request(
     group: &str,
     durability: SubscriptionDurability,
 ) -> Result<SpiSubscriptionRequest, Box<dyn Error>> {
-    request_at(topic, subscriber, group, durability, StartPosition::Earliest)
+    request_at(
+        topic,
+        subscriber,
+        group,
+        durability,
+        StartPosition::Earliest,
+    )
 }
 
 /// Builds a recovery request at `start_position` without network I/O;
@@ -490,7 +531,10 @@ fn sync_bus_with_claim(
     claim_min_idle_ms: usize,
 ) -> Result<Arc<dyn EventBusSpi>, Box<dyn Error>> {
     let mut options = provider_options(server, namespace, max_unsettled);
-    options.insert("redis.claim_min_idle_ms".into(), claim_min_idle_ms.to_string());
+    options.insert(
+        "redis.claim_min_idle_ms".into(),
+        claim_min_idle_ms.to_string(),
+    );
     RedisEventBusProvider
         .create_configured(&EventBusConfig::default().with_provider_options(options))
         .map_err(|failure| failure.into_error())
@@ -518,7 +562,10 @@ async fn async_bus_with_claim(
     claim_min_idle_ms: usize,
 ) -> Result<Arc<dyn AsyncEventBusSpi>, Box<dyn Error>> {
     let mut options = provider_options(server, namespace, max_unsettled);
-    options.insert("redis.claim_min_idle_ms".into(), claim_min_idle_ms.to_string());
+    options.insert(
+        "redis.claim_min_idle_ms".into(),
+        claim_min_idle_ms.to_string(),
+    );
     AsyncRedisEventBusProvider
         .create_configured(&EventBusConfig::default().with_provider_options(options))
         .await
@@ -550,7 +597,10 @@ fn test_sync_skips_unsettled_id_and_delivers_next() -> Result<(), Box<dyn Error>
     };
     assert_eq!(second.id().as_str(), "sync-second");
 
-    assert!(matches!(receiver.receive(Duration::ZERO)?, ReceiveOutcome::TimedOut));
+    assert!(matches!(
+        receiver.receive(Duration::ZERO)?,
+        ReceiveOutcome::TimedOut
+    ));
     Ok(())
 }
 
@@ -580,7 +630,8 @@ fn test_sync_retry_releases_active_id_for_redelivery() -> Result<(), Box<dyn Err
 
 #[cfg(feature = "sync")]
 #[test]
-fn test_sync_rejects_foreign_settlement_and_is_idempotent_after_close() -> Result<(), Box<dyn Error>> {
+fn test_sync_rejects_foreign_settlement_and_is_idempotent_after_close() -> Result<(), Box<dyn Error>>
+{
     let server = RedisServer::start()?;
     let bus = sync_bus(&server, "token-sync", 2)?;
     let _ = bus.publish(event("events", "token-event", b"payload")?)?;
@@ -605,7 +656,10 @@ fn test_sync_rejects_foreign_settlement_and_is_idempotent_after_close() -> Resul
     owner.settle(token, DeliveryDisposition::Accept)?;
     owner.settle(token, DeliveryDisposition::Accept)?;
     owner.close()?;
-    assert!(matches!(owner.receive(Duration::ZERO)?, ReceiveOutcome::Closed));
+    assert!(matches!(
+        owner.receive(Duration::ZERO)?,
+        ReceiveOutcome::Closed
+    ));
     Ok(())
 }
 
@@ -615,7 +669,9 @@ fn test_async_retry_releases_active_id_for_redelivery() -> Result<(), Box<dyn Er
     block_on(async {
         let server = RedisServer::start()?;
         let bus = async_bus(&server, "retry-async", 2).await?;
-        let _ = bus.publish(event("events", "retry-first-async", b"first")?).await?;
+        let _ = bus
+            .publish(event("events", "retry-first-async", b"first")?)
+            .await?;
         let mut receiver = bus
             .subscribe(request(
                 "events",
@@ -629,7 +685,8 @@ fn test_async_retry_releases_active_id_for_redelivery() -> Result<(), Box<dyn Er
         };
         let token = first.settlement().ok_or("missing token")?;
         receiver.settle(token, DeliveryDisposition::Retry).await?;
-        let ReceiveOutcome::Message(retried) = receiver.receive(Duration::from_secs(2)).await? else {
+        let ReceiveOutcome::Message(retried) = receiver.receive(Duration::from_secs(2)).await?
+        else {
             return Err("retried message missing".into());
         };
         assert_eq!(retried.id().as_str(), "retry-first-async");
@@ -639,11 +696,14 @@ fn test_async_retry_releases_active_id_for_redelivery() -> Result<(), Box<dyn Er
 
 #[cfg(feature = "async")]
 #[test]
-fn test_async_rejects_foreign_settlement_and_is_idempotent_after_close() -> Result<(), Box<dyn Error>> {
+fn test_async_rejects_foreign_settlement_and_is_idempotent_after_close()
+-> Result<(), Box<dyn Error>> {
     block_on(async {
         let server = RedisServer::start()?;
         let bus = async_bus(&server, "token-async", 2).await?;
-        let _ = bus.publish(event("events", "token-event-async", b"payload")?).await?;
+        let _ = bus
+            .publish(event("events", "token-event-async", b"payload")?)
+            .await?;
         let mut owner = bus
             .subscribe(request(
                 "events",
@@ -665,11 +725,19 @@ fn test_async_rejects_foreign_settlement_and_is_idempotent_after_close() -> Resu
             return Err("message missing".into());
         };
         let token = message.settlement().ok_or("settlement token missing")?;
-        assert!(other.settle(token, DeliveryDisposition::Accept).await.is_err());
+        assert!(
+            other
+                .settle(token, DeliveryDisposition::Accept)
+                .await
+                .is_err()
+        );
         owner.settle(token, DeliveryDisposition::Accept).await?;
         owner.settle(token, DeliveryDisposition::Accept).await?;
         owner.close().await?;
-        assert!(matches!(owner.receive(Duration::ZERO).await?, ReceiveOutcome::Closed));
+        assert!(matches!(
+            owner.receive(Duration::ZERO).await?,
+            ReceiveOutcome::Closed
+        ));
         Ok::<(), Box<dyn Error>>(())
     })
 }
@@ -770,7 +838,9 @@ fn test_async_reuses_subscription_read_connection_across_timeouts() -> Result<()
     block_on(async {
         let server = RedisServer::start()?;
         let bus = async_bus(&server, "read-connection-async", 2).await?;
-        let _ = bus.publish(event("warmup", "pool-warmup", b"payload")?).await?;
+        let _ = bus
+            .publish(event("warmup", "pool-warmup", b"payload")?)
+            .await?;
         let mut observer = Client::open(server.url())?.get_connection()?;
         let before = total_connections(&mut observer)?;
         let mut receiver = bus
@@ -853,8 +923,12 @@ fn test_async_skips_unsettled_id_and_delivers_next() -> Result<(), Box<dyn Error
     block_on(async {
         let server = RedisServer::start()?;
         let bus = async_bus(&server, "recovery-async", 2).await?;
-        let _ = bus.publish(event("events", "async-first", b"first")?).await?;
-        let _ = bus.publish(event("events", "async-second", b"second")?).await?;
+        let _ = bus
+            .publish(event("events", "async-first", b"first")?)
+            .await?;
+        let _ = bus
+            .publish(event("events", "async-second", b"second")?)
+            .await?;
         let mut receiver = bus
             .subscribe(request(
                 "events",
@@ -869,8 +943,11 @@ fn test_async_skips_unsettled_id_and_delivers_next() -> Result<(), Box<dyn Error
         };
         assert_eq!(first.id().as_str(), "async-first");
 
-        let ReceiveOutcome::Message(second) = receiver.receive(Duration::from_secs(2)).await? else {
-            return Err("second message was not received while the first remained unsettled".into());
+        let ReceiveOutcome::Message(second) = receiver.receive(Duration::from_secs(2)).await?
+        else {
+            return Err(
+                "second message was not received while the first remained unsettled".into(),
+            );
         };
         assert_eq!(second.id().as_str(), "async-second");
 
@@ -917,7 +994,12 @@ fn test_sync_poison_does_not_block_next() -> Result<(), Box<dyn Error>> {
     let quarantine = poison_key(
         "poison-sync",
         "events",
-        &group_name("poison-sync", "events", "sync-poison-worker", Some("sync-poison-group")),
+        &group_name(
+            "poison-sync",
+            "events",
+            "sync-poison-worker",
+            Some("sync-poison-group"),
+        ),
     );
     let quarantined: usize = cmd("XLEN").arg(quarantine).query(&mut connection)?;
     assert_eq!(quarantined, 4);
@@ -927,7 +1009,12 @@ fn test_sync_poison_does_not_block_next() -> Result<(), Box<dyn Error>> {
         .arg(poison_key(
             "poison-sync",
             "events",
-            &group_name("poison-sync", "events", "sync-poison-worker", Some("sync-poison-group")),
+            &group_name(
+                "poison-sync",
+                "events",
+                "sync-poison-worker",
+                Some("sync-poison-group"),
+            ),
         ))
         .arg("-")
         .arg("+")
@@ -991,7 +1078,12 @@ fn test_sync_unknown_wire_version_stays_pending() -> Result<(), Box<dyn Error>> 
     assert_eq!(error.retryable(), Some(false));
     let pending: Vec<Value> = cmd("XPENDING")
         .arg(&stream)
-        .arg(group_name(namespace, "events", "version-worker", Some("version-group")))
+        .arg(group_name(
+            namespace,
+            "events",
+            "version-worker",
+            Some("version-group"),
+        ))
         .arg(&message_id)
         .arg(&message_id)
         .arg(1)
@@ -1014,7 +1106,12 @@ fn test_sync_quarantine_failure_keeps_source_pending() -> Result<(), Box<dyn Err
     let server = RedisServer::start()?;
     let bus = sync_bus(&server, "poison-failure-sync", 2)?;
     let stream = stream_key("poison-failure-sync", "events");
-    let group = group_name("poison-failure-sync", "events", "failure-worker", Some("failure-group"));
+    let group = group_name(
+        "poison-failure-sync",
+        "events",
+        "failure-worker",
+        Some("failure-group"),
+    );
     let quarantine = poison_key("poison-failure-sync", "events", &group);
     let mut connection = Client::open(server.url())?.get_connection()?;
     cmd("XADD")
@@ -1052,7 +1149,9 @@ fn test_sync_quarantine_failure_keeps_source_pending() -> Result<(), Box<dyn Err
         .arg(10)
         .query(&mut connection)?;
     assert_eq!(pending.len(), 1);
-    cmd("DEL").arg(&quarantine).query::<usize>(&mut connection)?;
+    cmd("DEL")
+        .arg(&quarantine)
+        .query::<usize>(&mut connection)?;
     assert!(matches!(
         receiver.receive(Duration::from_secs(2))?,
         ReceiveOutcome::Gap(_)
@@ -1112,7 +1211,9 @@ fn test_async_quarantine_failure_keeps_source_pending() -> Result<(), Box<dyn Er
             .arg(10)
             .query(&mut connection)?;
         assert_eq!(pending.len(), 1);
-        cmd("DEL").arg(&quarantine).query::<usize>(&mut connection)?;
+        cmd("DEL")
+            .arg(&quarantine)
+            .query::<usize>(&mut connection)?;
         assert!(matches!(
             receiver.receive(Duration::from_secs(2)).await?,
             ReceiveOutcome::Gap(_)
@@ -1130,7 +1231,9 @@ fn test_async_poison_does_not_block_next() -> Result<(), Box<dyn Error>> {
         let stream = stream_key("poison-async", "events");
         let mut connection = Client::open(server.url())?.get_connection()?;
         insert_poison_fixtures(&mut connection, &stream)?;
-        let _ = bus.publish(event("events", "async-after-poison", b"valid")?).await?;
+        let _ = bus
+            .publish(event("events", "async-after-poison", b"valid")?)
+            .await?;
         let mut receiver = bus
             .subscribe(request(
                 "events",
@@ -1230,7 +1333,12 @@ fn test_async_unknown_wire_version_stays_pending() -> Result<(), Box<dyn Error>>
         assert_eq!(error.retryable(), Some(false));
         let pending: Vec<Value> = cmd("XPENDING")
             .arg(&stream)
-            .arg(group_name(namespace, "events", "version-worker", Some("version-group")))
+            .arg(group_name(
+                namespace,
+                "events",
+                "version-worker",
+                Some("version-group"),
+            ))
             .arg(&message_id)
             .arg(&message_id)
             .arg(1)
@@ -1320,7 +1428,10 @@ fn test_sync_empty_receive_observes_zero_and_bounded_timeouts() -> Result<(), Bo
         "timeout-group",
         SubscriptionDurability::Durable,
     )?)?;
-    assert!(matches!(receiver.receive(Duration::ZERO)?, ReceiveOutcome::TimedOut));
+    assert!(matches!(
+        receiver.receive(Duration::ZERO)?,
+        ReceiveOutcome::TimedOut
+    ));
     assert!(matches!(
         receiver.receive(Duration::from_millis(20))?,
         ReceiveOutcome::TimedOut
@@ -1383,7 +1494,10 @@ fn test_sync_zero_timeout_progresses_past_active_pending_records() -> Result<(),
             break;
         }
     }
-    assert!(found, "zero-timeout scans did not progress to a new message");
+    assert!(
+        found,
+        "zero-timeout scans did not progress to a new message"
+    );
     Ok(())
 }
 
@@ -1412,7 +1526,9 @@ fn test_async_zero_timeout_progresses_past_active_pending_records() -> Result<()
                 ReceiveOutcome::Message(_)
             ));
         }
-        let _ = bus.publish(event("events", "after-pending", b"payload")?).await?;
+        let _ = bus
+            .publish(event("events", "after-pending", b"payload")?)
+            .await?;
         let mut found = false;
         for _ in 0..24 {
             if let ReceiveOutcome::Message(message) = receiver.receive(Duration::ZERO).await? {
@@ -1421,7 +1537,10 @@ fn test_async_zero_timeout_progresses_past_active_pending_records() -> Result<()
                 break;
             }
         }
-        assert!(found, "zero-timeout scans did not progress to a new message");
+        assert!(
+            found,
+            "zero-timeout scans did not progress to a new message"
+        );
         Ok::<(), Box<dyn Error>>(())
     })
 }
@@ -1446,7 +1565,11 @@ fn test_sync_active_recovery_metadata() -> Result<(), Box<dyn Error>> {
                 "fixture {image} started Redis {redis_version}"
             );
             if claim_idle_ms == 0 {
-                observe_isolated_scan_metadata(&mut observer, &format!("isolation-sync-{image}"), redis_version)?;
+                observe_isolated_scan_metadata(
+                    &mut observer,
+                    &format!("isolation-sync-{image}"),
+                    redis_version,
+                )?;
             }
 
             let namespace = format!("active-sync-{image}-{claim_idle_ms}");
@@ -1501,9 +1624,11 @@ fn test_sync_active_recovery_metadata() -> Result<(), Box<dyn Error>> {
                         break;
                     }
                     ReceiveOutcome::Message(message) => {
-                        return Err(
-                            format!("active A was redelivered before settlement: {}", message.id().as_str()).into(),
-                        );
+                        return Err(format!(
+                            "active A was redelivered before settlement: {}",
+                            message.id().as_str()
+                        )
+                        .into());
                     }
                     ReceiveOutcome::TimedOut => {}
                     ReceiveOutcome::Gap(gap) => {
@@ -1512,7 +1637,10 @@ fn test_sync_active_recovery_metadata() -> Result<(), Box<dyn Error>> {
                     _ => return Err("unexpected receive outcome during active scan".into()),
                 }
             }
-            assert!(delivered_b, "new B did not make progress while A remained active");
+            assert!(
+                delivered_b,
+                "new B did not make progress while A remained active"
+            );
             let claims = command_calls(&mut observer, "xautoclaim")? - claim_before;
             let reads = command_calls(&mut observer, "xreadgroup")? - read_before;
             assert!(claims >= 2, "expected two claim scans, got {claims}");
@@ -1576,7 +1704,11 @@ fn test_async_active_recovery_metadata() -> Result<(), Box<dyn Error>> {
                     "fixture {image} started Redis {redis_version}"
                 );
                 if claim_idle_ms == 0 {
-                    observe_isolated_scan_metadata(&mut observer, &format!("isolation-async-{image}"), redis_version)?;
+                    observe_isolated_scan_metadata(
+                        &mut observer,
+                        &format!("isolation-async-{image}"),
+                        redis_version,
+                    )?;
                 }
 
                 let namespace = format!("active-async-{image}-{claim_idle_ms}");
@@ -1590,7 +1722,9 @@ fn test_async_active_recovery_metadata() -> Result<(), Box<dyn Error>> {
                     .map_err(|failure| failure.into_error())?;
                 let stream = stream_key(&namespace, "events");
                 let group = group_name(&namespace, "events", "active-worker", Some("active-group"));
-                let _ = bus.publish(event("events", "active-A", b"payload")?).await?;
+                let _ = bus
+                    .publish(event("events", "active-A", b"payload")?)
+                    .await?;
                 let entries: StreamRangeReply = cmd("XRANGE")
                     .arg(&stream)
                     .arg("-")
@@ -1607,7 +1741,9 @@ fn test_async_active_recovery_metadata() -> Result<(), Box<dyn Error>> {
                         SubscriptionDurability::Durable,
                     )?)
                     .await?;
-                let ReceiveOutcome::Message(active) = receiver.receive(Duration::from_secs(2)).await? else {
+                let ReceiveOutcome::Message(active) =
+                    receiver.receive(Duration::from_secs(2)).await?
+                else {
                     return Err("active A was not initially delivered".into());
                 };
                 let token = active.settlement().ok_or("A settlement token missing")?;
@@ -1625,7 +1761,9 @@ fn test_async_active_recovery_metadata() -> Result<(), Box<dyn Error>> {
                     receiver.receive(Duration::from_millis(300)).await?,
                     ReceiveOutcome::TimedOut
                 ));
-                let _ = bus.publish(event("events", "active-B", b"payload")?).await?;
+                let _ = bus
+                    .publish(event("events", "active-B", b"payload")?)
+                    .await?;
                 let mut delivered_b = false;
                 for _ in 0..32 {
                     match receiver.receive(Duration::ZERO).await? {
@@ -1642,12 +1780,17 @@ fn test_async_active_recovery_metadata() -> Result<(), Box<dyn Error>> {
                         }
                         ReceiveOutcome::TimedOut => {}
                         ReceiveOutcome::Gap(gap) => {
-                            return Err(format!("unexpected gap during active scan: {gap:?}").into());
+                            return Err(
+                                format!("unexpected gap during active scan: {gap:?}").into()
+                            );
                         }
                         _ => return Err("unexpected receive outcome during active scan".into()),
                     }
                 }
-                assert!(delivered_b, "new B did not make progress while A remained active");
+                assert!(
+                    delivered_b,
+                    "new B did not make progress while A remained active"
+                );
                 let claims = command_calls(&mut observer, "xautoclaim")? - claim_before;
                 let reads = command_calls(&mut observer, "xreadgroup")? - read_before;
                 assert!(claims >= 2, "expected two claim scans, got {claims}");
@@ -1665,7 +1808,9 @@ fn test_async_active_recovery_metadata() -> Result<(), Box<dyn Error>> {
                 );
 
                 receiver.settle(token, DeliveryDisposition::Retry).await?;
-                let ReceiveOutcome::Message(retried) = receiver.receive(Duration::from_secs(2)).await? else {
+                let ReceiveOutcome::Message(retried) =
+                    receiver.receive(Duration::from_secs(2)).await?
+                else {
                     return Err("Retry did not make A eligible for redelivery".into());
                 };
                 assert_eq!(retried.id().as_str(), "active-A");
@@ -1680,7 +1825,9 @@ fn test_async_active_recovery_metadata() -> Result<(), Box<dyn Error>> {
                         StartPosition::New,
                     )?)
                     .await?;
-                let ReceiveOutcome::Message(recovered) = second.receive(Duration::from_secs(2)).await? else {
+                let ReceiveOutcome::Message(recovered) =
+                    second.receive(Duration::from_secs(2)).await?
+                else {
                     return Err("another consumer did not recover the pending message".into());
                 };
                 assert_eq!(
@@ -1720,7 +1867,8 @@ fn test_sync_duration_max_waits_for_a_message() -> Result<(), Box<dyn Error>> {
 
 #[cfg(feature = "sync")]
 #[test]
-fn test_sync_long_receive_reclaims_after_idle_threshold_without_new_messages() -> Result<(), Box<dyn Error>> {
+fn test_sync_long_receive_reclaims_after_idle_threshold_without_new_messages()
+-> Result<(), Box<dyn Error>> {
     let server = RedisServer::start()?;
     let bus = sync_bus_with_claim(&server, "late-claim-sync", 2, 100)?;
     let _ = bus.publish(event("events", "late-claim-sync", b"payload")?)?;
@@ -1752,11 +1900,14 @@ fn test_sync_long_receive_reclaims_after_idle_threshold_without_new_messages() -
 
 #[cfg(feature = "async")]
 #[test]
-fn test_async_long_receive_reclaims_after_idle_threshold_without_new_messages() -> Result<(), Box<dyn Error>> {
+fn test_async_long_receive_reclaims_after_idle_threshold_without_new_messages()
+-> Result<(), Box<dyn Error>> {
     block_on(async {
         let server = RedisServer::start()?;
         let bus = async_bus_with_claim(&server, "late-claim-async", 2, 100).await?;
-        let _ = bus.publish(event("events", "late-claim-async", b"payload")?).await?;
+        let _ = bus
+            .publish(event("events", "late-claim-async", b"payload")?)
+            .await?;
         let mut first = bus
             .subscribe(request(
                 "events",
@@ -1765,7 +1916,8 @@ fn test_async_long_receive_reclaims_after_idle_threshold_without_new_messages() 
                 SubscriptionDurability::Durable,
             )?)
             .await?;
-        let ReceiveOutcome::Message(first_message) = first.receive(Duration::from_secs(1)).await? else {
+        let ReceiveOutcome::Message(first_message) = first.receive(Duration::from_secs(1)).await?
+        else {
             return Err("first consumer did not receive the message".into());
         };
         assert_eq!(first_message.id().as_str(), "late-claim-async");
@@ -1780,7 +1932,8 @@ fn test_async_long_receive_reclaims_after_idle_threshold_without_new_messages() 
                 StartPosition::New,
             )?)
             .await?;
-        let ReceiveOutcome::Message(recovered) = second.receive(Duration::from_secs(3)).await? else {
+        let ReceiveOutcome::Message(recovered) = second.receive(Duration::from_secs(3)).await?
+        else {
             return Err("one long receive did not recover the idle pending message".into());
         };
         assert_eq!(recovered.id().as_str(), "late-claim-async");
@@ -1796,7 +1949,12 @@ fn test_sync_deleted_pending_entry_is_cleared_on_redis_6_2_and_7() -> Result<(),
         let namespace = format!("deleted-sync-{image}");
         let bus = sync_bus(&server, &namespace, 2)?;
         let key = stream_key(&namespace, "events");
-        let group = group_name(&namespace, "events", "deleted-worker", Some("deleted-group"));
+        let group = group_name(
+            &namespace,
+            "events",
+            "deleted-worker",
+            Some("deleted-group"),
+        );
         let mut connection = Client::open(server.url())?.get_connection()?;
         let _ = bus.publish(event("events", "deleted-sync", b"payload")?)?;
         let entries: StreamRangeReply = cmd("XRANGE")
@@ -1821,15 +1979,23 @@ fn test_sync_deleted_pending_entry_is_cleared_on_redis_6_2_and_7() -> Result<(),
         let ReceiveOutcome::Message(message) = receiver.receive(Duration::from_secs(2))? else {
             return Err("pending test message was not received".into());
         };
-        let token = message.settlement().ok_or("message has no settlement token")?;
+        let token = message
+            .settlement()
+            .ok_or("message has no settlement token")?;
         receiver.settle(token, DeliveryDisposition::Retry)?;
 
         let deleted: usize = cmd("XDEL").arg(&key).arg(redis_id).query(&mut connection)?;
         assert_eq!(deleted, 1);
-        assert!(matches!(receiver.receive(Duration::ZERO)?, ReceiveOutcome::Gap(_)));
+        assert!(matches!(
+            receiver.receive(Duration::ZERO)?,
+            ReceiveOutcome::Gap(_)
+        ));
         assert_eq!(snapshot(&namespace).delivery_gaps(), 1);
         assert_eq!(snapshot(&namespace).quarantine_succeeded(), 0);
-        assert!(matches!(receiver.receive(Duration::ZERO)?, ReceiveOutcome::TimedOut));
+        assert!(matches!(
+            receiver.receive(Duration::ZERO)?,
+            ReceiveOutcome::TimedOut
+        ));
         let pending: Vec<Value> = cmd("XPENDING")
             .arg(&key)
             .arg(&group)
@@ -1837,7 +2003,10 @@ fn test_sync_deleted_pending_entry_is_cleared_on_redis_6_2_and_7() -> Result<(),
             .arg("+")
             .arg(10)
             .query(&mut connection)?;
-        assert!(pending.is_empty(), "{image} retained a tombstone in the PEL");
+        assert!(
+            pending.is_empty(),
+            "{image} retained a tombstone in the PEL"
+        );
     }
     Ok(())
 }
@@ -1851,9 +2020,16 @@ fn test_async_deleted_pending_entry_is_cleared_on_redis_6_2_and_7() -> Result<()
             let namespace = format!("deleted-async-{image}");
             let bus = async_bus(&server, &namespace, 2).await?;
             let key = stream_key(&namespace, "events");
-            let group = group_name(&namespace, "events", "deleted-worker", Some("deleted-group"));
+            let group = group_name(
+                &namespace,
+                "events",
+                "deleted-worker",
+                Some("deleted-group"),
+            );
             let mut connection = Client::open(server.url())?.get_connection()?;
-            let _ = bus.publish(event("events", "deleted-async", b"payload")?).await?;
+            let _ = bus
+                .publish(event("events", "deleted-async", b"payload")?)
+                .await?;
             let entries: StreamRangeReply = cmd("XRANGE")
                 .arg(&key)
                 .arg("-")
@@ -1875,10 +2051,13 @@ fn test_async_deleted_pending_entry_is_cleared_on_redis_6_2_and_7() -> Result<()
                     SubscriptionDurability::Durable,
                 )?)
                 .await?;
-            let ReceiveOutcome::Message(message) = receiver.receive(Duration::from_secs(2)).await? else {
+            let ReceiveOutcome::Message(message) = receiver.receive(Duration::from_secs(2)).await?
+            else {
                 return Err("pending test message was not received".into());
             };
-            let token = message.settlement().ok_or("message has no settlement token")?;
+            let token = message
+                .settlement()
+                .ok_or("message has no settlement token")?;
             receiver.settle(token, DeliveryDisposition::Retry).await?;
 
             let deleted: usize = cmd("XDEL").arg(&key).arg(redis_id).query(&mut connection)?;
@@ -1900,7 +2079,10 @@ fn test_async_deleted_pending_entry_is_cleared_on_redis_6_2_and_7() -> Result<()
                 .arg("+")
                 .arg(10)
                 .query(&mut connection)?;
-            assert!(pending.is_empty(), "{image} retained a tombstone in the PEL");
+            assert!(
+                pending.is_empty(),
+                "{image} retained a tombstone in the PEL"
+            );
         }
         Ok::<(), Box<dyn Error>>(())
     })
@@ -1921,7 +2103,11 @@ fn test_sync_tombstone_scan_counts_reported_quarantine_outcome() -> Result<(), B
     let mut observer = Client::open(server.url())?.get_connection()?;
     let _ = bus.publish(event("events", "first", b"payload")?)?;
     let _ = bus.publish(event("events", "second", b"payload")?)?;
-    let entries: StreamRangeReply = cmd("XRANGE").arg(&stream).arg("-").arg("+").query(&mut observer)?;
+    let entries: StreamRangeReply = cmd("XRANGE")
+        .arg(&stream)
+        .arg("-")
+        .arg("+")
+        .query(&mut observer)?;
     let deleted_id = entries.ids.first().ok_or("first entry missing")?.id.clone();
     {
         let mut first = bus.subscribe(request(
@@ -1975,7 +2161,11 @@ fn test_async_tombstone_scan_counts_reported_quarantine_outcome() -> Result<(), 
         let mut observer = Client::open(server.url())?.get_connection()?;
         let _ = bus.publish(event("events", "first", b"payload")?).await?;
         let _ = bus.publish(event("events", "second", b"payload")?).await?;
-        let entries: StreamRangeReply = cmd("XRANGE").arg(&stream).arg("-").arg("+").query(&mut observer)?;
+        let entries: StreamRangeReply = cmd("XRANGE")
+            .arg(&stream)
+            .arg("-")
+            .arg("+")
+            .query(&mut observer)?;
         let deleted_id = entries.ids.first().ok_or("first entry missing")?.id.clone();
         {
             let mut first = bus
@@ -2063,10 +2253,16 @@ fn test_sync_xack_failure_keeps_token_retryable_and_slot_occupied() -> Result<()
     };
     let token = message.settlement().ok_or("settlement token missing")?;
     let mut connection = Client::open(server.url())?.get_connection()?;
-    let _: String = cmd("SET").arg(key).arg("wrong-type").query(&mut connection)?;
+    let _: String = cmd("SET")
+        .arg(key)
+        .arg("wrong-type")
+        .query(&mut connection)?;
     assert!(receiver.settle(token, DeliveryDisposition::Accept).is_err());
     assert!(receiver.settle(token, DeliveryDisposition::Accept).is_err());
-    assert!(matches!(receiver.receive(Duration::ZERO)?, ReceiveOutcome::TimedOut));
+    assert!(matches!(
+        receiver.receive(Duration::ZERO)?,
+        ReceiveOutcome::TimedOut
+    ));
     Ok(())
 }
 
@@ -2077,7 +2273,9 @@ fn test_async_xack_failure_keeps_token_retryable_and_slot_occupied() -> Result<(
         let server = RedisServer::start()?;
         let bus = async_bus(&server, "settle-error-async", 1).await?;
         let key = stream_key("settle-error-async", "events");
-        let _ = bus.publish(event("events", "settle-error-async", b"payload")?).await?;
+        let _ = bus
+            .publish(event("events", "settle-error-async", b"payload")?)
+            .await?;
         let mut receiver = bus
             .subscribe(request(
                 "events",
@@ -2086,14 +2284,28 @@ fn test_async_xack_failure_keeps_token_retryable_and_slot_occupied() -> Result<(
                 SubscriptionDurability::Durable,
             )?)
             .await?;
-        let ReceiveOutcome::Message(message) = receiver.receive(Duration::from_secs(2)).await? else {
+        let ReceiveOutcome::Message(message) = receiver.receive(Duration::from_secs(2)).await?
+        else {
             return Err("message missing".into());
         };
         let token = message.settlement().ok_or("settlement token missing")?;
         let mut connection = Client::open(server.url())?.get_connection()?;
-        let _: String = cmd("SET").arg(key).arg("wrong-type").query(&mut connection)?;
-        assert!(receiver.settle(token, DeliveryDisposition::Accept).await.is_err());
-        assert!(receiver.settle(token, DeliveryDisposition::Accept).await.is_err());
+        let _: String = cmd("SET")
+            .arg(key)
+            .arg("wrong-type")
+            .query(&mut connection)?;
+        assert!(
+            receiver
+                .settle(token, DeliveryDisposition::Accept)
+                .await
+                .is_err()
+        );
+        assert!(
+            receiver
+                .settle(token, DeliveryDisposition::Accept)
+                .await
+                .is_err()
+        );
         assert!(matches!(
             receiver.receive(Duration::ZERO).await?,
             ReceiveOutcome::TimedOut
@@ -2108,7 +2320,12 @@ fn test_sync_removed_group_error_has_unknown_retryability() -> Result<(), Box<dy
     let server = RedisServer::start()?;
     let bus = sync_bus(&server, "claim-error-sync", 2)?;
     let key = stream_key("claim-error-sync", "events");
-    let group = group_name("claim-error-sync", "events", "claim-worker", Some("claim-group"));
+    let group = group_name(
+        "claim-error-sync",
+        "events",
+        "claim-worker",
+        Some("claim-group"),
+    );
     let mut receiver = bus.subscribe(request(
         "events",
         "claim-worker",
@@ -2125,7 +2342,13 @@ fn test_sync_removed_group_error_has_unknown_retryability() -> Result<(), Box<dy
         Ok(_) => return Err("removed group should fail XAUTOCLAIM".into()),
         Err(error) => error,
     };
-    assert!(matches!(error, SpiError::Operation { retryable: None, .. }));
+    assert!(matches!(
+        error,
+        SpiError::Operation {
+            retryable: None,
+            ..
+        }
+    ));
     Ok(())
 }
 
@@ -2136,7 +2359,12 @@ fn test_async_removed_group_error_has_unknown_retryability() -> Result<(), Box<d
         let server = RedisServer::start()?;
         let bus = async_bus(&server, "claim-error-async", 2).await?;
         let key = stream_key("claim-error-async", "events");
-        let group = group_name("claim-error-async", "events", "claim-worker", Some("claim-group"));
+        let group = group_name(
+            "claim-error-async",
+            "events",
+            "claim-worker",
+            Some("claim-group"),
+        );
         let mut receiver = bus
             .subscribe(request(
                 "events",
@@ -2155,7 +2383,13 @@ fn test_async_removed_group_error_has_unknown_retryability() -> Result<(), Box<d
             Ok(_) => return Err("removed group should fail XAUTOCLAIM".into()),
             Err(error) => error,
         };
-        assert!(matches!(error, SpiError::Operation { retryable: None, .. }));
+        assert!(matches!(
+            error,
+            SpiError::Operation {
+                retryable: None,
+                ..
+            }
+        ));
         Ok::<(), Box<dyn Error>>(())
     })
 }
@@ -2222,7 +2456,9 @@ fn test_async_receive_and_settle_unknown_count_once() -> Result<(), Box<dyn Erro
             .create_configured(&EventBusConfig::default().with_provider_options(options))
             .await
             .map_err(|failure| failure.into_error())?;
-        let _ = bus.publish(event("events", "unknown-async", b"payload")?).await?;
+        let _ = bus
+            .publish(event("events", "unknown-async", b"payload")?)
+            .await?;
         let mut receiver = bus
             .subscribe(request(
                 "events",
@@ -2240,7 +2476,8 @@ fn test_async_receive_and_settle_unknown_count_once() -> Result<(), Box<dyn Erro
         assert_eq!(snapshot(namespace).receive_unknown(), 1);
         assert_eq!(snapshot(namespace).settlement_unknown(), 0);
 
-        let ReceiveOutcome::Message(message) = receiver.receive(Duration::from_secs(2)).await? else {
+        let ReceiveOutcome::Message(message) = receiver.receive(Duration::from_secs(2)).await?
+        else {
             return Err("pending message not recovered".into());
         };
         let token = message.settlement().ok_or("settlement token missing")?;
@@ -2269,7 +2506,10 @@ fn test_sync_drops_reader_connection_after_redis_receive_error() -> Result<(), B
     )?)?;
     let key = stream_key("read-error-sync", "events");
     let mut connection = Client::open(server.url())?.get_connection()?;
-    let _: String = cmd("SET").arg(&key).arg("wrong-type").query(&mut connection)?;
+    let _: String = cmd("SET")
+        .arg(&key)
+        .arg("wrong-type")
+        .query(&mut connection)?;
     let error = match receiver.receive(Duration::ZERO) {
         Ok(_) => return Err("wrong-type stream should fail receive".into()),
         Err(error) => error,
@@ -2282,7 +2522,9 @@ fn test_sync_drops_reader_connection_after_redis_receive_error() -> Result<(), B
         }
     ));
     let mut shutdown_connection = Client::open(server.url())?.get_connection()?;
-    let _: RedisResult<()> = cmd("SHUTDOWN").arg("NOSAVE").query(&mut shutdown_connection);
+    let _: RedisResult<()> = cmd("SHUTDOWN")
+        .arg("NOSAVE")
+        .query(&mut shutdown_connection);
     let error = match receiver.receive(Duration::ZERO) {
         Ok(_) => return Err("stopped Redis server should fail receive".into()),
         Err(error) => error,
@@ -2311,7 +2553,10 @@ fn test_sync_drops_reader_connection_after_redis_receive_error() -> Result<(), B
         .arg("0")
         .arg("MKSTREAM")
         .query(&mut connection)?;
-    assert!(matches!(receiver.receive(Duration::ZERO)?, ReceiveOutcome::TimedOut));
+    assert!(matches!(
+        receiver.receive(Duration::ZERO)?,
+        ReceiveOutcome::TimedOut
+    ));
     Ok(())
 }
 
@@ -2331,7 +2576,10 @@ fn test_async_drops_reader_connection_after_redis_receive_error() -> Result<(), 
             .await?;
         let key = stream_key("read-error-async", "events");
         let mut connection = Client::open(server.url())?.get_connection()?;
-        let _: String = cmd("SET").arg(&key).arg("wrong-type").query(&mut connection)?;
+        let _: String = cmd("SET")
+            .arg(&key)
+            .arg("wrong-type")
+            .query(&mut connection)?;
         let error = match receiver.receive(Duration::ZERO).await {
             Ok(_) => return Err("wrong-type stream should fail receive".into()),
             Err(error) => error,
@@ -2344,7 +2592,9 @@ fn test_async_drops_reader_connection_after_redis_receive_error() -> Result<(), 
             }
         ));
         let mut shutdown_connection = Client::open(server.url())?.get_connection()?;
-        let _: RedisResult<()> = cmd("SHUTDOWN").arg("NOSAVE").query(&mut shutdown_connection);
+        let _: RedisResult<()> = cmd("SHUTDOWN")
+            .arg("NOSAVE")
+            .query(&mut shutdown_connection);
         let error = match receiver.receive(Duration::ZERO).await {
             Ok(_) => return Err("stopped Redis server should fail receive".into()),
             Err(error) => error,

@@ -38,7 +38,13 @@ mod tests {
             Duration::from_millis(10),
             full_capacity_backoff(Duration::from_millis(10))
         );
-        assert_eq!(Duration::from_millis(10), full_capacity_backoff(Duration::from_secs(1)));
-        assert_eq!(Duration::from_millis(10), full_capacity_backoff(Duration::MAX));
+        assert_eq!(
+            Duration::from_millis(10),
+            full_capacity_backoff(Duration::from_secs(1))
+        );
+        assert_eq!(
+            Duration::from_millis(10),
+            full_capacity_backoff(Duration::MAX)
+        );
     }
 }

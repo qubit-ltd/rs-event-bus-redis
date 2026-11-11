@@ -66,11 +66,17 @@ fn test_positive_wire_options_are_supported() {
 #[test]
 fn test_public_wire_constructor_copies_payload_without_provider_limits() {
     assert_eq!(
-        WireFields::from_outbound(&message(1_048_577)).unwrap().payload.len(),
+        WireFields::from_outbound(&message(1_048_577))
+            .unwrap()
+            .payload
+            .len(),
         1_048_577
     );
     assert_eq!(
-        WireFields::from_outbound(&message(1_048_576)).unwrap().payload.len(),
+        WireFields::from_outbound(&message(1_048_576))
+            .unwrap()
+            .payload
+            .len(),
         1_048_576
     );
 }
@@ -205,7 +211,8 @@ mod durable {
     }
 
     #[test]
-    fn test_sync_sentinel_receiver_budget_preserves_large_wire() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_sync_sentinel_receiver_budget_preserves_large_wire()
+    -> Result<(), Box<dyn std::error::Error>> {
         let server = SentinelServer::start()?;
         let namespace = "sentinel-receiver-budget-sync";
         let spi = sentinel_receiver_bus(&server, namespace);
@@ -274,8 +281,15 @@ mod durable {
         };
         assert_eq!(error.kind(), "receive_response_too_large");
         assert_eq!(error.retryable(), Some(true));
-        assert!(matches!(receiver.receive(Duration::ZERO), Ok(ReceiveOutcome::Closed)));
-        assert_eq!(server.finish().len(), 4, "the failed receiver socket is never reused");
+        assert!(matches!(
+            receiver.receive(Duration::ZERO),
+            Ok(ReceiveOutcome::Closed)
+        ));
+        assert_eq!(
+            server.finish().len(),
+            4,
+            "the failed receiver socket is never reused"
+        );
     }
 
     #[test]
@@ -297,7 +311,10 @@ mod durable {
             Ok(_) => panic!("oversized RESP frame must stop this receiver"),
         };
         assert_eq!(error.kind(), "receive_response_too_large");
-        assert!(matches!(first.receive(Duration::ZERO), Ok(ReceiveOutcome::Closed)));
+        assert!(matches!(
+            first.receive(Duration::ZERO),
+            Ok(ReceiveOutcome::Closed)
+        ));
 
         let second = spi
             .subscribe(request_at(83, StartPosition::New))
@@ -313,7 +330,8 @@ mod durable {
     }
 
     #[test]
-    fn test_real_oversized_receive_frame_keeps_record_pending_for_recovery() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_real_oversized_receive_frame_keeps_record_pending_for_recovery()
+    -> Result<(), Box<dyn std::error::Error>> {
         let server = RedisServer::start()?;
         let mut observer = redis::Client::open(server.url())?.get_connection()?;
         let namespace = "real-response-limit";
@@ -362,7 +380,8 @@ mod durable {
     }
 
     #[test]
-    fn test_receive_limits_preserve_pending_entries_and_allow_recovery() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_receive_limits_preserve_pending_entries_and_allow_recovery()
+    -> Result<(), Box<dyn std::error::Error>> {
         let server = RedisServer::start()?;
         let mut observer = redis::Client::open(server.url())?.get_connection()?;
         for (index, key) in [
@@ -413,7 +432,8 @@ mod durable {
             let count: usize = redis::cmd("XLEN").arg(&stream).query(&mut observer)?;
             assert_eq!(count, 1, "over-limit record was not deleted");
             let widened = bus(server.url(), &namespace, key, exact);
-            let mut recovered = widened.subscribe(request_at(20 + index as u64, StartPosition::New))?;
+            let mut recovered =
+                widened.subscribe(request_at(20 + index as u64, StartPosition::New))?;
             let ReceiveOutcome::Message(record) = recovered.receive(Duration::from_secs(2))? else {
                 panic!("record recovers at exact limit")
             };
@@ -424,8 +444,8 @@ mod durable {
         Ok(())
     }
     #[test]
-    fn test_future_version_is_preserved_while_malformed_wire_is_quarantined() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn test_future_version_is_preserved_while_malformed_wire_is_quarantined()
+    -> Result<(), Box<dyn std::error::Error>> {
         let server = RedisServer::start()?;
         let mut observer = redis::Client::open(server.url())?.get_connection()?;
         for (namespace, wire, future) in [
@@ -434,7 +454,11 @@ mod durable {
                 r#"{"version":2,"payload":[0,1,2,3,4],"headers_json":"not JSON"}"#,
                 true,
             ),
-            ("malformed-limit", r#"{"version":1,"payload":broken}"#, false),
+            (
+                "malformed-limit",
+                r#"{"version":1,"payload":broken}"#,
+                false,
+            ),
         ] {
             let stream = stream_key(namespace, "limits");
             redis::cmd("XADD")
@@ -477,7 +501,10 @@ mod durable {
                     .arg("+")
                     .arg(10)
                     .query(&mut observer)?;
-                assert!(pending.is_empty(), "malformed record was acknowledged atomically");
+                assert!(
+                    pending.is_empty(),
+                    "malformed record was acknowledged atomically"
+                );
                 let quarantine = poison_key(namespace, "limits", &group);
                 let count: usize = redis::cmd("XLEN").arg(quarantine).query(&mut observer)?;
                 assert_eq!(count, 1, "malformed record was quarantined");
@@ -488,7 +515,8 @@ mod durable {
     }
 
     #[test]
-    fn test_direct_spi_publish_checks_all_components_before_xadd() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_direct_spi_publish_checks_all_components_before_xadd()
+    -> Result<(), Box<dyn std::error::Error>> {
         use qubit_event_bus::model::PublishEffect;
 
         use crate::support::scripted_redis::ScriptedRedis;
@@ -558,8 +586,8 @@ mod durable {
     }
 
     #[test]
-    fn test_real_core_codec_failures_leave_redis_durable_record_recoverable() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn test_real_core_codec_failures_leave_redis_durable_record_recoverable()
+    -> Result<(), Box<dyn std::error::Error>> {
         use qubit_event_bus::EventBus;
         use qubit_event_bus::codec::CodecRegistry;
         use qubit_event_bus::facade::EventBusFacadeConfig;
@@ -605,7 +633,8 @@ mod durable {
                 },
             )?;
             let deadline = std::time::Instant::now() + Duration::from_secs(3);
-            while subscription.terminal_failure().is_none() && std::time::Instant::now() < deadline {
+            while subscription.terminal_failure().is_none() && std::time::Instant::now() < deadline
+            {
                 std::thread::sleep(Duration::from_millis(5));
             }
             let reason = subscription
@@ -634,7 +663,8 @@ mod durable {
 
     #[cfg(feature = "async")]
     #[test]
-    fn test_async_receive_limits_preserve_pending_entries_and_recover() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_async_receive_limits_preserve_pending_entries_and_recover()
+    -> Result<(), Box<dyn std::error::Error>> {
         use qubit_event_bus_redis::r#async::AsyncRedisEventBusProvider;
         use qubit_spi::AsyncServiceProvider;
         let server = RedisServer::start()?;
@@ -675,7 +705,9 @@ mod durable {
                         options.insert("redis.max_payload_bytes".into(), "5".into());
                     }
                     let spi = AsyncRedisEventBusProvider
-                        .create_configured(&EventBusConfig::default().with_provider_options(options))
+                        .create_configured(
+                            &EventBusConfig::default().with_provider_options(options),
+                        )
                         .await
                         .unwrap();
                     let start_position = if attempt == 0 {
@@ -684,7 +716,10 @@ mod durable {
                         StartPosition::New
                     };
                     let mut receiver = spi
-                        .subscribe(request_at(100 + index as u64 * 2 + attempt as u64, start_position))
+                        .subscribe(request_at(
+                            100 + index as u64 * 2 + attempt as u64,
+                            start_position,
+                        ))
                         .await?;
                     if attempt == 0 {
                         let error = receiver
@@ -694,7 +729,9 @@ mod durable {
                             .expect("async limit+1 rejected");
                         assert_eq!(error.kind(), "receive_limit_exceeded");
                     } else {
-                        let ReceiveOutcome::Message(record) = receiver.receive(Duration::from_secs(2)).await? else {
+                        let ReceiveOutcome::Message(record) =
+                            receiver.receive(Duration::from_secs(2)).await?
+                        else {
                             panic!("async record recovers at exact limit")
                         };
                         assert_eq!(record.id().as_str(), "limit-event");
@@ -719,7 +756,8 @@ mod durable {
     }
 
     #[test]
-    fn test_direct_spi_publish_accepts_exact_custom_component_limits() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_direct_spi_publish_accepts_exact_custom_component_limits()
+    -> Result<(), Box<dyn std::error::Error>> {
         use crate::support::scripted_redis::ScriptedRedis;
         use crate::support::scripted_redis::Step;
         for (index, key) in [
@@ -786,7 +824,8 @@ mod async_response_limit {
     }
 
     #[test]
-    fn test_async_sentinel_receiver_budget_preserves_large_wire() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_async_sentinel_receiver_budget_preserves_large_wire()
+    -> Result<(), Box<dyn std::error::Error>> {
         block_on(async {
             let server = SentinelServer::start()?;
             let namespace = "sentinel-receiver-budget-async";
@@ -822,7 +861,8 @@ mod async_response_limit {
                     TypeId::of::<Vec<u8>>(),
                 ))
                 .await?;
-            let ReceiveOutcome::Message(record) = receiver.receive(Duration::from_secs(5)).await? else {
+            let ReceiveOutcome::Message(record) = receiver.receive(Duration::from_secs(5)).await?
+            else {
                 panic!("receiver must read the large message through Sentinel")
             };
             let qubit_event_bus::spi::TransportPayload::Encoded(payload) = record.payload() else {
@@ -888,7 +928,11 @@ mod async_response_limit {
                 receiver.receive(Duration::ZERO).await,
                 Ok(ReceiveOutcome::Closed)
             ));
-            assert_eq!(server.finish().len(), 4, "the failed receiver socket is never reused");
+            assert_eq!(
+                server.finish().len(),
+                4,
+                "the failed receiver socket is never reused"
+            );
         });
     }
 

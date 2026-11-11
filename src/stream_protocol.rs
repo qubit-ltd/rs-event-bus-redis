@@ -72,7 +72,11 @@ pub(crate) fn parse_auto_claim(value: Value) -> Result<(StreamAutoClaimReply, bo
             claimed.push(parse_stream_id(row)?);
         }
     }
-    let deleted_ids: Vec<String> = parts.next().map(from_redis_value).transpose()?.unwrap_or_default();
+    let deleted_ids: Vec<String> = parts
+        .next()
+        .map(from_redis_value)
+        .transpose()?
+        .unwrap_or_default();
     if deleted_ids.iter().any(|id| !valid_stream_id(id)) {
         return Err(invalid_reply());
     }
@@ -101,7 +105,10 @@ pub(crate) fn parse_auto_claim(value: Value) -> Result<(StreamAutoClaimReply, bo
 pub(crate) fn parse_read_group(value: Value) -> Result<Option<StreamReadReply>, RedisError> {
     let pairs = match value {
         Value::Nil => return Ok(None),
-        Value::Array(rows) => rows.into_iter().map(parse_pair).collect::<Result<Vec<_>, _>>()?,
+        Value::Array(rows) => rows
+            .into_iter()
+            .map(parse_pair)
+            .collect::<Result<Vec<_>, _>>()?,
         Value::Map(pairs) => pairs,
         _ => return Err(invalid_reply()),
     };
@@ -135,7 +142,10 @@ pub(crate) fn parse_read_group(value: Value) -> Result<Option<StreamReadReply>, 
 ///
 /// Returns an error when the reply contains an unexpected key, multiple
 /// streams, multiple entries, or malformed stream data.
-pub(crate) fn parse_single_read_group(value: Value, expected_key: &str) -> Result<Option<StreamId>, RedisError> {
+pub(crate) fn parse_single_read_group(
+    value: Value,
+    expected_key: &str,
+) -> Result<Option<StreamId>, RedisError> {
     let Some(mut reply) = parse_read_group(value)? else {
         return Ok(None);
     };
@@ -174,7 +184,10 @@ pub(crate) fn parse_range(value: Value) -> Result<StreamRangeReply, RedisError> 
         _ => return Err(invalid_reply()),
     };
     let mut reply = StreamRangeReply::default();
-    reply.ids = rows.into_iter().map(parse_stream_id).collect::<Result<Vec<_>, _>>()?;
+    reply.ids = rows
+        .into_iter()
+        .map(parse_stream_id)
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(reply)
 }
 
@@ -285,11 +298,17 @@ pub(crate) fn parse_pending_entries(value: Value) -> Result<Vec<PendingEntry>, R
 ///
 /// A non-zero delivery count when both identity checks match; otherwise
 /// `None`.
-pub(crate) fn trusted_attempt(entry: &PendingEntry, expected_id: &str, consumer: &str) -> Option<NonZeroU32> {
+pub(crate) fn trusted_attempt(
+    entry: &PendingEntry,
+    expected_id: &str,
+    consumer: &str,
+) -> Option<NonZeroU32> {
     if entry.id != expected_id || entry.owner != consumer || entry.times_delivered == 0 {
         return None;
     }
-    u32::try_from(entry.times_delivered).ok().and_then(NonZeroU32::new)
+    u32::try_from(entry.times_delivered)
+        .ok()
+        .and_then(NonZeroU32::new)
 }
 
 /// Creates a stable type-error category for an invalid internal stream
@@ -300,5 +319,8 @@ pub(crate) fn trusted_attempt(entry: &PendingEntry, expected_id: &str, consumer:
 /// A static diagnostic without source keys, wire bytes, or raw server details.
 #[must_use]
 fn invalid_reply() -> RedisError {
-    RedisError::from((ErrorKind::UnexpectedReturnType, "invalid Redis Streams response"))
+    RedisError::from((
+        ErrorKind::UnexpectedReturnType,
+        "invalid Redis Streams response",
+    ))
 }

@@ -32,7 +32,9 @@ fn test_receive_error_maps_decode_failures_to_the_existing_spi_errors() {
         kind,
         retryable,
         source,
-    } = DecodeFailure::LimitExceeded.receive_error(&topic).expect("limit error")
+    } = DecodeFailure::LimitExceeded
+        .receive_error(&topic)
+        .expect("limit error")
     else {
         panic!("expected operation error");
     };

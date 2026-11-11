@@ -33,16 +33,23 @@ pub struct RedisNode {
 
 impl RedisNode {
     /// Starts a Redis node with benchmark-owned temporary persistence.
-    pub fn start(replica: Option<u16>, sentinel_master: Option<u16>) -> Result<Self, Box<dyn Error>> {
+    pub fn start(
+        replica: Option<u16>,
+        sentinel_master: Option<u16>,
+    ) -> Result<Self, Box<dyn Error>> {
         let directory = TempDir::new()?;
         let port = TcpListener::bind(("127.0.0.1", 0))?.local_addr()?.port();
-        let has_local = Command::new("redis-server").arg("--version").output().is_ok();
+        let has_local = Command::new("redis-server")
+            .arg("--version")
+            .output()
+            .is_ok();
         let data_path = if has_local {
             directory.path().display().to_string()
         } else {
             "/data".into()
         };
-        let mut config = format!("port {port}\nbind 127.0.0.1\nprotected-mode no\ndir {data_path}\n");
+        let mut config =
+            format!("port {port}\nbind 127.0.0.1\nprotected-mode no\ndir {data_path}\n");
         if let Some(master) = sentinel_master {
             config.push_str(&format!("sentinel monitor benchmaster 127.0.0.1 {master} 2\nsentinel down-after-milliseconds benchmaster 1000\nsentinel failover-timeout benchmaster 10000\nsentinel parallel-syncs benchmaster 1\n"));
         } else {
@@ -58,7 +65,15 @@ impl RedisNode {
             if sentinel_master.is_some() {
                 command.arg("--sentinel");
             }
-            (Some(command.stdout(Stdio::null()).stderr(Stdio::null()).spawn()?), None)
+            (
+                Some(
+                    command
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .spawn()?,
+                ),
+                None,
+            )
         } else {
             let mount = format!("{}:/data", directory.path().display());
             let mut command = Command::new("docker");
@@ -69,15 +84,28 @@ impl RedisNode {
                 let metadata = directory.path().metadata()?;
                 command.args(["--user", &format!("{}:{}", metadata.uid(), metadata.gid())]);
             }
-            command.args(["-v", &mount, "redis:7-alpine", "redis-server", "/data/redis.conf"]);
+            command.args([
+                "-v",
+                &mount,
+                "redis:7-alpine",
+                "redis-server",
+                "/data/redis.conf",
+            ]);
             if sentinel_master.is_some() {
                 command.arg("--sentinel");
             }
             let output = command.output()?;
             if !output.status.success() {
-                return Err(format!("benchmark Docker startup: {}", String::from_utf8_lossy(&output.stderr)).into());
+                return Err(format!(
+                    "benchmark Docker startup: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                )
+                .into());
             }
-            (None, Some(String::from_utf8(output.stdout)?.trim().to_owned()))
+            (
+                None,
+                Some(String::from_utf8(output.stdout)?.trim().to_owned()),
+            )
         };
         let node = Self {
             child,

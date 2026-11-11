@@ -36,10 +36,12 @@ impl Receiver {
                     }
                     black_box(&delivery);
                     match delivery.settlement() {
-                        Some(token) => receiver.settle(token, DeliveryDisposition::Accept).map_or_else(
-                            |error| format!("{}:{}", error.operation(), error.kind()),
-                            |_| "ok".into(),
-                        ),
+                        Some(token) => receiver
+                            .settle(token, DeliveryDisposition::Accept)
+                            .map_or_else(
+                                |error| format!("{}:{}", error.operation(), error.kind()),
+                                |_| "ok".into(),
+                            ),
                         None => "missing_token".into(),
                     }
                 }
@@ -54,10 +56,13 @@ impl Receiver {
                         }
                         black_box(&delivery);
                         match delivery.settlement() {
-                            Some(token) => receiver.settle(token, DeliveryDisposition::Accept).await.map_or_else(
-                                |error| format!("{}:{}", error.operation(), error.kind()),
-                                |_| "ok".into(),
-                            ),
+                            Some(token) => receiver
+                                .settle(token, DeliveryDisposition::Accept)
+                                .await
+                                .map_or_else(
+                                    |error| format!("{}:{}", error.operation(), error.kind()),
+                                    |_| "ok".into(),
+                                ),
                             None => "missing_token".into(),
                         }
                     }

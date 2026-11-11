@@ -33,7 +33,11 @@
 /// ```
 #[must_use]
 pub fn stream_key(namespace: &str, topic: &str) -> String {
-    format!("qubit:stream:{}:{namespace}:{}:{topic}", namespace.len(), topic.len())
+    format!(
+        "qubit:stream:{}:{namespace}:{}:{topic}",
+        namespace.len(),
+        topic.len()
+    )
 }
 
 /// Builds a stable Redis consumer-group name from subscription identity.

@@ -67,7 +67,8 @@ fn test_settlement_completes_while_publish_reply_is_held() -> Result<(), Box<dyn
     block_on(async {
         let _ = bus.publish(message("probe", "seed")?).await?;
         let mut receiver = bus.subscribe(request("probe", "workers")?).await?;
-        let ReceiveOutcome::Message(delivery) = receiver.receive(Duration::from_secs(2)).await? else {
+        let ReceiveOutcome::Message(delivery) = receiver.receive(Duration::from_secs(2)).await?
+        else {
             return Err("seed event missing".into());
         };
         let token = delivery.settlement().ok_or("settlement token missing")?;
@@ -141,16 +142,20 @@ fn test_settlement_completes_while_publish_reply_is_held() -> Result<(), Box<dyn
             let _ = release_tx.send((held, eval, Instant::now()));
         });
         let settlement_started = Instant::now();
-        let (publish_result, (settle_completed, settle_result)) =
-            zip(bus.publish(message("probe", "held-with-independent-settle")?), async {
+        let (publish_result, (settle_completed, settle_result)) = zip(
+            bus.publish(message("probe", "held-with-independent-settle")?),
+            async {
                 let result = independent_receiver
                     .settle(independent_token, DeliveryDisposition::Accept)
                     .await;
                 (Instant::now(), result)
-            })
-            .await;
+            },
+        )
+        .await;
         let (held, eval_arrival, released_at) = release_rx.recv_timeout(WATCHDOG)?;
-        controller.join().map_err(|_| "comparison gate controller panicked")?;
+        controller
+            .join()
+            .map_err(|_| "comparison gate controller panicked")?;
         held?;
         let eval_arrival = eval_arrival?;
         let _ = publish_result?;
@@ -198,7 +203,9 @@ fn test_settlement_completes_while_publish_reply_is_held() -> Result<(), Box<dyn
             },
         )
         .await;
-        let observed = cancel_controller.join().map_err(|_| "cancel controller panicked")?;
+        let observed = cancel_controller
+            .join()
+            .map_err(|_| "cancel controller panicked")?;
         observed?;
         assert!(
             cancelled_after_send,
@@ -230,16 +237,23 @@ fn test_settlement_completes_while_large_publish_body_is_blocked() -> Result<(),
     ]
     .into();
     let bus = block_on(
-        AsyncRedisEventBusProvider.create_configured(&EventBusConfig::default().with_provider_options(options)),
+        AsyncRedisEventBusProvider
+            .create_configured(&EventBusConfig::default().with_provider_options(options)),
     )
     .map_err(|failure| failure.into_error())?;
     block_on(async {
         let _ = bus.publish(message("probe", "seed-write-stall")?).await?;
-        let mut receiver = bus.subscribe(request("probe", "write-stall-workers")?).await?;
-        let ReceiveOutcome::Message(mut delivery) = receiver.receive(Duration::from_secs(2)).await? else {
+        let mut receiver = bus
+            .subscribe(request("probe", "write-stall-workers")?)
+            .await?;
+        let ReceiveOutcome::Message(mut delivery) =
+            receiver.receive(Duration::from_secs(2)).await?
+        else {
             return Err("seed event missing".into());
         };
-        let token = delivery.take_settlement().ok_or("settlement token missing")?;
+        let token = delivery
+            .take_settlement()
+            .ok_or("settlement token missing")?;
 
         proxy.arm_xadd_request_gate();
         let (release_tx, release_rx) = mpsc::channel();
@@ -272,7 +286,9 @@ fn test_settlement_completes_while_large_publish_body_is_blocked() -> Result<(),
         publisher.join().map_err(|_| "publisher panicked")?;
         settlement.join().map_err(|_| "settlement panicked")?;
         let (request_blocked, eval_at, released_at) = release_rx.recv_timeout(WATCHDOG)?;
-        worker.join().map_err(|_| "write-stall controller panicked")?;
+        worker
+            .join()
+            .map_err(|_| "write-stall controller panicked")?;
         eprintln!(
             "large-write gate observations: request={request_blocked:?}, eval={eval_at:?}, publish_error={:?}",
             publish_result.as_ref().err().map(ToString::to_string)
@@ -302,8 +318,11 @@ fn test_settlement_waits_during_global_redis_write_pause() -> Result<(), Box<dyn
     let bus = create_bus(server.url(), &namespace)?;
     block_on(async {
         let _ = bus.publish(message("probe", "seed-global-pause")?).await?;
-        let mut receiver = bus.subscribe(request("probe", "global-pause-workers")?).await?;
-        let ReceiveOutcome::Message(delivery) = receiver.receive(Duration::from_secs(2)).await? else {
+        let mut receiver = bus
+            .subscribe(request("probe", "global-pause-workers")?)
+            .await?;
+        let ReceiveOutcome::Message(delivery) = receiver.receive(Duration::from_secs(2)).await?
+        else {
             return Err("seed event missing".into());
         };
         let token = delivery.settlement().ok_or("settlement token missing")?;
@@ -326,16 +345,22 @@ fn test_settlement_waits_during_global_redis_write_pause() -> Result<(), Box<dyn
     })
 }
 
-fn create_bus(url: &str, namespace: &str) -> Result<Arc<dyn qubit_event_bus::spi::AsyncEventBusSpi>, Box<dyn Error>> {
+fn create_bus(
+    url: &str,
+    namespace: &str,
+) -> Result<Arc<dyn qubit_event_bus::spi::AsyncEventBusSpi>, Box<dyn Error>> {
     let options: ProviderOptions = [
         ("redis.url".into(), url.into()),
         ("redis.namespace".into(), namespace.into()),
         ("redis.max_unsettled_per_subscription".into(), "1".into()),
     ]
     .into();
-    block_on(AsyncRedisEventBusProvider.create_configured(&EventBusConfig::default().with_provider_options(options)))
-        .map_err(|failure| failure.into_error())
-        .map_err(Into::into)
+    block_on(
+        AsyncRedisEventBusProvider
+            .create_configured(&EventBusConfig::default().with_provider_options(options)),
+    )
+    .map_err(|failure| failure.into_error())
+    .map_err(Into::into)
 }
 fn message(topic: &str, id: &str) -> Result<OutboundMessage, Box<dyn Error>> {
     Ok(OutboundMessage::new(
@@ -353,7 +378,11 @@ fn message(topic: &str, id: &str) -> Result<OutboundMessage, Box<dyn Error>> {
     ))
 }
 
-fn large_message(topic: &str, id: &str, payload_bytes: usize) -> Result<OutboundMessage, Box<dyn Error>> {
+fn large_message(
+    topic: &str,
+    id: &str,
+    payload_bytes: usize,
+) -> Result<OutboundMessage, Box<dyn Error>> {
     Ok(OutboundMessage::new(
         TopicAddress::new(topic)?,
         EventId::new(id)?,
@@ -503,8 +532,10 @@ impl ProxyControl {
         wait_gate(&self.gate, timeout, |s| s.request_held).map(|_| ())
     }
     fn wait_eval(&self, timeout: Duration) -> std::io::Result<Instant> {
-        wait_gate(&self.gate, timeout, |s| s.eval_at.is_some())
-            .and_then(|s| s.eval_at.ok_or_else(|| std::io::Error::other("EVAL not observed")))
+        wait_gate(&self.gate, timeout, |s| s.eval_at.is_some()).and_then(|s| {
+            s.eval_at
+                .ok_or_else(|| std::io::Error::other("EVAL not observed"))
+        })
     }
     fn release_gate(&self) {
         let (lock, cv) = &*self.gate;
@@ -589,7 +620,9 @@ fn forward_connection(
                 Err(error) => break Err(error),
             };
             let (name, bytes) = request;
-            let forwarded = request_writer.write_all(&bytes).and_then(|()| request_writer.flush());
+            let forwarded = request_writer
+                .write_all(&bytes)
+                .and_then(|()| request_writer.flush());
             if let Err(error) = forwarded {
                 break Err(error);
             }
@@ -660,7 +693,8 @@ fn read_request(
         .map_err(std::io::Error::other)?;
     let mut name = Vec::new();
     for i in 0..count {
-        let (header, mut part) = read_line(reader)?.ok_or_else(|| std::io::Error::other("truncated request"))?;
+        let (header, mut part) =
+            read_line(reader)?.ok_or_else(|| std::io::Error::other("truncated request"))?;
         let n: usize = std::str::from_utf8(&header[1..])
             .map_err(std::io::Error::other)?
             .parse()
@@ -704,7 +738,8 @@ fn read_line(reader: &mut BufReader<TcpStream>) -> std::io::Result<Option<(Vec<u
     }
 }
 fn read_response(reader: &mut BufReader<TcpStream>) -> std::io::Result<Vec<u8>> {
-    let (line, mut bytes) = read_line(reader)?.ok_or_else(|| std::io::Error::other("missing Redis reply"))?;
+    let (line, mut bytes) =
+        read_line(reader)?.ok_or_else(|| std::io::Error::other("missing Redis reply"))?;
     match line.first() {
         Some(b'$') => {
             let n: isize = std::str::from_utf8(&line[1..])

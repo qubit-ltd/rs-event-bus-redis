@@ -172,7 +172,9 @@ pub(crate) async fn quarantine_async(
 ///
 /// Returns a sanitized authentication error for a direct permission rejection,
 /// or an unknown outcome when the script's side effects cannot be confirmed.
-fn parse_quarantine_reply(result: Result<Value, RedisError>) -> Result<PoisonOutcome, RedisProviderError> {
+fn parse_quarantine_reply(
+    result: Result<Value, RedisError>,
+) -> Result<PoisonOutcome, RedisProviderError> {
     let status = match result {
         Ok(Value::Int(status)) => status,
         Ok(Value::ServerError(error)) => {
@@ -262,8 +264,10 @@ mod poison_tests {
     #[test]
     fn test_poison_quarantine_reply_classifies_only_direct_permission_codes() {
         for code in ["NOPERM", "NOAUTH", "WRONGPASS"] {
-            let error = parse_quarantine_reply(Err(redis_error(format!("-{code} fixture-secret\r\n").as_bytes())))
-                .expect_err("direct permission failure");
+            let error = parse_quarantine_reply(Err(redis_error(
+                format!("-{code} fixture-secret\r\n").as_bytes(),
+            )))
+            .expect_err("direct permission failure");
             assert!(matches!(
                 error,
                 RedisProviderError::Transport {
@@ -285,9 +289,12 @@ mod poison_tests {
             (Value::Int(2), PoisonOutcome::TombstoneCleared),
             (Value::Int(-1), PoisonOutcome::OwnershipChanged),
         ] {
-            assert!(matches!(parse_quarantine_reply(Ok(value)), Ok(outcome) if outcome == expected));
+            assert!(
+                matches!(parse_quarantine_reply(Ok(value)), Ok(outcome) if outcome == expected)
+            );
         }
-        let nested_error = redis::ServerError::try_from(redis_error(b"-ERR fixture-secret\r\n")).expect("server error");
+        let nested_error = redis::ServerError::try_from(redis_error(b"-ERR fixture-secret\r\n"))
+            .expect("server error");
         for value in [
             Value::Int(9),
             Value::BulkString(b"1".to_vec()),
@@ -299,6 +306,8 @@ mod poison_tests {
             b"-ERR ACL failure in script: NOPERM fixture-secret\r\n",
         )));
         assert_unknown(Err(redis_error(b"-ERR fixture-secret\r\n")));
-        assert_unknown(Err(redis::RedisError::from(std::io::Error::other("fixture-secret"))));
+        assert_unknown(Err(redis::RedisError::from(std::io::Error::other(
+            "fixture-secret",
+        ))));
     }
 }

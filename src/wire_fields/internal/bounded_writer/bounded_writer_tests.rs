@@ -33,7 +33,9 @@ fn test_flush_preserves_contents_and_consumed_budget_after_rejection() {
         b"abcd",
         "a rejected write preserves accepted contents"
     );
-    writer.flush().expect("flush after rejection still succeeds");
+    writer
+        .flush()
+        .expect("flush after rejection still succeeds");
     assert!(
         writer.write_all(b"f").is_err(),
         "another flush cannot release consumed capacity"

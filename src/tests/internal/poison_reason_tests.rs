@@ -24,12 +24,21 @@ use crate::internal::decode_entry;
 #[test]
 fn test_poison_reasons_have_stable_secret_free_names() {
     assert_eq!(PoisonReason::MissingWire.as_str(), "missing_wire");
-    assert_eq!(PoisonReason::InvalidWireField.as_str(), "invalid_wire_field");
+    assert_eq!(
+        PoisonReason::InvalidWireField.as_str(),
+        "invalid_wire_field"
+    );
     assert_eq!(PoisonReason::InvalidJson.as_str(), "invalid_json");
-    assert_eq!(PoisonReason::InvalidEventMetadata.as_str(), "invalid_event_metadata");
+    assert_eq!(
+        PoisonReason::InvalidEventMetadata.as_str(),
+        "invalid_event_metadata"
+    );
 }
 
-fn decode_wire(wire: Vec<u8>, limits: WireLimits) -> Result<qubit_event_bus::spi::InboundMessage, DecodeFailure> {
+fn decode_wire(
+    wire: Vec<u8>,
+    limits: WireLimits,
+) -> Result<qubit_event_bus::spi::InboundMessage, DecodeFailure> {
     let mut entry = StreamId::default();
     entry.id = "1-0".into();
     entry.map = [("wire".into(), Value::BulkString(wire))].into();
@@ -57,7 +66,12 @@ fn test_future_layout_depth_failure_classifies_as_poison() {
         Err(DecodeFailure::UnsupportedVersion)
     ));
 
-    let deep = format!("{{\"version\":2,\"future\":{}0{}}}", "[".repeat(129), "]".repeat(129)).into_bytes();
+    let deep = format!(
+        "{{\"version\":2,\"future\":{}0{}}}",
+        "[".repeat(129),
+        "]".repeat(129)
+    )
+    .into_bytes();
     assert!(matches!(
         decode_wire(deep, limits),
         Err(DecodeFailure::Poison(PoisonReason::InvalidJson))

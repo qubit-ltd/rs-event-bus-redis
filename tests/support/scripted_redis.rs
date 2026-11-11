@@ -162,7 +162,9 @@ impl ScriptedRedis {
             while !shared.stopping.load(Ordering::SeqCst) {
                 match listener.accept() {
                     Ok((stream, _)) => {
-                        if shared.refusing.load(Ordering::SeqCst) || shared.stopping.load(Ordering::SeqCst) {
+                        if shared.refusing.load(Ordering::SeqCst)
+                            || shared.stopping.load(Ordering::SeqCst)
+                        {
                             let _ = stream.shutdown(Shutdown::Both);
                             continue;
                         }
@@ -184,7 +186,11 @@ impl ScriptedRedis {
                         sleep(Duration::from_millis(1));
                     }
                     Err(error) => {
-                        shared.errors.lock().expect("errors lock").push(error.to_string());
+                        shared
+                            .errors
+                            .lock()
+                            .expect("errors lock")
+                            .push(error.to_string());
                         break;
                     }
                 }
@@ -218,7 +224,11 @@ impl ScriptedRedis {
 
     /// Returns the number of TCP connections accepted by this endpoint.
     pub fn connection_count(&self) -> usize {
-        self.state.connections.lock().expect("connections lock").len()
+        self.state
+            .connections
+            .lock()
+            .expect("connections lock")
+            .len()
     }
 
     /// Returns a snapshot of observed command arguments after checking all
@@ -246,7 +256,13 @@ impl Drop for ScriptedRedis {
     /// failure.
     fn drop(&mut self) {
         self.state.stopping.store(true, Ordering::SeqCst);
-        for stream in self.state.connections.lock().expect("connections lock").iter() {
+        for stream in self
+            .state
+            .connections
+            .lock()
+            .expect("connections lock")
+            .iter()
+        {
             let _ = stream.shutdown(Shutdown::Both);
         }
         if let Some(worker) = self.worker.take() {
@@ -270,17 +286,28 @@ fn serve_connection(stream: TcpStream, state: &State) {
                 if !state.stopping.load(Ordering::SeqCst)
                     && !matches!(error.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock)
                 {
-                    state.errors.lock().expect("errors lock").push(error.to_string());
+                    state
+                        .errors
+                        .lock()
+                        .expect("errors lock")
+                        .push(error.to_string());
                 }
                 return;
             }
         };
         let name = command.first().expect("command has a name");
         if name == "CLIENT" {
-            reader.get_mut().write_all(b"+OK\r\n").expect("reply to CLIENT SETINFO");
+            reader
+                .get_mut()
+                .write_all(b"+OK\r\n")
+                .expect("reply to CLIENT SETINFO");
             continue;
         }
-        state.commands.lock().expect("commands lock").push(command.clone());
+        state
+            .commands
+            .lock()
+            .expect("commands lock")
+            .push(command.clone());
         if name == "XAUTOCLAIM"
             && let Some(consumer) = command.get(3)
         {
@@ -288,7 +315,12 @@ fn serve_connection(stream: TcpStream, state: &State) {
         }
         let step = state.steps.lock().expect("steps lock").pop_front();
         let reply = match step {
-            Some(step) if step.command == name && (!step.settlement_eval || is_settlement_eval(&command)) => step.reply,
+            Some(step)
+                if step.command == name
+                    && (!step.settlement_eval || is_settlement_eval(&command)) =>
+            {
+                step.reply
+            }
             step => {
                 let expected = step.map(|step| step.command);
                 state
@@ -300,7 +332,10 @@ fn serve_connection(stream: TcpStream, state: &State) {
             }
         };
         match reply {
-            Reply::Bytes(bytes) => reader.get_mut().write_all(&bytes).expect("write scripted response"),
+            Reply::Bytes(bytes) => reader
+                .get_mut()
+                .write_all(&bytes)
+                .expect("write scripted response"),
             Reply::DelayedBytes(bytes, delay) => {
                 sleep(delay);
                 let _ = reader.get_mut().write_all(&bytes);

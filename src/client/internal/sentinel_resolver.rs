@@ -179,8 +179,11 @@ impl SentinelResolver {
             let info = info.set_redis_settings(redis_settings);
             endpoints.push(build_client(info, sentinel_certificates.as_ref())?);
         }
-        let master_connection_info = Client::open(config.connection_url())?.get_connection_info().clone();
-        let master_tls_enabled = matches!(master_connection_info.addr(), ConnectionAddr::TcpTls { .. });
+        let master_connection_info = Client::open(config.connection_url())?
+            .get_connection_info()
+            .clone();
+        let master_tls_enabled =
+            matches!(master_connection_info.addr(), ConnectionAddr::TcpTls { .. });
         let (username, password) = config.credentials();
         let mut master_info = master_connection_info.redis_settings().clone();
         if let Some(username) = username {
@@ -203,7 +206,9 @@ impl SentinelResolver {
             #[cfg(feature = "sync")]
             sync_control_connections: (0..endpoint_count).map(|_| Mutex::new(None)).collect(),
             #[cfg(feature = "async")]
-            async_control_connections: (0..endpoint_count).map(|_| AsyncConnectionCache::new()).collect(),
+            async_control_connections: (0..endpoint_count)
+                .map(|_| AsyncConnectionCache::new())
+                .collect(),
             endpoints,
             service: config.sentinel_service().unwrap_or_default().into(),
             master_info,
@@ -233,7 +238,10 @@ impl SentinelResolver {
     /// discovery fails. Individual I/O waits are bounded; DNS and
     /// multi-address work have no hard wall-clock deadline.
     #[cfg(feature = "sync")]
-    pub(crate) fn connect_sync(&self, max_response_bytes: Option<usize>) -> Result<Connection, RedisError> {
+    pub(crate) fn connect_sync(
+        &self,
+        max_response_bytes: Option<usize>,
+    ) -> Result<Connection, RedisError> {
         let mut last_error = discovery_error();
         let start = self.preferred.load(Ordering::Relaxed);
         for offset in 0..self.endpoints.len() {
@@ -338,10 +346,18 @@ impl SentinelResolver {
             .take();
         let mut sentinel = match cached {
             Some(connection) => connection,
-            None => open_sync(&self.endpoints[index], self.policy, Some(DISCOVERY_MAX_RESPONSE_BYTES))?,
+            None => open_sync(
+                &self.endpoints[index],
+                self.policy,
+                Some(DISCOVERY_MAX_RESPONSE_BYTES),
+            )?,
         };
         configure_sync(&sentinel, self.policy.command_timeout)?;
-        let raw = sentinel.req_command(cmd("SENTINEL").arg("get-master-addr-by-name").arg(&self.service))?;
+        let raw = sentinel.req_command(
+            cmd("SENTINEL")
+                .arg("get-master-addr-by-name")
+                .arg(&self.service),
+        )?;
         let target = self.target(raw)?;
         if let Ok(mut slot) = self.sync_control_connections[index].lock()
             && slot.is_none()
@@ -365,16 +381,24 @@ impl SentinelResolver {
         let cache = &self.async_control_connections[index];
         let (generation, mut sentinel) = cache
             .get_or_connect(async {
-                open_async(&self.endpoints[index], self.policy, Some(DISCOVERY_MAX_RESPONSE_BYTES))
-                    .await
-                    .map_err(|error| from_redis_error("connect", &error))
+                open_async(
+                    &self.endpoints[index],
+                    self.policy,
+                    Some(DISCOVERY_MAX_RESPONSE_BYTES),
+                )
+                .await
+                .map_err(|error| from_redis_error("connect", &error))
             })
             .await?;
         let mut guard = SentinelQueryGuard::new(cache, generation);
         let result = async {
             guard.mark_started();
             let query_result = sentinel
-                .send_packed_command(cmd("SENTINEL").arg("get-master-addr-by-name").arg(&self.service))
+                .send_packed_command(
+                    cmd("SENTINEL")
+                        .arg("get-master-addr-by-name")
+                        .arg(&self.service),
+                )
                 .await;
             guard.mark_completed();
             query_result.and_then(|raw| self.target(raw))
@@ -492,7 +516,8 @@ pub(crate) fn open_sync(
     max_response_bytes: Option<usize>,
 ) -> Result<Connection, RedisError> {
     let config = ConnectionConfig::new().set_max_response_bytes(max_response_bytes);
-    let connection = client.get_connection_with_timeout_and_config(policy.connect_timeout, &config)?;
+    let connection =
+        client.get_connection_with_timeout_and_config(policy.connect_timeout, &config)?;
     configure_sync(&connection, policy.command_timeout)?;
     Ok(connection)
 }
@@ -544,7 +569,9 @@ pub(crate) async fn open_async(
         .set_connection_timeout(Some(policy.connect_timeout))
         .set_response_timeout(Some(policy.command_timeout))
         .set_max_response_bytes(max_response_bytes);
-    client.get_multiplexed_async_connection_with_config(&config).await
+    client
+        .get_multiplexed_async_connection_with_config(&config)
+        .await
 }
 
 #[cfg(all(test, feature = "sync"))]
@@ -582,7 +609,12 @@ mod tests {
             .expect("scripted master URL")
             .trim_end_matches('/');
         let (host, port) = address.split_once(':').expect("master host and port");
-        format!("*2\r\n${}\r\n{host}\r\n${}\r\n{port}\r\n", host.len(), port.len()).into_bytes()
+        format!(
+            "*2\r\n${}\r\n{host}\r\n${}\r\n{port}\r\n",
+            host.len(),
+            port.len()
+        )
+        .into_bytes()
     }
 
     fn role_steps(count: usize) -> Vec<Step> {
@@ -593,8 +625,11 @@ mod tests {
 
     #[test]
     fn test_invalid_utf8_discovered_host_is_rejected_before_target_connection() {
-        let server = ScriptedRedis::start(vec![Step::reply("SENTINEL", b"*2\r\n$1\r\n\xff\r\n$4\r\n6379\r\n")])
-            .expect("scripted Sentinel");
+        let server = ScriptedRedis::start(vec![Step::reply(
+            "SENTINEL",
+            b"*2\r\n$1\r\n\xff\r\n$4\r\n6379\r\n",
+        )])
+        .expect("scripted Sentinel");
         let node = server
             .url()
             .strip_prefix("redis://")
@@ -614,8 +649,15 @@ mod tests {
             Err(error) => error,
             Ok(_) => panic!("invalid host cannot become a target"),
         };
-        assert_eq!(error.kind(), ErrorKind::Server(redis::ServerErrorKind::MasterDown));
-        assert!(error.to_string().contains("Sentinel master discovery failed"));
+        assert_eq!(
+            error.kind(),
+            ErrorKind::Server(redis::ServerErrorKind::MasterDown)
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("Sentinel master discovery failed")
+        );
         assert!(
             !error.to_string().contains(node),
             "endpoint data stays out of diagnostics"
@@ -641,8 +683,9 @@ mod tests {
                 .collect(),
         )
         .expect("scripted Sentinel");
-        let config = RedisEventBusConfig::from_provider_options(&resolver_settings(&sentinel, "master"))
-            .expect("valid settings");
+        let config =
+            RedisEventBusConfig::from_provider_options(&resolver_settings(&sentinel, "master"))
+                .expect("valid settings");
         let resolver = SentinelResolver::new(&config).expect("resolver");
 
         for _ in 0..DISCOVERIES {
@@ -651,7 +694,11 @@ mod tests {
 
         sentinel.finish();
         master.finish();
-        assert_eq!(sentinel.connection_count(), 1, "healthy control socket is reused");
+        assert_eq!(
+            sentinel.connection_count(),
+            1,
+            "healthy control socket is reused"
+        );
         assert_eq!(
             master.connection_count(),
             DISCOVERIES,
@@ -667,16 +714,25 @@ mod tests {
             Step::reply("SENTINEL", &discovery_reply(&master)),
         ])
         .expect("scripted Sentinel");
-        let config = RedisEventBusConfig::from_provider_options(&resolver_settings(&sentinel, "master"))
-            .expect("valid settings");
+        let config =
+            RedisEventBusConfig::from_provider_options(&resolver_settings(&sentinel, "master"))
+                .expect("valid settings");
         let resolver = SentinelResolver::new(&config).expect("resolver");
 
         assert!(resolver.connect_sync(None).is_err());
-        drop(resolver.connect_sync(None).expect("recovered master connection"));
+        drop(
+            resolver
+                .connect_sync(None)
+                .expect("recovered master connection"),
+        );
 
         sentinel.finish();
         master.finish();
-        assert_eq!(sentinel.connection_count(), 2, "a rejected response is not pooled");
+        assert_eq!(
+            sentinel.connection_count(),
+            2,
+            "a rejected response is not pooled"
+        );
         assert_eq!(master.connection_count(), 1);
     }
 
@@ -693,8 +749,9 @@ mod tests {
                 .collect(),
         )
         .expect("scripted Sentinel");
-        let config = RedisEventBusConfig::from_provider_options(&resolver_settings(&sentinel, "master"))
-            .expect("valid settings");
+        let config =
+            RedisEventBusConfig::from_provider_options(&resolver_settings(&sentinel, "master"))
+                .expect("valid settings");
         let resolver = SentinelResolver::new(&config).expect("resolver");
 
         for _ in 0..DISCOVERIES {
@@ -703,7 +760,11 @@ mod tests {
 
         sentinel.finish();
         master.finish();
-        assert_eq!(sentinel.connection_count(), 1, "healthy control socket is reused");
+        assert_eq!(
+            sentinel.connection_count(),
+            1,
+            "healthy control socket is reused"
+        );
         assert_eq!(
             master.connection_count(),
             DISCOVERIES,
@@ -722,8 +783,9 @@ mod tests {
             Step::reply("SENTINEL", &discovery_reply(&master)),
         ])
         .expect("scripted Sentinel");
-        let config = RedisEventBusConfig::from_provider_options(&resolver_settings(&sentinel, "master"))
-            .expect("valid settings");
+        let config =
+            RedisEventBusConfig::from_provider_options(&resolver_settings(&sentinel, "master"))
+                .expect("valid settings");
         let resolver = SentinelResolver::new(&config).expect("resolver");
 
         assert!(block_on(resolver.connect_async(None)).is_err());
@@ -731,7 +793,11 @@ mod tests {
 
         sentinel.finish();
         master.finish();
-        assert_eq!(sentinel.connection_count(), 2, "a rejected generation is not reused");
+        assert_eq!(
+            sentinel.connection_count(),
+            2,
+            "a rejected generation is not reused"
+        );
         assert_eq!(master.connection_count(), 1);
     }
 
@@ -746,8 +812,9 @@ mod tests {
             Step::reply("SENTINEL", &discovery_reply(&master)),
         ])
         .expect("scripted Sentinel");
-        let config = RedisEventBusConfig::from_provider_options(&resolver_settings(&sentinel, "master"))
-            .expect("valid settings");
+        let config =
+            RedisEventBusConfig::from_provider_options(&resolver_settings(&sentinel, "master"))
+                .expect("valid settings");
         let resolver = SentinelResolver::new(&config).expect("resolver");
         let cache = &resolver.async_control_connections[0];
 

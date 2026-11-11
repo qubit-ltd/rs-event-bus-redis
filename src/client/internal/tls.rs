@@ -79,7 +79,8 @@ pub(in crate::client) fn load_certificates(
 
     // redis-rs performs PEM and key parsing while constructing the client.
     // Use a harmless TLS endpoint to validate without opening a socket.
-    Client::build_with_tls("rediss://localhost/", certificates.clone()).map_err(|_| tls_configuration_error())?;
+    Client::build_with_tls("rediss://localhost/", certificates.clone())
+        .map_err(|_| tls_configuration_error())?;
 
     Ok(Some(certificates))
 }
@@ -109,9 +110,8 @@ pub(in crate::client) fn build_client(
         let _ = rustls::crypto::ring::default_provider().install_default();
     }
     match certificates {
-        Some(certificates) => {
-            Client::build_with_tls(connection_info, certificates.clone()).map_err(|_| tls_configuration_error())
-        }
+        Some(certificates) => Client::build_with_tls(connection_info, certificates.clone())
+            .map_err(|_| tls_configuration_error()),
         None => Client::open(connection_info),
     }
 }
@@ -194,7 +194,10 @@ fn validate_private_key_pem(pem: &[u8]) -> Result<(), RedisError> {
 ///
 /// An invalid-client-configuration error with fixed public text.
 fn tls_configuration_error() -> RedisError {
-    RedisError::from((ErrorKind::InvalidClientConfig, "invalid Redis TLS configuration"))
+    RedisError::from((
+        ErrorKind::InvalidClientConfig,
+        "invalid Redis TLS configuration",
+    ))
 }
 
 #[cfg(test)]
@@ -237,7 +240,11 @@ mod tests {
             "invalid Redis TLS configuration - InvalidClientConfig"
         );
         assert!(!error.to_string().contains("PRIVATE KEY CONTENT"));
-        assert!(!error.to_string().contains(key_path.to_str().expect("key path")));
+        assert!(
+            !error
+                .to_string()
+                .contains(key_path.to_str().expect("key path"))
+        );
     }
 
     /// Sanitizes redis-rs certificate-construction failures before returning
@@ -275,7 +282,8 @@ mod tests {
         );
 
         fs::write(&path, vec![b'x'; MAX_TLS_FILE_BYTES as usize + 1]).expect("write over limit");
-        let error = read_pem(path.to_str().expect("UTF-8 temporary path")).expect_err("over-limit file is rejected");
+        let error = read_pem(path.to_str().expect("UTF-8 temporary path"))
+            .expect_err("over-limit file is rejected");
         assert!(!error.to_string().contains(path.to_str().expect("path")));
         assert_eq!(
             error.to_string(),
@@ -288,9 +296,17 @@ mod tests {
     fn test_tls_certificate_errors_hide_path_and_pem_details() {
         let directory = tempdir().expect("temporary directory");
         let missing_path = directory.path().join("private-ca.pem");
-        let error = load_certificates(Some(missing_path.to_str().expect("UTF-8 temporary path")), None, None)
-            .expect_err("missing CA is rejected");
-        assert!(!error.to_string().contains(missing_path.to_str().expect("path")));
+        let error = load_certificates(
+            Some(missing_path.to_str().expect("UTF-8 temporary path")),
+            None,
+            None,
+        )
+        .expect_err("missing CA is rejected");
+        assert!(
+            !error
+                .to_string()
+                .contains(missing_path.to_str().expect("path"))
+        );
         assert_eq!(
             error.to_string(),
             "invalid Redis TLS configuration - InvalidClientConfig"
@@ -298,9 +314,17 @@ mod tests {
 
         let invalid_path = directory.path().join("invalid-ca.pem");
         fs::write(&invalid_path, b"PRIVATE PEM CONTENT").expect("write invalid PEM");
-        let error = load_certificates(Some(invalid_path.to_str().expect("UTF-8 temporary path")), None, None)
-            .expect_err("invalid CA PEM is rejected");
-        assert!(!error.to_string().contains(invalid_path.to_str().expect("path")));
+        let error = load_certificates(
+            Some(invalid_path.to_str().expect("UTF-8 temporary path")),
+            None,
+            None,
+        )
+        .expect_err("invalid CA PEM is rejected");
+        assert!(
+            !error
+                .to_string()
+                .contains(invalid_path.to_str().expect("path"))
+        );
         assert!(!error.to_string().contains("PRIVATE PEM CONTENT"));
         assert_eq!(
             error.to_string(),

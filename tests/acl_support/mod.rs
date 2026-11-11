@@ -56,7 +56,8 @@ pub fn run_workflow(image: &str, case: &str, helper: &str) -> Result<(), Box<dyn
         std::process::id()
     );
     let source = qubit_event_bus_redis::naming::stream_key(&namespace, "events");
-    let group = qubit_event_bus_redis::naming::group_name(&namespace, "events", "worker", Some("workers"));
+    let group =
+        qubit_event_bus_redis::naming::group_name(&namespace, "events", "worker", Some("workers"));
     let quarantine = qubit_event_bus_redis::naming::poison_key(&namespace, "events", &group);
     let allow_quarantine = case != "missing_quarantine_key";
     // The helper first settles a normal record before the parent injects a
@@ -199,7 +200,10 @@ fn wait_for_marker(child: &mut Child, marker: &std::path::Path) -> Result<(), Bo
             if let Some(mut output) = child.stderr.take() {
                 output.read_to_string(&mut stderr)?;
             }
-            return Err(format!("ACL child exited before readiness marker: {status}: {stdout}{stderr}").into());
+            return Err(format!(
+                "ACL child exited before readiness marker: {status}: {stdout}{stderr}"
+            )
+            .into());
         }
         sleep(Duration::from_millis(20));
     }
@@ -242,24 +246,40 @@ fn assert_source_state(
         .arg(100)
         .query(admin)?;
     if case == "workflow" {
-        assert!(pending.is_empty(), "successful quarantine must ACK the source record");
+        assert!(
+            pending.is_empty(),
+            "successful quarantine must ACK the source record"
+        );
     } else if case.starts_with("settlement_") {
-        assert_eq!(pending.len(), 1, "denied settlement must preserve the PEL entry");
+        assert_eq!(
+            pending.len(),
+            1,
+            "denied settlement must preserve the PEL entry"
+        );
     } else {
         assert_eq!(
             pending.len(),
             1,
             "unconfirmed quarantine must retain the source PEL entry"
         );
-        let row: Vec<redis::Value> = redis::from_redis_value(pending.first().ok_or("missing PEL record")?.clone())?;
+        let row: Vec<redis::Value> =
+            redis::from_redis_value(pending.first().ok_or("missing PEL record")?.clone())?;
         let id: String = redis::from_redis_value(row.first().ok_or("missing PEL ID")?.clone())?;
         assert_eq!(id, source_id);
     }
     Ok(())
 }
 
-fn assert_quarantine(admin: &mut Connection, quarantine: &str, source_id: &str) -> Result<(), Box<dyn Error>> {
-    let rows: redis::streams::StreamRangeReply = cmd("XRANGE").arg(quarantine).arg("-").arg("+").query(admin)?;
+fn assert_quarantine(
+    admin: &mut Connection,
+    quarantine: &str,
+    source_id: &str,
+) -> Result<(), Box<dyn Error>> {
+    let rows: redis::streams::StreamRangeReply = cmd("XRANGE")
+        .arg(quarantine)
+        .arg("-")
+        .arg("+")
+        .query(admin)?;
     assert_eq!(rows.ids.len(), 1);
     let values = &rows.ids[0].map;
     assert_eq!(
@@ -287,13 +307,17 @@ pub fn run_sentinel_checks(
     let namespace = "acl-sentinel-orders";
     let source = qubit_event_bus_redis::naming::stream_key(namespace, "events");
     let mut master =
-        redis::Client::open(format!("redis://127.0.0.1:{}/", sentinel.master_port()?))?.get_connection()?;
+        redis::Client::open(format!("redis://127.0.0.1:{}/", sentinel.master_port()?))?
+            .get_connection()?;
     set_master_user(&mut master, &source, true)?;
     let endpoints = sentinel.endpoints();
     configure_sentinel_users(&endpoints, true)?;
     run_sentinel_child(helper, &endpoints, namespace, "success")?;
     let length: usize = cmd("XLEN").arg(&source).query(&mut master)?;
-    assert_eq!(length, 1, "restricted Sentinel discovery and ROLE must allow XADD");
+    assert_eq!(
+        length, 1,
+        "restricted Sentinel discovery and ROLE must allow XADD"
+    );
 
     set_master_user(&mut master, &source, false)?;
     run_sentinel_child(helper, &endpoints, namespace, "role_denied")?;
@@ -307,10 +331,20 @@ pub fn run_sentinel_checks(
     Ok(())
 }
 
-fn set_master_user(master: &mut Connection, source: &str, allow_role: bool) -> Result<(), Box<dyn Error>> {
+fn set_master_user(
+    master: &mut Connection,
+    source: &str,
+    allow_role: bool,
+) -> Result<(), Box<dyn Error>> {
     let mut command = cmd("ACL");
-    command.arg("SETUSER").arg("qubit_master_test").arg("reset").arg("on");
-    command.arg(format!(">{PASSWORD}")).arg(format!("~{source}"));
+    command
+        .arg("SETUSER")
+        .arg("qubit_master_test")
+        .arg("reset")
+        .arg("on");
+    command
+        .arg(format!(">{PASSWORD}"))
+        .arg(format!("~{source}"));
     command.arg("+xadd");
     if allow_role {
         command.arg("+role");
@@ -321,9 +355,14 @@ fn set_master_user(master: &mut Connection, source: &str, allow_role: bool) -> R
 
 fn configure_sentinel_users(endpoints: &str, allow_lookup: bool) -> Result<(), Box<dyn Error>> {
     for endpoint in endpoints.split(',') {
-        let mut connection = redis::Client::open(format!("redis://{endpoint}/"))?.get_connection()?;
+        let mut connection =
+            redis::Client::open(format!("redis://{endpoint}/"))?.get_connection()?;
         let mut command = cmd("ACL");
-        command.arg("SETUSER").arg("qubit_sentinel_test").arg("reset").arg("on");
+        command
+            .arg("SETUSER")
+            .arg("qubit_sentinel_test")
+            .arg("reset")
+            .arg("on");
         command.arg(format!(">{PASSWORD}")).arg("+ping");
         if allow_lookup {
             command.arg("+sentinel|get-master-addr-by-name");
@@ -335,7 +374,8 @@ fn configure_sentinel_users(endpoints: &str, allow_lookup: bool) -> Result<(), B
 
 fn require_sentinel_authentication(endpoints: &str) -> Result<(), Box<dyn Error>> {
     for endpoint in endpoints.split(',') {
-        let mut connection = redis::Client::open(format!("redis://{endpoint}/"))?.get_connection()?;
+        let mut connection =
+            redis::Client::open(format!("redis://{endpoint}/"))?.get_connection()?;
         cmd("ACL")
             .arg("SETUSER")
             .arg("default")
@@ -345,7 +385,12 @@ fn require_sentinel_authentication(endpoints: &str) -> Result<(), Box<dyn Error>
     Ok(())
 }
 
-fn run_sentinel_child(helper: &str, endpoints: &str, namespace: &str, case: &str) -> Result<(), Box<dyn Error>> {
+fn run_sentinel_child(
+    helper: &str,
+    endpoints: &str,
+    namespace: &str,
+    case: &str,
+) -> Result<(), Box<dyn Error>> {
     let mut command = Command::new(std::env::current_exe()?);
     command
         .args(["--ignored", "--exact", helper, "--nocapture"])

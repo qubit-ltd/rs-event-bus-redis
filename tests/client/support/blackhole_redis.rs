@@ -50,7 +50,10 @@ impl BlackholeRedis {
     /// failures.
     pub fn start(setup_reply: bool, reply: Option<&'static [u8]>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind TCP fixture");
-        let url = format!("redis://{}/", listener.local_addr().expect("listener address"));
+        let url = format!(
+            "redis://{}/",
+            listener.local_addr().expect("listener address")
+        );
         listener.set_nonblocking(true).expect("nonblocking accept");
         let stop = Arc::new(AtomicBool::new(false));
         let sockets = Arc::new(Mutex::new(Vec::new()));
@@ -91,7 +94,9 @@ impl BlackholeRedis {
                             while let Ok(Some(command)) = read_command(&mut reader) {
                                 if command == "CLIENT" || command == "AUTH" || command == "SELECT" {
                                     setup_commands.fetch_add(1, Ordering::SeqCst);
-                                    while !setup_reply.load(Ordering::SeqCst) && !stop.load(Ordering::SeqCst) {
+                                    while !setup_reply.load(Ordering::SeqCst)
+                                        && !stop.load(Ordering::SeqCst)
+                                    {
                                         sleep(Duration::from_millis(1));
                                     }
                                     if stop.load(Ordering::SeqCst) {
@@ -112,7 +117,9 @@ impl BlackholeRedis {
                             active.fetch_sub(1, Ordering::SeqCst);
                         }));
                     }
-                    Err(error) if error.kind() == ErrorKind::WouldBlock => sleep(Duration::from_millis(1)),
+                    Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                        sleep(Duration::from_millis(1))
+                    }
                     Err(_) => break,
                 }
             }

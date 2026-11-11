@@ -31,7 +31,9 @@ use qubit_spi::ProviderSelection;
 fn main() -> Result<(), Box<dyn Error>> {
     let nodes = var("REDIS_SENTINEL_NODES")?;
     let service_name = var("REDIS_SENTINEL_SERVICE_NAME")?;
-    let namespace = args().nth(1).unwrap_or_else(|| "sentinel-orders-example".to_owned());
+    let namespace = args()
+        .nth(1)
+        .unwrap_or_else(|| "sentinel-orders-example".to_owned());
     let config = EventBusConfig::default()
         .with_selection(ProviderSelection::named("redis-streams")?)
         .with_provider_options(support::provider_options(

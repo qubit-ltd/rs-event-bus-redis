@@ -116,9 +116,21 @@ impl TlsRedisServer {
                 (None, Some(child), port)
             }
         };
-        let ca_path = directory.path().join("ca.crt").to_string_lossy().into_owned();
-        let client_cert_path = directory.path().join("client.crt").to_string_lossy().into_owned();
-        let client_key_path = directory.path().join("client.key").to_string_lossy().into_owned();
+        let ca_path = directory
+            .path()
+            .join("ca.crt")
+            .to_string_lossy()
+            .into_owned();
+        let client_cert_path = directory
+            .path()
+            .join("client.crt")
+            .to_string_lossy()
+            .into_owned();
+        let client_key_path = directory
+            .path()
+            .join("client.key")
+            .to_string_lossy()
+            .into_owned();
         let server = Self {
             container_id,
             child,
@@ -208,8 +220,13 @@ impl Drop for TlsRedisServer {
     }
 }
 
-fn start_local_tls(directory: &std::path::Path, port: u16, require_client_auth: bool) -> Result<Child, Box<dyn Error>> {
-    let server = std::env::var_os("RER_TLS_TEST_REDIS_SERVER").unwrap_or_else(|| "redis-server".into());
+fn start_local_tls(
+    directory: &std::path::Path,
+    port: u16,
+    require_client_auth: bool,
+) -> Result<Child, Box<dyn Error>> {
+    let server =
+        std::env::var_os("RER_TLS_TEST_REDIS_SERVER").unwrap_or_else(|| "redis-server".into());
     let client_auth = if require_client_auth { "yes" } else { "no" };
     Ok(Command::new(server)
         .arg("--bind")
@@ -312,7 +329,10 @@ fn generate_certificates(directory: &std::path::Path) -> Result<(), Box<dyn Erro
         "-subj",
         "/CN=Redis-Test-Client",
     ])?;
-    fs::write(directory.join("client.ext"), "extendedKeyUsage=clientAuth\n")?;
+    fs::write(
+        directory.join("client.ext"),
+        "extendedKeyUsage=clientAuth\n",
+    )?;
     run_openssl(openssl_args![
         "x509",
         "-req",
@@ -420,7 +440,12 @@ fn path_arg(path: &std::path::Path) -> String {
 /// # Returns
 ///
 /// `true` when a verified TLS connection receives `PONG`.
-fn responds_to_ping(url: &str, ca_path: &str, client_cert_path: &str, client_key_path: &str) -> bool {
+fn responds_to_ping(
+    url: &str,
+    ca_path: &str,
+    client_cert_path: &str,
+    client_key_path: &str,
+) -> bool {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let Ok(root_cert) = fs::read(ca_path) else {
         return false;

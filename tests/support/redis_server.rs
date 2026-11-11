@@ -45,7 +45,10 @@ pub(crate) struct RedisVersion {
 impl RedisVersion {
     pub(crate) fn parse_info(info: &str) -> Result<Self, Box<dyn Error>> {
         let mut found = None;
-        for line in info.lines().filter(|line| line.starts_with("redis_version:")) {
+        for line in info
+            .lines()
+            .filter(|line| line.starts_with("redis_version:"))
+        {
             if found.is_some() {
                 return Err("INFO server contains repeated redis_version fields".into());
             }
@@ -98,7 +101,10 @@ fn version_requirement_for_tag(tag: &str) -> Result<VersionRequirement, Box<dyn 
     let numeric = tag.split('-').next().ok_or("empty Redis image tag")?;
     let mut parts = numeric.split('.');
     let major = parse_version_part(parts.next())?;
-    let minor = parts.next().map(|part| parse_version_part(Some(part))).transpose()?;
+    let minor = parts
+        .next()
+        .map(|part| parse_version_part(Some(part)))
+        .transpose()?;
     if parts.next().is_some() {
         return Err(format!("unsupported Redis image version tag: {tag}").into());
     }
@@ -177,7 +183,11 @@ pub(crate) fn wait_until_ready(url: &str, budget: Duration) -> Result<(), Box<dy
     }
 }
 
-fn wait_until_local_ready(child: &mut Child, url: &str, budget: Duration) -> Result<(), Box<dyn Error>> {
+fn wait_until_local_ready(
+    child: &mut Child,
+    url: &str,
+    budget: Duration,
+) -> Result<(), Box<dyn Error>> {
     let address = loopback_address(url)?;
     let deadline = Instant::now()
         .checked_add(budget)
@@ -328,7 +338,9 @@ impl RedisServer {
             let port = TcpListener::bind(("127.0.0.1", 0))?.local_addr()?.port();
             match Self::start_local_at_port(server_binary.clone(), port, requirement, requested) {
                 Ok(server) => return Ok(server),
-                Err(error) if is_local_port_collision(error.as_ref()) => collision = Some(error.to_string()),
+                Err(error) if is_local_port_collision(error.as_ref()) => {
+                    collision = Some(error.to_string())
+                }
                 Err(error) => return Err(error),
             }
         }
@@ -382,19 +394,29 @@ impl RedisServer {
             Ok(server) => Ok(server),
             Err(DockerStartError::Fixture(error)) => Err(error),
             Err(DockerStartError::Unavailable(docker_error)) => {
-                let server_binary = local_server_for_image(image_tag)
-                    .ok_or_else(|| format!("{docker_error}; no local Redis binary configured for {image_tag}"))?;
-                Self::start_local_with_binary(server_binary, requirement, image_tag)
-                    .map_err(|local_error| format!("{docker_error}; local Redis fallback failed: {local_error}").into())
+                let server_binary = local_server_for_image(image_tag).ok_or_else(|| {
+                    format!("{docker_error}; no local Redis binary configured for {image_tag}")
+                })?;
+                Self::start_local_with_binary(server_binary, requirement, image_tag).map_err(
+                    |local_error| {
+                        format!("{docker_error}; local Redis fallback failed: {local_error}").into()
+                    },
+                )
             }
         }
     }
 
-    fn start_docker(image_tag: &str, requirement: VersionRequirement) -> Result<Self, DockerStartError> {
+    fn start_docker(
+        image_tag: &str,
+        requirement: VersionRequirement,
+    ) -> Result<Self, DockerStartError> {
         let image = format!("redis:{image_tag}");
-        let (container_id, port) =
-            start_mapped_container(&["run", "-d"], &[&image, "redis-server", "--appendonly", "yes"], 6379)
-                .map_err(|error| DockerStartError::Unavailable(error.to_string()))?;
+        let (container_id, port) = start_mapped_container(
+            &["run", "-d"],
+            &[&image, "redis-server", "--appendonly", "yes"],
+            6379,
+        )
+        .map_err(|error| DockerStartError::Unavailable(error.to_string()))?;
         let server = Self {
             backend: RedisBackend::Docker {
                 container_id,
@@ -402,7 +424,9 @@ impl RedisServer {
             },
         };
         wait_until_ready(server.url(), Duration::from_secs(5)).map_err(|error| {
-            DockerStartError::Fixture(format!("Redis container did not become ready: {error}").into())
+            DockerStartError::Fixture(
+                format!("Redis container did not become ready: {error}").into(),
+            )
         })?;
         server
             .validate_version(requirement, "docker", image_tag)
@@ -418,7 +442,9 @@ impl RedisServer {
     ) -> Result<(), Box<dyn Error>> {
         let address = loopback_address(self.url())?;
         let version = validate_version_at(address, requirement, backend, requested)?;
-        eprintln!("Redis fixture: backend={backend}, requested={requested}, actual_version={version}");
+        eprintln!(
+            "Redis fixture: backend={backend}, requested={requested}, actual_version={version}"
+        );
         Ok(())
     }
 
@@ -430,7 +456,9 @@ impl RedisServer {
     pub fn restart(&mut self) -> Result<(), Box<dyn Error>> {
         match &mut self.backend {
             RedisBackend::Docker { container_id, url } => {
-                let output = Command::new("docker").args(["restart", container_id]).output()?;
+                let output = Command::new("docker")
+                    .args(["restart", container_id])
+                    .output()?;
                 if !output.status.success() {
                     return Err(format!(
                         "could not restart the isolated Redis server: {}",
@@ -604,13 +632,19 @@ mod tests {
 
     #[test]
     fn test_other_docker_failures_are_not_port_allocation_conflicts() {
-        assert!(!is_port_allocation_conflict("Unable to find image redis:latest"));
+        assert!(!is_port_allocation_conflict(
+            "Unable to find image redis:latest"
+        ));
     }
 
     #[cfg(unix)]
     #[test]
     fn test_local_fallback_diagnostic_preserves_requested_image_tag() {
-        if Command::new("redis-server").arg("--version").output().is_err() {
+        if Command::new("redis-server")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
             return;
         }
         let error = match RedisServer::start_local_with_binary(
@@ -629,8 +663,13 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn test_local_fixture_version_failure_reaps_owned_process() -> Result<(), Box<dyn std::error::Error>> {
-        if Command::new("redis-server").arg("--version").output().is_err() {
+    fn test_local_fixture_version_failure_reaps_owned_process()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if Command::new("redis-server")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
             return Ok(());
         }
         let port = TcpListener::bind(("127.0.0.1", 0))?.local_addr()?.port();
@@ -649,7 +688,11 @@ mod tests {
         };
         wait_until_ready(server.url(), Duration::from_secs(5))?;
         let error = server
-            .validate_version(VersionRequirement::Series(6, Some(2)), "local", "6.2-alpine")
+            .validate_version(
+                VersionRequirement::Series(6, Some(2)),
+                "local",
+                "6.2-alpine",
+            )
             .expect_err("local Redis 7 must fail the explicit Redis 6.2 check");
         assert!(error.to_string().contains("actual=7."));
         drop(server);
@@ -666,8 +709,13 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn test_local_fixture_does_not_claim_another_process_on_occupied_port() -> Result<(), Box<dyn std::error::Error>> {
-        if Command::new("redis-server").arg("--version").output().is_err() {
+    fn test_local_fixture_does_not_claim_another_process_on_occupied_port()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if Command::new("redis-server")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
             return Ok(());
         }
         let owner = RedisServer::start_local_with_binary(

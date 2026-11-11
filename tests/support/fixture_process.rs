@@ -58,12 +58,20 @@ const POLL_INTERVAL: Duration = Duration::from_millis(25);
 /// returned on success. The sibling path has the same stem with `.stdout.log`.
 /// This watchdog requires Linux process-group and non-reaping wait support.
 #[cfg(target_os = "linux")]
-pub fn run_logged(command: &mut Command, log: &Path, timeout: Duration) -> Result<String, Box<dyn Error>> {
+pub fn run_logged(
+    command: &mut Command,
+    log: &Path,
+    timeout: Duration,
+) -> Result<String, Box<dyn Error>> {
     run_logged_with_poll(command, log, timeout, poll_child)
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn run_logged(_command: &mut Command, _log: &Path, _timeout: Duration) -> Result<String, Box<dyn Error>> {
+pub fn run_logged(
+    _command: &mut Command,
+    _log: &Path,
+    _timeout: Duration,
+) -> Result<String, Box<dyn Error>> {
     Err("fixture process watchdog requires Linux process-group and waitid support".into())
 }
 
@@ -105,15 +113,28 @@ where
                 if status.success {
                     return Ok(output);
                 }
-                return Err(format!("process exited with {}; stderr log: {}", status.display, log.display()).into());
+                return Err(format!(
+                    "process exited with {}; stderr log: {}",
+                    status.display,
+                    log.display()
+                )
+                .into());
             }
             Ok(None) => {}
             Err(error) => {
-                return Err(format!("failed waiting for process; stderr log: {}: {error}", log.display()).into());
+                return Err(format!(
+                    "failed waiting for process; stderr log: {}: {error}",
+                    log.display()
+                )
+                .into());
             }
         }
         if Instant::now() >= deadline {
-            return Err(format!("process timed out after {timeout:?}; stderr log: {}", log.display()).into());
+            return Err(format!(
+                "process timed out after {timeout:?}; stderr log: {}",
+                log.display()
+            )
+            .into());
         }
         thread::sleep(POLL_INTERVAL.min(deadline.saturating_duration_since(Instant::now())));
     }
@@ -144,7 +165,9 @@ fn poll_child(child: &mut Child) -> io::Result<Option<ChildExit>> {
             success: false,
             display: format!("signal: {signal}, core dumped: {core_dumped}"),
         })),
-        status => Err(io::Error::other(format!("unexpected child status: {status:?}"))),
+        status => Err(io::Error::other(format!(
+            "unexpected child status: {status:?}"
+        ))),
     }
 }
 

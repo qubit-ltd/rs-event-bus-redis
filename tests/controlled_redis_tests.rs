@@ -40,7 +40,10 @@ fn test_xadd_reply_gate_observes_applied_stream_entry() -> Result<(), Box<dyn Er
     block_on(gate.wait_applied());
     let mut observer = Client::open(server.url())?.get_connection()?;
     let length: usize = cmd("XLEN").arg("controlled-test").query(&mut observer)?;
-    assert_eq!(length, 1, "Redis applied XADD before the proxy held its reply");
+    assert_eq!(
+        length, 1,
+        "Redis applied XADD before the proxy held its reply"
+    );
     gate.release();
     let id = worker.join().expect("proxy command worker should finish")?;
     assert!(!id.is_empty());
@@ -93,9 +96,16 @@ fn test_xack_reply_gate_observes_applied_ack() -> Result<(), Box<dyn Error>> {
         .arg("+")
         .arg(10)
         .query(&mut setup)?;
-    assert_eq!(pending.len(), 0, "Redis applied XACK before the proxy held its reply");
+    assert_eq!(
+        pending.len(),
+        0,
+        "Redis applied XACK before the proxy held its reply"
+    );
     gate.release();
-    assert_eq!(worker.join().expect("proxy command worker should finish")?, 1);
+    assert_eq!(
+        worker.join().expect("proxy command worker should finish")?,
+        1
+    );
     Ok(())
 }
 
@@ -147,7 +157,12 @@ fn test_xack_reply_can_be_lost_after_redis_applies_ack() -> Result<(), Box<dyn E
         .query(&mut setup)?;
     assert!(pending.is_empty());
     gate.release_without_reply();
-    assert!(worker.join().expect("proxy command worker should finish").is_err());
+    assert!(
+        worker
+            .join()
+            .expect("proxy command worker should finish")
+            .is_err()
+    );
     let repeated_ack: usize = cmd("XACK")
         .arg("controlled-test-lost-reply")
         .arg("workers")

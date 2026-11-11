@@ -16,7 +16,9 @@ use qubit_spi::ServiceProvider;
 #[test]
 fn test_provider_metadata_has_the_expected_identifier() {
     assert_eq!(
-        ProviderMetadata::descriptor(&RedisEventBusProvider).id().as_str(),
+        ProviderMetadata::descriptor(&RedisEventBusProvider)
+            .id()
+            .as_str(),
         "redis-streams"
     );
 }
@@ -38,7 +40,10 @@ fn test_configured_provider_validates_options_without_connecting() {
 #[test]
 fn test_sync_provider_returns_invalid_configuration_without_connecting() {
     let options: ProviderOptions = [
-        ("redis.sentinel.nodes".into(), "invalid:port/not-a-db".into()),
+        (
+            "redis.sentinel.nodes".into(),
+            "invalid:port/not-a-db".into(),
+        ),
         ("redis.sentinel.service_name".into(), "primary".into()),
     ]
     .into();

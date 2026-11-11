@@ -13,11 +13,15 @@ use qubit_event_bus_redis::error::RedisProviderError;
 fn test_provider_error_new_categories_display_and_debug() {
     for (error, expected) in [
         (
-            RedisProviderError::OutcomeUnknown { operation: "publish" },
+            RedisProviderError::OutcomeUnknown {
+                operation: "publish",
+            },
             "Redis operation outcome unknown (publish)",
         ),
         (
-            RedisProviderError::ResourceLimit { resource: "commands" },
+            RedisProviderError::ResourceLimit {
+                resource: "commands",
+            },
             "Redis resource limit reached (commands)",
         ),
         (

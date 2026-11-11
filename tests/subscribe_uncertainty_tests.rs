@@ -90,16 +90,22 @@ fn assert_spi_kind(error: SpiError, expected: &str) {
 
 #[cfg(feature = "sync")]
 #[test]
-fn test_subscribe_create_sync_keeps_unknown_after_retry_rejection_or_bad_reply() -> Result<(), Box<dyn Error>> {
+fn test_subscribe_create_sync_keeps_unknown_after_retry_rejection_or_bad_reply()
+-> Result<(), Box<dyn Error>> {
     for (index, reply) in RETRY_REJECTION_REPLIES
         .iter()
         .chain(INVALID_CREATE_REPLIES.iter())
         .enumerate()
     {
-        let server = ScriptedRedis::start(vec![Step::disconnect("XGROUP", false), Step::reply("XGROUP", reply)])?;
+        let server = ScriptedRedis::start(vec![
+            Step::disconnect("XGROUP", false),
+            Step::reply("XGROUP", reply),
+        ])?;
         let namespace = format!("unknown-retry-sync-{index}");
         let bus = RedisEventBusProvider
-            .create_configured(&EventBusConfig::default().with_provider_options(options(server.url(), &namespace)))
+            .create_configured(
+                &EventBusConfig::default().with_provider_options(options(server.url(), &namespace)),
+            )
             .map_err(|failure| failure.into_error())?;
         let result = bus.subscribe(request(StartPosition::New, "group", ProviderOptions::new()));
         let error = match result {
@@ -110,27 +116,41 @@ fn test_subscribe_create_sync_keeps_unknown_after_retry_rejection_or_bad_reply()
         };
         assert_unknown(error, "group");
         let commands = server.finish();
-        assert_eq!(commands.iter().filter(|command| command[0] == "XGROUP").count(), 2);
+        assert_eq!(
+            commands
+                .iter()
+                .filter(|command| command[0] == "XGROUP")
+                .count(),
+            2
+        );
     }
     let server = ScriptedRedis::start(vec![Step::disconnect("XGROUP", true)])?;
     let bus = RedisEventBusProvider
         .create_configured(
-            &EventBusConfig::default().with_provider_options(options(server.url(), "unknown-retry-sync-connect")),
+            &EventBusConfig::default()
+                .with_provider_options(options(server.url(), "unknown-retry-sync-connect")),
         )
         .map_err(|failure| failure.into_error())?;
     let result = bus.subscribe(request(StartPosition::New, "group", ProviderOptions::new()));
     assert_unknown(
-        result.err().expect("retry connection failure remains uncertain"),
+        result
+            .err()
+            .expect("retry connection failure remains uncertain"),
         "group",
     );
     assert_eq!(
-        server.finish().iter().filter(|command| command[0] == "XGROUP").count(),
+        server
+            .finish()
+            .iter()
+            .filter(|command| command[0] == "XGROUP")
+            .count(),
         1
     );
     let server = ScriptedRedis::start(vec![Step::reply("XGROUP", b"-NOPERM denied\r\n")])?;
     let bus = RedisEventBusProvider
         .create_configured(
-            &EventBusConfig::default().with_provider_options(options(server.url(), "subscribe-first-reject")),
+            &EventBusConfig::default()
+                .with_provider_options(options(server.url(), "subscribe-first-reject")),
         )
         .map_err(|failure| failure.into_error())?;
     assert_spi_kind(
@@ -140,7 +160,11 @@ fn test_subscribe_create_sync_keeps_unknown_after_retry_rejection_or_bad_reply()
         "authentication",
     );
     assert_eq!(
-        server.finish().iter().filter(|command| command[0] == "XGROUP").count(),
+        server
+            .finish()
+            .iter()
+            .filter(|command| command[0] == "XGROUP")
+            .count(),
         1
     );
 
@@ -150,7 +174,8 @@ fn test_subscribe_create_sync_keeps_unknown_after_retry_rejection_or_bad_reply()
     ])?;
     let bus = RedisEventBusProvider
         .create_configured(
-            &EventBusConfig::default().with_provider_options(options(server.url(), "subscribe-retry-ok")),
+            &EventBusConfig::default()
+                .with_provider_options(options(server.url(), "subscribe-retry-ok")),
         )
         .map_err(|failure| failure.into_error())?;
     assert!(
@@ -158,7 +183,11 @@ fn test_subscribe_create_sync_keeps_unknown_after_retry_rejection_or_bad_reply()
             .is_ok()
     );
     assert_eq!(
-        server.finish().iter().filter(|command| command[0] == "XGROUP").count(),
+        server
+            .finish()
+            .iter()
+            .filter(|command| command[0] == "XGROUP")
+            .count(),
         2
     );
     Ok(())
@@ -166,20 +195,24 @@ fn test_subscribe_create_sync_keeps_unknown_after_retry_rejection_or_bad_reply()
 
 #[cfg(feature = "async")]
 #[test]
-fn test_subscribe_create_async_keeps_unknown_after_retry_rejection_or_bad_reply() -> Result<(), Box<dyn Error>> {
+fn test_subscribe_create_async_keeps_unknown_after_retry_rejection_or_bad_reply()
+-> Result<(), Box<dyn Error>> {
     for (index, reply) in RETRY_REJECTION_REPLIES
         .iter()
         .chain(INVALID_CREATE_REPLIES.iter())
         .enumerate()
     {
-        let server = ScriptedRedis::start(vec![Step::disconnect("XGROUP", false), Step::reply("XGROUP", reply)])?;
+        let server = ScriptedRedis::start(vec![
+            Step::disconnect("XGROUP", false),
+            Step::reply("XGROUP", reply),
+        ])?;
         let namespace = format!("unknown-retry-async-{index}");
-        let bus = block_on(
-            AsyncRedisEventBusProvider
-                .create_configured(&EventBusConfig::default().with_provider_options(options(server.url(), &namespace))),
-        )
+        let bus = block_on(AsyncRedisEventBusProvider.create_configured(
+            &EventBusConfig::default().with_provider_options(options(server.url(), &namespace)),
+        ))
         .map_err(|failure| failure.into_error())?;
-        let result = block_on(bus.subscribe(request(StartPosition::New, "group", ProviderOptions::new())));
+        let result =
+            block_on(bus.subscribe(request(StartPosition::New, "group", ProviderOptions::new())));
         let error = match result {
             Err(error) => error,
             Ok(_) => {
@@ -188,26 +221,45 @@ fn test_subscribe_create_async_keeps_unknown_after_retry_rejection_or_bad_reply(
         };
         assert_unknown(error, "group");
         let commands = server.finish();
-        assert_eq!(commands.iter().filter(|command| command[0] == "XGROUP").count(), 2);
+        assert_eq!(
+            commands
+                .iter()
+                .filter(|command| command[0] == "XGROUP")
+                .count(),
+            2
+        );
     }
     let server = ScriptedRedis::start(vec![Step::disconnect("XGROUP", true)])?;
-    let bus = block_on(AsyncRedisEventBusProvider.create_configured(
-        &EventBusConfig::default().with_provider_options(options(server.url(), "unknown-retry-async-connect")),
-    ))
+    let bus = block_on(
+        AsyncRedisEventBusProvider.create_configured(
+            &EventBusConfig::default()
+                .with_provider_options(options(server.url(), "unknown-retry-async-connect")),
+        ),
+    )
     .map_err(|failure| failure.into_error())?;
-    let result = block_on(bus.subscribe(request(StartPosition::New, "group", ProviderOptions::new())));
+    let result =
+        block_on(bus.subscribe(request(StartPosition::New, "group", ProviderOptions::new())));
     assert_unknown(
-        result.err().expect("retry connection failure remains uncertain"),
+        result
+            .err()
+            .expect("retry connection failure remains uncertain"),
         "group",
     );
     assert_eq!(
-        server.finish().iter().filter(|command| command[0] == "XGROUP").count(),
+        server
+            .finish()
+            .iter()
+            .filter(|command| command[0] == "XGROUP")
+            .count(),
         1
     );
     let server = ScriptedRedis::start(vec![Step::reply("XGROUP", b"-NOPERM denied\r\n")])?;
-    let bus = block_on(AsyncRedisEventBusProvider.create_configured(
-        &EventBusConfig::default().with_provider_options(options(server.url(), "subscribe-first-reject-async")),
-    ))
+    let bus = block_on(
+        AsyncRedisEventBusProvider.create_configured(
+            &EventBusConfig::default()
+                .with_provider_options(options(server.url(), "subscribe-first-reject-async")),
+        ),
+    )
     .map_err(|failure| failure.into_error())?;
     assert_spi_kind(
         block_on(bus.subscribe(request(StartPosition::New, "group", ProviderOptions::new())))
@@ -216,7 +268,11 @@ fn test_subscribe_create_async_keeps_unknown_after_retry_rejection_or_bad_reply(
         "authentication",
     );
     assert_eq!(
-        server.finish().iter().filter(|command| command[0] == "XGROUP").count(),
+        server
+            .finish()
+            .iter()
+            .filter(|command| command[0] == "XGROUP")
+            .count(),
         1
     );
 
@@ -224,13 +280,23 @@ fn test_subscribe_create_async_keeps_unknown_after_retry_rejection_or_bad_reply(
         Step::disconnect("XGROUP", false),
         Step::reply("XGROUP", b"+OK\r\n"),
     ])?;
-    let bus = block_on(AsyncRedisEventBusProvider.create_configured(
-        &EventBusConfig::default().with_provider_options(options(server.url(), "subscribe-retry-ok-async")),
-    ))
+    let bus = block_on(
+        AsyncRedisEventBusProvider.create_configured(
+            &EventBusConfig::default()
+                .with_provider_options(options(server.url(), "subscribe-retry-ok-async")),
+        ),
+    )
     .map_err(|failure| failure.into_error())?;
-    assert!(block_on(bus.subscribe(request(StartPosition::New, "group", ProviderOptions::new()))).is_ok());
+    assert!(
+        block_on(bus.subscribe(request(StartPosition::New, "group", ProviderOptions::new())))
+            .is_ok()
+    );
     assert_eq!(
-        server.finish().iter().filter(|command| command[0] == "XGROUP").count(),
+        server
+            .finish()
+            .iter()
+            .filter(|command| command[0] == "XGROUP")
+            .count(),
         2
     );
     Ok(())
@@ -243,7 +309,9 @@ fn test_subscribe_create_sync_accepts_only_ok_on_first_reply() -> Result<(), Box
         let server = ScriptedRedis::start(vec![Step::reply("XGROUP", reply)])?;
         let namespace = format!("strict-create-sync-{index}");
         let bus = RedisEventBusProvider
-            .create_configured(&EventBusConfig::default().with_provider_options(options(server.url(), &namespace)))
+            .create_configured(
+                &EventBusConfig::default().with_provider_options(options(server.url(), &namespace)),
+            )
             .map_err(|failure| failure.into_error())?;
         let result = bus.subscribe(request(StartPosition::New, "group", ProviderOptions::new()));
         let error = match result {
@@ -252,12 +320,19 @@ fn test_subscribe_create_sync_accepts_only_ok_on_first_reply() -> Result<(), Box
         };
         assert_unknown(error, "group");
         let commands = server.finish();
-        assert_eq!(commands.iter().filter(|command| command[0] == "XGROUP").count(), 1);
+        assert_eq!(
+            commands
+                .iter()
+                .filter(|command| command[0] == "XGROUP")
+                .count(),
+            1
+        );
     }
     let server = ScriptedRedis::start(vec![Step::reply("XGROUP", b"+OK\r\n")])?;
     let bus = RedisEventBusProvider
         .create_configured(
-            &EventBusConfig::default().with_provider_options(options(server.url(), "strict-create-sync-ok")),
+            &EventBusConfig::default()
+                .with_provider_options(options(server.url(), "strict-create-sync-ok")),
         )
         .map_err(|failure| failure.into_error())?;
     assert!(
@@ -265,7 +340,11 @@ fn test_subscribe_create_sync_accepts_only_ok_on_first_reply() -> Result<(), Box
             .is_ok()
     );
     assert_eq!(
-        server.finish().iter().filter(|command| command[0] == "XGROUP").count(),
+        server
+            .finish()
+            .iter()
+            .filter(|command| command[0] == "XGROUP")
+            .count(),
         1
     );
     Ok(())
@@ -277,28 +356,44 @@ fn test_subscribe_create_async_accepts_only_ok_on_first_reply() -> Result<(), Bo
     for (index, reply) in INVALID_CREATE_REPLIES.iter().enumerate() {
         let server = ScriptedRedis::start(vec![Step::reply("XGROUP", reply)])?;
         let namespace = format!("strict-create-async-{index}");
-        let bus = block_on(
-            AsyncRedisEventBusProvider
-                .create_configured(&EventBusConfig::default().with_provider_options(options(server.url(), &namespace))),
-        )
+        let bus = block_on(AsyncRedisEventBusProvider.create_configured(
+            &EventBusConfig::default().with_provider_options(options(server.url(), &namespace)),
+        ))
         .map_err(|failure| failure.into_error())?;
-        let result = block_on(bus.subscribe(request(StartPosition::New, "group", ProviderOptions::new())));
+        let result =
+            block_on(bus.subscribe(request(StartPosition::New, "group", ProviderOptions::new())));
         let error = match result {
             Err(error) => error,
             Ok(_) => panic!("non-OK CREATE reply must be uncertain"),
         };
         assert_unknown(error, "group");
         let commands = server.finish();
-        assert_eq!(commands.iter().filter(|command| command[0] == "XGROUP").count(), 1);
+        assert_eq!(
+            commands
+                .iter()
+                .filter(|command| command[0] == "XGROUP")
+                .count(),
+            1
+        );
     }
     let server = ScriptedRedis::start(vec![Step::reply("XGROUP", b"+OK\r\n")])?;
-    let bus = block_on(AsyncRedisEventBusProvider.create_configured(
-        &EventBusConfig::default().with_provider_options(options(server.url(), "strict-create-async-ok")),
-    ))
+    let bus = block_on(
+        AsyncRedisEventBusProvider.create_configured(
+            &EventBusConfig::default()
+                .with_provider_options(options(server.url(), "strict-create-async-ok")),
+        ),
+    )
     .map_err(|failure| failure.into_error())?;
-    assert!(block_on(bus.subscribe(request(StartPosition::New, "group", ProviderOptions::new()))).is_ok());
+    assert!(
+        block_on(bus.subscribe(request(StartPosition::New, "group", ProviderOptions::new())))
+            .is_ok()
+    );
     assert_eq!(
-        server.finish().iter().filter(|command| command[0] == "XGROUP").count(),
+        server
+            .finish()
+            .iter()
+            .filter(|command| command[0] == "XGROUP")
+            .count(),
         1
     );
     Ok(())
@@ -306,13 +401,15 @@ fn test_subscribe_create_async_accepts_only_ok_on_first_reply() -> Result<(), Bo
 
 #[cfg(feature = "sync")]
 #[test]
-fn test_subscribe_create_sync_connect_failure_before_send_keeps_transport_error() -> Result<(), Box<dyn Error>> {
-    let bus = RedisEventBusProvider
-        .create_configured(
-            &EventBusConfig::default()
-                .with_provider_options(options("redis://127.0.0.1:0/", "subscribe-connect-failure")),
-        )
-        .map_err(|failure| failure.into_error())?;
+fn test_subscribe_create_sync_connect_failure_before_send_keeps_transport_error()
+-> Result<(), Box<dyn Error>> {
+    let bus =
+        RedisEventBusProvider
+            .create_configured(&EventBusConfig::default().with_provider_options(options(
+                "redis://127.0.0.1:0/",
+                "subscribe-connect-failure",
+            )))
+            .map_err(|failure| failure.into_error())?;
     let error = match bus.subscribe(request(StartPosition::New, "group", ProviderOptions::new())) {
         Err(error) => error,
         Ok(_) => panic!("port zero cannot accept a Redis connection"),
@@ -323,32 +420,37 @@ fn test_subscribe_create_sync_connect_failure_before_send_keeps_transport_error(
 
 #[cfg(feature = "async")]
 #[test]
-fn test_subscribe_create_async_connect_failure_before_send_keeps_transport_error() -> Result<(), Box<dyn Error>> {
-    let bus = block_on(
-        AsyncRedisEventBusProvider.create_configured(
-            &EventBusConfig::default()
-                .with_provider_options(options("redis://127.0.0.1:0/", "subscribe-connect-failure-async")),
-        ),
-    )
+fn test_subscribe_create_async_connect_failure_before_send_keeps_transport_error()
+-> Result<(), Box<dyn Error>> {
+    let bus = block_on(AsyncRedisEventBusProvider.create_configured(
+        &EventBusConfig::default().with_provider_options(options(
+            "redis://127.0.0.1:0/",
+            "subscribe-connect-failure-async",
+        )),
+    ))
     .map_err(|failure| failure.into_error())?;
-    let error = match block_on(bus.subscribe(request(StartPosition::New, "group", ProviderOptions::new()))) {
-        Err(error) => error,
-        Ok(_) => panic!("port zero cannot accept a Redis connection"),
-    };
+    let error =
+        match block_on(bus.subscribe(request(StartPosition::New, "group", ProviderOptions::new())))
+        {
+            Err(error) => error,
+            Ok(_) => panic!("port zero cannot accept a Redis connection"),
+        };
     assert_spi_kind(error, "transport");
     Ok(())
 }
 
 #[cfg(feature = "sync")]
 #[test]
-fn test_subscribe_create_sync_malformed_reply_discards_connection_and_receiver() -> Result<(), Box<dyn Error>> {
+fn test_subscribe_create_sync_malformed_reply_discards_connection_and_receiver()
+-> Result<(), Box<dyn Error>> {
     let server = ScriptedRedis::start(vec![
         Step::reply("XGROUP", b":1\r\n"),
         Step::reply("XGROUP", b"+OK\r\n"),
     ])?;
     let bus = RedisEventBusProvider
         .create_configured(
-            &EventBusConfig::default().with_provider_options(options(server.url(), "malformed-sync-recovery")),
+            &EventBusConfig::default()
+                .with_provider_options(options(server.url(), "malformed-sync-recovery")),
         )
         .map_err(|failure| failure.into_error())?;
     let error = match bus.subscribe(request(StartPosition::New, "group", ProviderOptions::new())) {
@@ -363,34 +465,53 @@ fn test_subscribe_create_sync_malformed_reply_discards_connection_and_receiver()
         "a later healthy subscribe can acquire the released receiver permit"
     );
     let commands = server.finish();
-    assert_eq!(commands.iter().filter(|command| command[0] == "XGROUP").count(), 2);
+    assert_eq!(
+        commands
+            .iter()
+            .filter(|command| command[0] == "XGROUP")
+            .count(),
+        2
+    );
     assert!(server.connection_count() > connections_after_unknown);
     Ok(())
 }
 
 #[cfg(feature = "async")]
 #[test]
-fn test_subscribe_create_async_malformed_reply_invalidates_connection_and_receiver() -> Result<(), Box<dyn Error>> {
+fn test_subscribe_create_async_malformed_reply_invalidates_connection_and_receiver()
+-> Result<(), Box<dyn Error>> {
     let server = ScriptedRedis::start(vec![
         Step::reply("XGROUP", b":1\r\n"),
         Step::reply("XGROUP", b"+OK\r\n"),
     ])?;
-    let bus = block_on(AsyncRedisEventBusProvider.create_configured(
-        &EventBusConfig::default().with_provider_options(options(server.url(), "malformed-async-recovery")),
-    ))
+    let bus = block_on(
+        AsyncRedisEventBusProvider.create_configured(
+            &EventBusConfig::default()
+                .with_provider_options(options(server.url(), "malformed-async-recovery")),
+        ),
+    )
     .map_err(|failure| failure.into_error())?;
-    let error = match block_on(bus.subscribe(request(StartPosition::New, "group", ProviderOptions::new()))) {
-        Err(error) => error,
-        Ok(_) => panic!("integer reply does not confirm group creation"),
-    };
+    let error =
+        match block_on(bus.subscribe(request(StartPosition::New, "group", ProviderOptions::new())))
+        {
+            Err(error) => error,
+            Ok(_) => panic!("integer reply does not confirm group creation"),
+        };
     assert_unknown(error, "group");
     let connections_after_unknown = server.connection_count();
     assert!(
-        block_on(bus.subscribe(request(StartPosition::New, "group", ProviderOptions::new()))).is_ok(),
+        block_on(bus.subscribe(request(StartPosition::New, "group", ProviderOptions::new())))
+            .is_ok(),
         "a later healthy subscribe can acquire the released receiver permit"
     );
     let commands = server.finish();
-    assert_eq!(commands.iter().filter(|command| command[0] == "XGROUP").count(), 2);
+    assert_eq!(
+        commands
+            .iter()
+            .filter(|command| command[0] == "XGROUP")
+            .count(),
+        2
+    );
     assert!(server.connection_count() > connections_after_unknown);
     Ok(())
 }
@@ -421,17 +542,19 @@ fn test_async_second_xgroup_disconnect_recovers_next_publish() -> Result<(), Box
         Step::reply("XADD", b"$3\r\n1-0\r\n"),
     ])?;
     let namespace = "second-xgroup-disconnect-recovery";
-    let bus = block_on(
-        AsyncRedisEventBusProvider
-            .create_configured(&EventBusConfig::default().with_provider_options(options(server.url(), namespace))),
-    )
+    let bus = block_on(AsyncRedisEventBusProvider.create_configured(
+        &EventBusConfig::default().with_provider_options(options(server.url(), namespace)),
+    ))
     .map_err(|failure| failure.into_error())?;
     let subscribe_result = block_on(bus.subscribe(request(
         StartPosition::Earliest,
         "group-second-disconnect",
         ProviderOptions::new(),
     )));
-    assert!(subscribe_result.is_err(), "both scripted XGROUP requests disconnect");
+    assert!(
+        subscribe_result.is_err(),
+        "both scripted XGROUP requests disconnect"
+    );
     // The two scripted steps are consumed only after the endpoint has parsed
     // both XGROUP requests. The next SPI operation must issue one XADD.
     assert_eq!(server.finish_allow_remaining().len(), 2);
@@ -447,8 +570,20 @@ fn test_async_second_xgroup_disconnect_recovers_next_publish() -> Result<(), Box
         "next publish should use a live command connection: {publish_result:?}"
     );
     let commands = server.finish();
-    assert_eq!(commands.iter().filter(|command| command[0] == "XGROUP").count(), 2);
-    assert_eq!(commands.iter().filter(|command| command[0] == "XADD").count(), 1);
+    assert_eq!(
+        commands
+            .iter()
+            .filter(|command| command[0] == "XGROUP")
+            .count(),
+        2
+    );
+    assert_eq!(
+        commands
+            .iter()
+            .filter(|command| command[0] == "XADD")
+            .count(),
+        1
+    );
     assert!(
         server.connection_count() > connections_after_subscribe,
         "publish reconnects after the dead retry generation"
@@ -458,7 +593,8 @@ fn test_async_second_xgroup_disconnect_recovers_next_publish() -> Result<(), Box
 
 #[cfg(feature = "async")]
 #[test]
-fn test_async_second_xgroup_timeout_does_not_reuse_timed_out_connection() -> Result<(), Box<dyn Error>> {
+fn test_async_second_xgroup_timeout_does_not_reuse_timed_out_connection()
+-> Result<(), Box<dyn Error>> {
     let server = ScriptedRedis::start(vec![
         Step::disconnect("XGROUP", false),
         Step::delayed_reply("XGROUP", b"+OK\r\n", Duration::from_millis(300)),
@@ -490,8 +626,20 @@ fn test_async_second_xgroup_timeout_does_not_reuse_timed_out_connection() -> Res
         "timeout invalidation permits a fresh publish connection: {publish_result:?}"
     );
     let commands = server.finish();
-    assert_eq!(commands.iter().filter(|command| command[0] == "XGROUP").count(), 2);
-    assert_eq!(commands.iter().filter(|command| command[0] == "XADD").count(), 1);
+    assert_eq!(
+        commands
+            .iter()
+            .filter(|command| command[0] == "XGROUP")
+            .count(),
+        2
+    );
+    assert_eq!(
+        commands
+            .iter()
+            .filter(|command| command[0] == "XADD")
+            .count(),
+        1
+    );
     assert!(server.connection_count() > connections_after_subscribe);
     Ok(())
 }
@@ -534,7 +682,10 @@ impl RedisHarness {
                 "--appendonly",
                 "no",
                 "--dir",
-                directory.path().to_str().ok_or("Redis temp path is not UTF-8")?,
+                directory
+                    .path()
+                    .to_str()
+                    .ok_or("Redis temp path is not UTF-8")?,
                 "--loglevel",
                 "warning",
             ])
@@ -632,7 +783,10 @@ fn assert_unknown(error: SpiError, group: &str) {
     assert_eq!(resource.as_deref(), Some("events"));
     assert_eq!(kind, "outcome_unknown");
     assert_eq!(retryable, Some(false));
-    assert_eq!(source.to_string(), "Redis operation outcome unknown (subscribe)");
+    assert_eq!(
+        source.to_string(),
+        "Redis operation outcome unknown (subscribe)"
+    );
     assert!(!source.to_string().contains(group));
     assert!(source.source().is_none());
 }
@@ -641,8 +795,10 @@ fn group_cursor(url: &str, namespace: &str, group: &str) -> Result<String, Box<d
     let client = Client::open(url)?;
     let mut connection = client.get_connection()?;
     let key = qubit_event_bus_redis::naming::stream_key(namespace, "events");
-    let groups: StreamInfoGroupsReply = cmd("XINFO").arg("GROUPS").arg(key).query(&mut connection)?;
-    let expected_group = qubit_event_bus_redis::naming::group_name(namespace, "events", "worker", Some(group));
+    let groups: StreamInfoGroupsReply =
+        cmd("XINFO").arg("GROUPS").arg(key).query(&mut connection)?;
+    let expected_group =
+        qubit_event_bus_redis::naming::group_name(namespace, "events", "worker", Some(group));
     let found = groups
         .groups
         .iter()
@@ -655,7 +811,8 @@ fn pending_ids(url: &str, namespace: &str, group: &str) -> Result<Vec<String>, B
     let client = Client::open(url)?;
     let mut connection = client.get_connection()?;
     let stream = qubit_event_bus_redis::naming::stream_key(namespace, "events");
-    let group = qubit_event_bus_redis::naming::group_name(namespace, "events", "worker", Some(group));
+    let group =
+        qubit_event_bus_redis::naming::group_name(namespace, "events", "worker", Some(group));
     let pending: StreamPendingCountReply = cmd("XPENDING")
         .arg(stream)
         .arg(group)
@@ -675,14 +832,19 @@ fn seed_pending(
     let client = Client::open(url)?;
     let mut connection = client.get_connection()?;
     let stream = qubit_event_bus_redis::naming::stream_key(namespace, "events");
-    let entry_id = if existing_cursor == "1-0" { "2-0" } else { "1-0" };
+    let entry_id = if existing_cursor == "1-0" {
+        "2-0"
+    } else {
+        "1-0"
+    };
     let _: String = cmd("XADD")
         .arg(&stream)
         .arg(entry_id)
         .arg("field")
         .arg("pending")
         .query(&mut connection)?;
-    let redis_group = qubit_event_bus_redis::naming::group_name(namespace, "events", "worker", Some(group));
+    let redis_group =
+        qubit_event_bus_redis::naming::group_name(namespace, "events", "worker", Some(group));
     // The value is intentionally ignored; XPENDING below proves Redis applied
     // the read without coupling this test to the fork's typed reply parser.
     let _: redis::Value = cmd("XREADGROUP")
@@ -724,7 +886,10 @@ fn run_sync_lost_reply(
             .query(&mut observer)?;
     }
     let bus = RedisEventBusProvider
-        .create_configured(&EventBusConfig::default().with_provider_options(options(proxy.url().as_str(), &namespace)))
+        .create_configured(
+            &EventBusConfig::default()
+                .with_provider_options(options(proxy.url().as_str(), &namespace)),
+        )
         .map_err(|failure| failure.into_error())?;
     let gate = proxy.pause_after_reply("XGROUP");
     let subscribe_bus = bus.clone();
@@ -735,10 +900,12 @@ fn run_sync_lost_reply(
     let subscribe_request = request(start, &group, request_options);
     let (sender, receiver) = channel();
     let worker = spawn(move || {
-        let result = subscribe_bus.subscribe(subscribe_request).and_then(|mut subscription| {
-            subscription.close()?;
-            Ok(())
-        });
+        let result = subscribe_bus
+            .subscribe(subscribe_request)
+            .and_then(|mut subscription| {
+                subscription.close()?;
+                Ok(())
+            });
         let _ = sender.send(result);
     });
     if !gate.wait_until_reached(WAIT) {
@@ -746,9 +913,13 @@ fn run_sync_lost_reply(
         let _ = worker.join();
         return Err("XGROUP reply gate was not reached".into());
     }
-    assert_eq!(group_cursor(server.url(), &namespace, &group)?, expected_cursor);
+    assert_eq!(
+        group_cursor(server.url(), &namespace, &group)?,
+        expected_cursor
+    );
     // Leave a real entry pending while the original XGROUP reply is lost.
-    let (cursor_after_probe, pending_before_retry) = seed_pending(server.url(), &namespace, &group, expected_cursor)?;
+    let (cursor_after_probe, pending_before_retry) =
+        seed_pending(server.url(), &namespace, &group, expected_cursor)?;
     gate.release_without_reply();
     let result = receiver
         .recv_timeout(WAIT)
@@ -762,14 +933,21 @@ fn run_sync_lost_reply(
     } else {
         result.expect("New and explicit resume accept the existing group cursor");
     }
-    assert_eq!(group_cursor(server.url(), &namespace, &group)?, cursor_after_probe);
-    assert_eq!(pending_ids(server.url(), &namespace, &group)?, pending_before_retry);
+    assert_eq!(
+        group_cursor(server.url(), &namespace, &group)?,
+        cursor_after_probe
+    );
+    assert_eq!(
+        pending_ids(server.url(), &namespace, &group)?,
+        pending_before_retry
+    );
     Ok(())
 }
 
 #[cfg(feature = "sync")]
 #[test]
-fn test_sync_real_redis_create_reply_loss_is_unknown_and_keeps_cursor() -> Result<(), Box<dyn Error>> {
+fn test_sync_real_redis_create_reply_loss_is_unknown_and_keeps_cursor() -> Result<(), Box<dyn Error>>
+{
     run_sync_lost_reply(StartPosition::Earliest, "0-0", "earliest", false, true)?;
     run_sync_lost_reply(StartPosition::At("1-0".into()), "1-0", "at", false, true)?;
     run_sync_lost_reply(StartPosition::New, "0-0", "new", false, false)?;
@@ -823,8 +1001,12 @@ fn run_async_lost_reply(
         let _ = worker.join();
         return Err("XGROUP reply gate was not reached".into());
     }
-    assert_eq!(group_cursor(server.url(), &namespace, &group)?, expected_cursor);
-    let (cursor_after_probe, pending_before_retry) = seed_pending(server.url(), &namespace, &group, expected_cursor)?;
+    assert_eq!(
+        group_cursor(server.url(), &namespace, &group)?,
+        expected_cursor
+    );
+    let (cursor_after_probe, pending_before_retry) =
+        seed_pending(server.url(), &namespace, &group, expected_cursor)?;
     gate.release_without_reply();
     let result = receiver
         .recv_timeout(WAIT)
@@ -838,14 +1020,21 @@ fn run_async_lost_reply(
     } else {
         result.expect("New and explicit resume accept the existing group cursor");
     }
-    assert_eq!(group_cursor(server.url(), &namespace, &group)?, cursor_after_probe);
-    assert_eq!(pending_ids(server.url(), &namespace, &group)?, pending_before_retry);
+    assert_eq!(
+        group_cursor(server.url(), &namespace, &group)?,
+        cursor_after_probe
+    );
+    assert_eq!(
+        pending_ids(server.url(), &namespace, &group)?,
+        pending_before_retry
+    );
     Ok(())
 }
 
 #[cfg(feature = "async")]
 #[test]
-fn test_async_real_redis_create_reply_loss_is_unknown_and_keeps_cursor() -> Result<(), Box<dyn Error>> {
+fn test_async_real_redis_create_reply_loss_is_unknown_and_keeps_cursor()
+-> Result<(), Box<dyn Error>> {
     run_async_lost_reply(StartPosition::Earliest, "0-0", "earliest", false, true)?;
     run_async_lost_reply(StartPosition::At("1-0".into()), "1-0", "at", false, true)?;
     run_async_lost_reply(StartPosition::New, "0-0", "new", false, false)?;

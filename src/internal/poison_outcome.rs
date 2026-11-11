@@ -38,7 +38,10 @@ impl PoisonOutcome {
         let (message, count) = match self {
             Self::Quarantined => ("malformed Redis stream entry was quarantined", Some(1)),
             Self::SourceGone => ("malformed pending Redis stream entry was removed", Some(1)),
-            Self::TombstoneCleared => ("deleted Redis stream entry was removed from the pending list", Some(1)),
+            Self::TombstoneCleared => (
+                "deleted Redis stream entry was removed from the pending list",
+                Some(1),
+            ),
             Self::OwnershipChanged => return None,
         };
         Some(ReceiveOutcome::Gap(DeliveryGap::new(message, count)))

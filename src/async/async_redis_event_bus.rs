@@ -98,7 +98,10 @@ impl AsyncEventBusSpi for AsyncRedisEventBus {
     /// `XADD`. Payload type and payload size are checked before admission;
     /// admission then covers wire encoding and connection setup. A missing or
     /// malformed reply after send returns outcome-unknown without replay.
-    fn publish<'a>(&'a self, message: OutboundMessage) -> SpiFuture<'a, Result<PublishAcknowledgement, SpiError>> {
+    fn publish<'a>(
+        &'a self,
+        message: OutboundMessage,
+    ) -> SpiFuture<'a, Result<PublishAcknowledgement, SpiError>> {
         Box::pin(async move {
             let topic = message.topic().clone();
             let limits = WireLimits::from_config(&self.settings);
@@ -303,34 +306,42 @@ impl AsyncEventBusSpi for AsyncRedisEventBus {
                     .invalidate_async_connection(connection.role, connection.generation)
                     .await;
                 drop(connection);
-                let mut retry_connection =
-                    self.client
-                        .get_async_connection(CommandClass::General)
-                        .await
-                        .map_err(|_| {
-                            spi_error(
-                                "subscribe",
-                                Some(&topic),
-                                RedisProviderError::OutcomeUnknown { operation: "subscribe" },
-                            )
-                        })?;
-                let (retry_result, malformed_reply) = match retry_connection.send_packed_command(&create_command).await
-                {
-                    Ok(Value::Okay) => (Ok(()), false),
-                    Ok(Value::ServerError(error)) => (Err(error.into()), false),
-                    Ok(_) => {
-                        self.client
-                            .invalidate_async_connection(retry_connection.role, retry_connection.generation)
-                            .await;
-                        (Ok(()), true)
-                    }
-                    Err(error) => {
-                        self.client
-                            .invalidate_async_connection(retry_connection.role, retry_connection.generation)
-                            .await;
-                        (Err(error), true)
-                    }
-                };
+                let mut retry_connection = self
+                    .client
+                    .get_async_connection(CommandClass::General)
+                    .await
+                    .map_err(|_| {
+                        spi_error(
+                            "subscribe",
+                            Some(&topic),
+                            RedisProviderError::OutcomeUnknown {
+                                operation: "subscribe",
+                            },
+                        )
+                    })?;
+                let (retry_result, malformed_reply) =
+                    match retry_connection.send_packed_command(&create_command).await {
+                        Ok(Value::Okay) => (Ok(()), false),
+                        Ok(Value::ServerError(error)) => (Err(error.into()), false),
+                        Ok(_) => {
+                            self.client
+                                .invalidate_async_connection(
+                                    retry_connection.role,
+                                    retry_connection.generation,
+                                )
+                                .await;
+                            (Ok(()), true)
+                        }
+                        Err(error) => {
+                            self.client
+                                .invalidate_async_connection(
+                                    retry_connection.role,
+                                    retry_connection.generation,
+                                )
+                                .await;
+                            (Err(error), true)
+                        }
+                    };
                 (retry_result, malformed_reply)
             } else {
                 (result, false)
@@ -339,7 +350,9 @@ impl AsyncEventBusSpi for AsyncRedisEventBus {
                 return Err(spi_error(
                     "subscribe",
                     Some(&topic),
-                    RedisProviderError::OutcomeUnknown { operation: "subscribe" },
+                    RedisProviderError::OutcomeUnknown {
+                        operation: "subscribe",
+                    },
                 ));
             }
             match result {
@@ -350,7 +363,9 @@ impl AsyncEventBusSpi for AsyncRedisEventBus {
                             spi_error(
                                 "subscribe",
                                 Some(&topic),
-                                RedisProviderError::OutcomeUnknown { operation: "subscribe" },
+                                RedisProviderError::OutcomeUnknown {
+                                    operation: "subscribe",
+                                },
                             )
                         } else {
                             error
@@ -362,7 +377,9 @@ impl AsyncEventBusSpi for AsyncRedisEventBus {
                         return Err(spi_error(
                             "subscribe",
                             Some(&topic),
-                            RedisProviderError::OutcomeUnknown { operation: "subscribe" },
+                            RedisProviderError::OutcomeUnknown {
+                                operation: "subscribe",
+                            },
                         ));
                     }
                     return Err(spi_error(
@@ -393,7 +410,9 @@ impl AsyncEventBusSpi for AsyncRedisEventBus {
                 subscription_id: request.subscription_id(),
                 closed: false,
                 claim_min_idle_ms: self.settings.claim_min_idle_ms(),
-                recovery_interval: Duration::from_millis(self.settings.recovery_interval_ms() as u64),
+                recovery_interval: Duration::from_millis(
+                    self.settings.recovery_interval_ms() as u64
+                ),
                 max_unsettled: self.settings.max_unsettled_per_subscription(),
                 recovery: Arc::new(Mutex::new(RecoveryState::new())),
             }) as Box<dyn AsyncEventSubscriptionSpi>)
@@ -420,7 +439,10 @@ impl AsyncEventBusSpi for AsyncRedisEventBus {
     /// The returned future always resolves successfully; pending PEL state is
     /// untouched.
     #[inline]
-    fn shutdown<'a>(&'a self, _mode: ShutdownMode) -> SpiFuture<'a, Result<ShutdownOutcome, SpiError>> {
+    fn shutdown<'a>(
+        &'a self,
+        _mode: ShutdownMode,
+    ) -> SpiFuture<'a, Result<ShutdownOutcome, SpiError>> {
         Box::pin(async { Ok(ShutdownOutcome::Complete) })
     }
 }
@@ -564,7 +586,8 @@ mod tests {
     fn test_publish_rejects_full_admission_before_wire_encoding() {
         block_on(async {
             let settings = RedisEventBusConfig::default();
-            let capacity = settings.max_concurrent_commands() - settings.reserved_settlement_commands();
+            let capacity =
+                settings.max_concurrent_commands() - settings.reserved_settlement_commands();
             let client = Arc::new(Client::new(&settings).expect("client"));
             let permits: Vec<_> = (0..capacity)
                 .map(|_| {
@@ -602,7 +625,8 @@ mod tests {
     fn test_publish_reports_oversized_payload_before_full_admission() {
         block_on(async {
             let settings = RedisEventBusConfig::default();
-            let capacity = settings.max_concurrent_commands() - settings.reserved_settlement_commands();
+            let capacity =
+                settings.max_concurrent_commands() - settings.reserved_settlement_commands();
             let client = Arc::new(Client::new(&settings).expect("client"));
             let permits: Vec<_> = (0..capacity)
                 .map(|_| {
@@ -616,7 +640,10 @@ mod tests {
 
             let result = bus.publish(outbound(vec![1; 1_048_577])).await;
 
-            assert_publish_error(result.expect_err("oversized payload must fail"), "payload_too_large");
+            assert_publish_error(
+                result.expect_err("oversized payload must fail"),
+                "payload_too_large",
+            );
             assert_eq!(crate::wire_fields::encode_count(), 0);
             drop(permits);
         });
@@ -626,7 +653,8 @@ mod tests {
     fn test_publish_preserves_native_payload_error_when_admission_is_full() {
         block_on(async {
             let settings = RedisEventBusConfig::default();
-            let capacity = settings.max_concurrent_commands() - settings.reserved_settlement_commands();
+            let capacity =
+                settings.max_concurrent_commands() - settings.reserved_settlement_commands();
             let client = Arc::new(Client::new(&settings).expect("client"));
             let permits: Vec<_> = (0..capacity)
                 .map(|_| {
@@ -678,9 +706,11 @@ mod tests {
     #[test]
     fn test_publish_connection_failure_releases_its_admission() {
         block_on(async {
-            let settings = RedisEventBusConfig::new("redis://127.0.0.1:1/", "publish-connect-failure")
-                .expect("valid offline endpoint");
-            let capacity = settings.max_concurrent_commands() - settings.reserved_settlement_commands();
+            let settings =
+                RedisEventBusConfig::new("redis://127.0.0.1:1/", "publish-connect-failure")
+                    .expect("valid offline endpoint");
+            let capacity =
+                settings.max_concurrent_commands() - settings.reserved_settlement_commands();
             let client = Arc::new(Client::new(&settings).expect("client"));
             let bus = AsyncRedisEventBus {
                 client: Arc::clone(&client),
@@ -706,7 +736,8 @@ mod tests {
     fn test_publish_header_limit_is_checked_after_admission() {
         block_on(async {
             let settings = small_header_settings();
-            let capacity = settings.max_concurrent_commands() - settings.reserved_settlement_commands();
+            let capacity =
+                settings.max_concurrent_commands() - settings.reserved_settlement_commands();
             let client = Arc::new(Client::new(&settings).expect("client"));
             let bus = AsyncRedisEventBus {
                 client: Arc::clone(&client),
@@ -753,7 +784,8 @@ mod tests {
     fn test_publish_wire_limit_is_checked_after_admission() {
         block_on(async {
             let settings = small_wire_settings();
-            let capacity = settings.max_concurrent_commands() - settings.reserved_settlement_commands();
+            let capacity =
+                settings.max_concurrent_commands() - settings.reserved_settlement_commands();
             let client = Arc::new(Client::new(&settings).expect("client"));
             let bus = AsyncRedisEventBus {
                 client: Arc::clone(&client),
@@ -762,7 +794,9 @@ mod tests {
 
             crate::wire_fields::reset_encode_count();
             assert_publish_error(
-                bus.publish(outbound(vec![42; 100])).await.expect_err("wire limit"),
+                bus.publish(outbound(vec![42; 100]))
+                    .await
+                    .expect_err("wire limit"),
                 "wire_too_large",
             );
             assert_eq!(crate::wire_fields::encode_count(), 1);
@@ -784,7 +818,9 @@ mod tests {
                 .collect();
             crate::wire_fields::reset_encode_count();
             assert_publish_error(
-                bus.publish(outbound(vec![42; 100])).await.expect_err("full admission"),
+                bus.publish(outbound(vec![42; 100]))
+                    .await
+                    .expect_err("full admission"),
                 "resource_limit",
             );
             assert_eq!(crate::wire_fields::encode_count(), 0);
@@ -832,7 +868,10 @@ mod tests {
             "resource_limit",
         );
         assert_eq!(second_encode_count, 0);
-        assert!(first_result.is_err(), "offline endpoint fails after encoding");
+        assert!(
+            first_result.is_err(),
+            "offline endpoint fails after encoding"
+        );
         assert_eq!(first_encode_count, 1);
         let permit = client
             .try_command(crate::client::CommandClass::General)
@@ -857,7 +896,9 @@ mod tests {
             let settings = RedisEventBusConfig::new("redis://127.0.0.1:1/", "connection-errors")
                 .expect("valid test configuration");
             let bus = AsyncRedisEventBus {
-                client: Arc::new(Client::new(&settings).expect("unreachable Redis URL is syntactically valid")),
+                client: Arc::new(
+                    Client::new(&settings).expect("unreachable Redis URL is syntactically valid"),
+                ),
                 settings,
             };
             let mut receiver = super::Subscription {
