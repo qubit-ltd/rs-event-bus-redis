@@ -736,6 +736,7 @@ dependencies = [
 name = "qubit-event-bus-redis"
 version = "0.7.0"
 dependencies = [
+ "async-io",
  "async-lock",
  "futures-channel",
  "futures-lite",

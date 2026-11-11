@@ -19,6 +19,7 @@ mod poison_outcome;
 #[path = "internal/poison_reason.rs"]
 mod poison_reason;
 mod receive_action;
+mod receive_backoff;
 mod receive_driver;
 mod receive_reply;
 mod receive_stage;
@@ -47,6 +48,7 @@ pub(crate) use pending_entry::PendingEntry;
 pub(crate) use poison_outcome::PoisonOutcome;
 pub(crate) use poison_reason::PoisonReason;
 pub(crate) use receive_action::ReceiveAction;
+pub(crate) use receive_backoff::full_capacity_backoff;
 pub(crate) use receive_driver::ReceiveDriver;
 pub(crate) use receive_reply::ReceiveReply;
 pub(crate) use recovery_guard::RecoveryGuard;

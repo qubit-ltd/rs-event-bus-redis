@@ -56,6 +56,14 @@ does not change the schedule. An incomplete round does not advance the deadline.
 
 Zero timeout permits at most one claim, one own-pending read and one new-message read, all without BLOCK, with early delivery/Gap allowed; it skips tombstone scans and may quarantine one malformed record. `Duration::MAX` uses finite BLOCK intervals of at most one second. Finite deadlines stop additional recovery work and bound the chosen BLOCK; they do not force an already-started command to stop. Recovery preserves active deduplication, live records deferred behind gaps and Redis 6.2 tombstone repair.
 
+When local unsettled capacity is full, `receive` waits no longer than the
+smaller of its positive timeout and 10 ms, then returns `TimedOut` so the same
+receiver can be used to settle work. A zero timeout returns immediately;
+`Duration::MAX` still uses only the 10 ms cap for this branch. The async path
+suspends on a runtime-neutral timer and the sync path sleeps after releasing
+the recovery lock. Runtime/OS scheduling can make either wake later than the
+requested delay. This is bounded backoff, not a wait until capacity is freed.
+
 The shared response parser validates the `XAUTOCLAIM` cursor and every returned stream entry ID before producing a parsed result. Invalid IDs make the receive outcome unknown; they do not advance the saved recovery cursor or trigger acknowledgement or quarantine. Reconnection therefore resumes from the last valid cursor. Redis 6.2 nil tombstones remain supported.
 
 ## Connection policy and resource lifecycle

@@ -313,7 +313,7 @@ REDIS_SENTINEL_SERVICE_NAME=qeventbus \
 | `redis.max_concurrent_commands` | `64` | 短命令总准入上限，范围为 2 至 4,096。 |
 | `redis.reserved_settlement_commands` | `8` | 专供结算的短命令名额；必须大于零且小于总命令上限。总命令数低于 9 且未显式配置时，默认值为总额减 1。 |
 | `redis.max_active_receivers` | `256` | 专用活跃 receiver 连接上限，范围为 1 至 4,096。 |
-| `redis.max_unsettled_per_subscription` | `100` | 每个订阅已投递但未结算的消息上限；达到上限后 receive 会等待。 |
+| `redis.max_unsettled_per_subscription` | `100` | 每个订阅已投递但未结算的消息上限；达到上限时，正 timeout 最多退避 10 毫秒（或更短的请求时长）后返回 `TimedOut`。零 timeout 立即返回；即使传入 `Duration::MAX`，本次调用也不会等待结算。 |
 | `redis.max_wire_bytes` | `8388608` | 序列化 wire 总字节上限。 |
 | `redis.max_payload_bytes` | `1048576` | 解码后 payload 字节上限。 |
 | `redis.max_headers_bytes` | `65536` | 二次 JSON 解析前的 headers 字符串字节上限。 |
@@ -421,7 +421,7 @@ Redis 提供至少一次投递，因此 handler 应具备幂等性。新消息�
 
 仍保留在 Redis 中的 stream entry 可能再次投递，因此 handler 必须具备幂等性。处理 `qubit-task` 通知时，应使用持久 consumer checkpoint、保留最高 `state_version`，并在发现版本缺口时查询任务服务的权威状态。
 
-每个订阅的未结算消息达到 `redis.max_unsettled_per_subscription` 后会暂停接收新记录。结算或 retry 后会释放容量。该设置限制进程内的投递压力，不会限制 Redis stream 增长。
+每个订阅的未结算消息达到 `redis.max_unsettled_per_subscription` 后会暂停接收新记录。正 timeout 会退避最多 10 毫秒后返回 `TimedOut`；零 timeout 立即返回。这样调用方可在再次接收前执行结算，单次 receive 不会等待需要同一个 receiver 才能完成的结算。唤醒受 runtime 和操作系统调度影响，实际耗时可能超过请求时长。结算或 retry 后会释放容量。该设置限制进程内的投递压力，不会限制 Redis stream 增长。
 
 每个订阅第一次 `receive` 都会立即检查 pending。后续 receive 调用共享恢复截止时间：在 `redis.recovery_interval_ms`（默认 1,000 毫秒，范围 50–60,000）到期前只读新记录，不重复扫描；长时间等待的 receive 仍会在间隔到期时继续恢复扫描。Retry、receive 错误或已 poll 的 async receive 被取消时，会强制下一次调用执行恢复。调小间隔能更快接管达到 idle threshold 的 pending 消息，同时会增加 Redis 扫描命令。
 

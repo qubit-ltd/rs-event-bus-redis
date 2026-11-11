@@ -28,7 +28,7 @@ resolver = "3"
 [features]
 default = ["sync", "async", "discovery"]
 sync = ["redis/streams"]
-async = ["dep:async-lock", "redis/smol-rustls-comp", "redis/streams"]
+async = ["dep:async-io", "dep:async-lock", "redis/smol-rustls-comp", "redis/streams"]
 discovery = ["qubit-event-bus/discovery", "qubit-spi/inventory"]
 conformance = ["qubit-event-bus/conformance"]
 
@@ -38,6 +38,7 @@ serde_json = "^1.0"
 thiserror = "^2.0"
 rustls = { version = "^0.23", default-features = false, features = ["ring", "std", "tls12"] }
 async-lock = { version = "^3.5", optional = true }
+async-io = { version = "^2.6", optional = true }
 redis = {
   package = "qubit-redis",
   version = "=2.0.0-rc.2",

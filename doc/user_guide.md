@@ -315,7 +315,7 @@ The async example runs until it consumes the event, then waits for Enter before 
 | `redis.max_concurrent_commands` | `64` | Total short-command admission limit, 2 through 4,096. |
 | `redis.reserved_settlement_commands` | `8` | Short-command slots reserved for settlement; must be positive and below the total command limit. For a total below 9, the omitted default is total minus one. |
 | `redis.max_active_receivers` | `256` | Maximum dedicated live receiver connections, 1 through 4,096. |
-| `redis.max_unsettled_per_subscription` | `100` | Maximum delivered but unsettled messages held by one subscription; receive waits while the limit is reached. |
+| `redis.max_unsettled_per_subscription` | `100` | Maximum delivered but unsettled messages held by one subscription; when full, a positive receive timeout backs off for at most 10 ms (or the shorter requested timeout) then returns `TimedOut`. Zero returns immediately; even `Duration::MAX` does not wait for settlement in that call. |
 | `redis.max_wire_bytes` | `8388608` | Maximum serialized wire bytes. |
 | `redis.max_payload_bytes` | `1048576` | Maximum decoded payload bytes. |
 | `redis.max_headers_bytes` | `65536` | Maximum decoded headers string bytes before JSON parsing. |
@@ -423,7 +423,7 @@ Redis Streams provide at-least-once delivery, so make handlers idempotent. A slo
 
 Still-resident Redis stream entries can be delivered again, so handlers must be idempotent. For `qubit-task` notifications, use a durable consumer checkpoint, retain the highest `state_version`, and query authoritative task state when a version gap appears.
 
-Each subscription stops receiving new entries while its unsettled count reaches `redis.max_unsettled_per_subscription`. Settling or retrying an entry frees capacity. This bounds in-process delivery pressure; it does not limit Redis stream growth.
+Each subscription stops receiving new entries while its unsettled count reaches `redis.max_unsettled_per_subscription`. A receive with a positive timeout backs off for at most 10 ms, then returns `TimedOut`; zero returns immediately. This gives the caller a chance to run settlement before trying again, without making one receive wait for settlement that needs the same receiver. Timer wakeups are subject to runtime and operating-system scheduling and may occur later than requested. Settling or retrying an entry frees capacity. This bounds in-process delivery pressure; it does not limit Redis stream growth.
 
 `StartPosition::New` creates a group at the current stream tail. If the group already exists, `New` resumes its stored cursor. `Earliest` starts a new group at `0-0`, and `At("milliseconds-sequence")` supplies a Redis Stream ID. Redis retains an existing group cursor, so the provider now rejects an existing group with `Earliest` or `At` using the non-retryable `existing_group_start_position_ignored` error; it does not silently ignore the requested start position. Use a different group name when you intend to create a group at a new position. If you intentionally want to resume the existing cursor while keeping an `Earliest` or `At` profile, opt in explicitly:
 

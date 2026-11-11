@@ -59,6 +59,7 @@ use crate::internal::SettlementReply;
 use crate::internal::SettlementState;
 use crate::internal::WireLimits;
 use crate::internal::decode_entry as decode_wire_entry;
+use crate::internal::full_capacity_backoff;
 use crate::internal::parse_settlement_reply;
 use crate::internal::read_group_command;
 use crate::internal::settlement_command;
@@ -150,8 +151,11 @@ impl EventSubscriptionSpi for Subscription {
     ///
     /// - `timeout`: Scheduling wait for new entries, zero for bounded
     ///   non-blocking phase reads, or Duration::MAX for repeated finite BLOCK
-    ///   intervals. Individual I/O waits can extend beyond this scheduling
-    ///   deadline.
+    ///   intervals. When local unsettled capacity is full, a positive timeout
+    ///   sleeps for at most 10 ms (and no longer than `timeout`) before
+    ///   returning `TimedOut`; zero returns immediately. OS scheduling can
+    ///   make the actual delay longer. Individual I/O waits can also extend
+    ///   beyond the receive scheduling deadline.
     ///
     /// # Returns
     ///
@@ -168,7 +172,15 @@ impl EventSubscriptionSpi for Subscription {
         if self.closed {
             return Ok(ReceiveOutcome::Closed);
         }
-        if lock_state(&self.recovery, &self.topic, "receive", "recovery lock")?.active_len() >= self.max_unsettled {
+        let full = {
+            let recovery = lock_state(&self.recovery, &self.topic, "receive", "recovery lock")?;
+            recovery.active_len() >= self.max_unsettled
+        };
+        if full {
+            let delay = full_capacity_backoff(timeout);
+            if !delay.is_zero() {
+                std::thread::sleep(delay);
+            }
             return Ok(ReceiveOutcome::TimedOut);
         }
         let started = Instant::now();
