@@ -100,3 +100,31 @@ changes after the final code repair. The only subsequent changes are this
 evidence file and the bilingual coverage summary entry; they do not modify Rust
 source, configuration or tested behavior. The design and implementation plan files were retained and excluded
 from commits.
+
+## Local dependency worktree record
+
+These read-only dependency worktrees were created for this task under the
+preserved relative sibling layout. Each is detached at the exact commit shown;
+the source repositories are the existing directories under
+`/data/working/qubit/rust-common/`. The main project worktree was separately
+created on `codex/rer-73af5c86` and has been integrated to `dev-starfish`.
+
+| Source repository | Commit | Worktree branch | Worktree path | Created this task |
+| --- | --- | --- | --- | --- |
+| `rs-codec` | `1f4c243d422fa6514583ea3facd2a51ddc60001d` | detached | `.worktrees/rer-73af5c86/rust-common/rs-codec` | yes |
+| `rs-datatype` | `35d2921f9ae9d8931a6ec9f173324e82bf677743` | detached | `.worktrees/rer-73af5c86/rust-common/rs-datatype` | yes |
+| `rs-event-bus` | `86d6418983f7c73c5136542ba333fa753f4e7f65` | detached | `.worktrees/rer-73af5c86/rust-common/rs-event-bus` | yes |
+| `rs-id` | `82a1457045c9fb14fb968a38b3fbfb9da90a1489` | detached | `.worktrees/rer-73af5c86/rust-common/rs-id` | yes |
+| `rs-metadata` | `53af862410501a64f9b0c14a6448598fb24a0854` | detached | `.worktrees/rer-73af5c86/rust-common/rs-metadata` | yes |
+| `rs-model-metadata` | `71d6502487e3df59bd1e6cc876f876b47163b076` | detached | `.worktrees/rer-73af5c86/rust-common/rs-model-metadata` | yes |
+| `rs-progress` | `853ec97df471223107b13faa6e6b5e71fa3cb71b` | detached | `.worktrees/rer-73af5c86/rust-common/rs-progress` | yes |
+| `rs-redact` | `d3116d19fc40d6e23db0fdca4db3748d0dede7d8` | detached | `.worktrees/rer-73af5c86/rust-common/rs-redact` | yes |
+| `rs-reflect` | `2b57a7e7b5ecb357e6361a04025ec43086bb1936` | detached | `.worktrees/rer-73af5c86/rust-common/rs-reflect` | yes |
+| `rs-task` | `97aa79d330e7fac4908480634cfcd18dbca45d01` | detached | `.worktrees/rer-73af5c86/rust-common/rs-task` | yes |
+| `rs-validation-rules` | `87e1d602371f758a2d346193f0ec3b6a4f1644ad` | detached | `.worktrees/rer-73af5c86/rust-common/rs-validation-rules` | yes |
+| `rs-validator` | `9674fa169fe0071f1fb36df2d70fb0b8c37cf406` | detached | `.worktrees/rer-73af5c86/rust-common/rs-validator` | yes |
+
+Every dependency worktree's Git directory resolved beneath its listed source
+repository's `.git/worktrees/`, and its common directory resolved to that
+source repository's `.git`. All were clean at cleanup; no dependency source
+was modified and no dependency commit was created.
