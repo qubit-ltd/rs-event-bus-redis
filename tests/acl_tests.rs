@@ -259,7 +259,9 @@ fn sync_child() -> Result<(), Box<dyn Error>> {
                 assert_eq!(error.retryable(), Some(false));
                 assert!(!error.to_string().contains("ephemeral-acl-test-password"));
             }
-            Err(error) => return Err(format!("ACL denial had unexpected error variant: {error}").into()),
+            Err(error) => {
+                return Err(format!("ACL denial had unexpected error variant: {error}").into());
+            }
             Ok(ReceiveOutcome::Gap(_)) => {
                 return Err("ACL denial was incorrectly reported as quarantine success".into());
             }
@@ -332,7 +334,9 @@ async fn async_child() -> Result<(), Box<dyn Error>> {
                 assert_eq!(error.retryable(), Some(false));
                 assert!(!error.to_string().contains("ephemeral-acl-test-password"));
             }
-            Err(error) => return Err(format!("ACL denial had unexpected error variant: {error}").into()),
+            Err(error) => {
+                return Err(format!("ACL denial had unexpected error variant: {error}").into());
+            }
             Ok(ReceiveOutcome::Gap(_)) => {
                 return Err("ACL denial was incorrectly reported as quarantine success".into());
             }
@@ -437,7 +441,9 @@ fn sync_sentinel_child() -> Result<(), Box<dyn Error>> {
                 retryable: Some(false),
                 ..
             } => {}
-            error => return Err(format!("Sentinel setup failure had unexpected category: {error}").into()),
+            error => {
+                return Err(format!("Sentinel setup failure had unexpected category: {error}").into());
+            }
         }
         let display = error.to_string();
         assert!(
@@ -491,7 +497,9 @@ async fn async_sentinel_child() -> Result<(), Box<dyn Error>> {
                 retryable: Some(false),
                 ..
             } => {}
-            error => return Err(format!("Sentinel setup failure had unexpected category: {error}").into()),
+            error => {
+                return Err(format!("Sentinel setup failure had unexpected category: {error}").into());
+            }
         }
         let display = error.to_string();
         assert!(

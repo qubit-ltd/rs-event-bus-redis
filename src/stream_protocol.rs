@@ -22,7 +22,8 @@ use redis::streams::StreamReadReply;
 pub(crate) use crate::internal::PendingEntry;
 use crate::internal::valid_stream_id;
 
-/// Parses an XAUTOCLAIM reply and records Redis 6.2's nil tombstone markers.
+/// Parses the reply to the non-JUSTID `XAUTOCLAIM ... COUNT 1` request and
+/// records Redis 6.2's nil tombstone markers.
 ///
 /// # Parameters
 ///
@@ -31,12 +32,14 @@ use crate::internal::valid_stream_id;
 /// # Returns
 ///
 /// The normalized XAUTOCLAIM reply and whether the server returned a deleted
-/// pending entry without its ID.
+/// pending entry without its ID. At most one full claimed entry is accepted;
+/// Redis 7 deleted IDs do not count as claimed entries.
 ///
 /// # Errors
 ///
 /// Returns a response error if the reply does not match the supported Redis
-/// 6.2 or Redis 7 shape.
+/// 6.2 or Redis 7 shape, contains a claimed row without its full entry, or
+/// contains more than one claimed entry.
 pub(crate) fn parse_auto_claim(value: Value) -> Result<(StreamAutoClaimReply, bool), RedisError> {
     let Value::Array(parts) = value else {
         return Err(invalid_reply());
@@ -63,17 +66,10 @@ pub(crate) fn parse_auto_claim(value: Value) -> Result<(StreamAutoClaimReply, bo
         if is_missing {
             has_missing_entries = true;
         } else {
-            claimed.push(match row {
-                Value::BulkString(_) => {
-                    let mut entry = StreamId::default();
-                    entry.id = from_redis_value(row)?;
-                    if !valid_stream_id(&entry.id) {
-                        return Err(invalid_reply());
-                    }
-                    entry
-                }
-                row => parse_stream_id(row)?,
-            });
+            if !claimed.is_empty() {
+                return Err(invalid_reply());
+            }
+            claimed.push(parse_stream_id(row)?);
         }
     }
     let deleted_ids: Vec<String> = parts.next().map(from_redis_value).transpose()?.unwrap_or_default();

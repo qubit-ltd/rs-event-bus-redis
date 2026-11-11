@@ -183,14 +183,13 @@ fn test_owned_stream_parsers_preserve_empty_and_reject_malformed_shapes() {
 
 #[test]
 fn test_parse_auto_claim_preserves_redis_6_2_nil_tombstones() {
-    let value = Value::Array(vec![
-        Value::BulkString(b"9-0".to_vec()),
-        Value::Array(vec![Value::Array(vec![Value::Nil])]),
-    ]);
-    let (reply, has_missing_entries) = parse_auto_claim(value).unwrap();
-    assert_eq!(reply.next_stream_id, "9-0");
-    assert!(reply.claimed.is_empty());
-    assert!(has_missing_entries);
+    for tombstone in [Value::Nil, Value::Array(vec![Value::Nil])] {
+        let value = Value::Array(vec![Value::BulkString(b"9-0".to_vec()), Value::Array(vec![tombstone])]);
+        let (reply, has_missing_entries) = parse_auto_claim(value).unwrap();
+        assert_eq!(reply.next_stream_id, "9-0");
+        assert!(reply.claimed.is_empty());
+        assert!(has_missing_entries);
+    }
 }
 
 #[test]
@@ -282,13 +281,63 @@ fn test_parse_auto_claim_validates_cursor_and_returned_ids() {
     let maximum = b"18446744073709551615-18446744073709551615".to_vec();
     let (reply, _) = parse_auto_claim(Value::Array(vec![
         Value::BulkString(maximum.clone()),
-        Value::Array(vec![Value::BulkString(maximum.clone())]),
+        Value::Array(vec![Value::Array(vec![
+            Value::BulkString(maximum.clone()),
+            Value::Array(Vec::new()),
+        ])]),
         Value::Array(vec![Value::BulkString(b"01-002".to_vec())]),
     ]))
     .expect("valid maximum and leading-zero IDs");
     assert_eq!(reply.next_stream_id, String::from_utf8(maximum.clone()).unwrap());
     assert_eq!(reply.claimed[0].id, String::from_utf8(maximum).unwrap());
     assert_eq!(reply.deleted_ids, vec!["01-002"]);
+}
+
+#[test]
+fn test_parse_auto_claim_rejects_bare_valid_id() {
+    let value = Value::Array(vec![
+        Value::BulkString(b"0-0".to_vec()),
+        Value::Array(vec![Value::BulkString(b"1-0".to_vec())]),
+    ]);
+    assert!(
+        parse_auto_claim(value).is_err(),
+        "non-JUSTID reply requires a full entry"
+    );
+}
+
+#[test]
+fn test_parse_auto_claim_rejects_multiple_entries_and_tombstones() {
+    let entry = |id: &[u8]| Value::Array(vec![Value::BulkString(id.to_vec()), Value::Array(Vec::new())]);
+    for rows in [
+        vec![entry(b"1-0"), entry(b"2-0")],
+        vec![Value::Array(vec![Value::Nil]), entry(b"1-0"), entry(b"2-0")],
+    ] {
+        let reply = Value::Array(vec![
+            Value::BulkString(b"0-0".to_vec()),
+            Value::Array(rows),
+            Value::Array(vec![Value::BulkString(b"01-002".to_vec())]),
+        ]);
+        assert!(parse_auto_claim(reply).is_err());
+    }
+}
+
+#[test]
+fn test_parse_auto_claim_accepts_one_entry_with_deleted_ids() {
+    let value = Value::Array(vec![
+        Value::BulkString(b"0-0".to_vec()),
+        Value::Array(vec![Value::Array(vec![
+            Value::BulkString(b"1-0".to_vec()),
+            Value::Array(Vec::new()),
+        ])]),
+        Value::Array(vec![
+            Value::BulkString(b"01-002".to_vec()),
+            Value::BulkString(b"3-0".to_vec()),
+        ]),
+    ]);
+    let (reply, missing) = parse_auto_claim(value).expect("valid live entry and deleted IDs");
+    assert!(!missing);
+    assert_eq!(reply.claimed.len(), 1);
+    assert_eq!(reply.deleted_ids, vec!["01-002", "3-0"]);
 }
 
 #[test]

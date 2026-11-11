@@ -31,7 +31,7 @@ use std::time::Duration;
 pub struct BlackholeRedis {
     url: String,
     stop: Arc<AtomicBool>,
-    sockets: Arc<Mutex<Vec<TcpStream>>>,
+    sockets: Arc<Mutex<Vec<(usize, TcpStream)>>>,
     #[cfg(feature = "async")]
     accepted: Arc<AtomicUsize>,
     #[cfg(feature = "async")]
@@ -74,13 +74,14 @@ impl BlackholeRedis {
                         stream
                             .set_read_timeout(Some(Duration::from_secs(3)))
                             .expect("fixture read timeout");
+                        let socket_id = thread_accepted.fetch_add(1, Ordering::SeqCst);
                         thread_sockets
                             .lock()
                             .expect("socket registry")
-                            .push(stream.try_clone().expect("clone socket"));
-                        thread_accepted.fetch_add(1, Ordering::SeqCst);
+                            .push((socket_id, stream.try_clone().expect("clone socket")));
                         thread_active.fetch_add(1, Ordering::SeqCst);
                         let commands = Arc::clone(&thread_commands);
+                        let sockets = Arc::clone(&thread_sockets);
                         let setup_commands = Arc::clone(&thread_setup_commands);
                         let setup_reply = Arc::clone(&thread_setup_reply);
                         let stop = Arc::clone(&thread_stop);
@@ -104,6 +105,10 @@ impl BlackholeRedis {
                                     }
                                 }
                             }
+                            sockets
+                                .lock()
+                                .expect("socket registry")
+                                .retain(|(id, _)| *id != socket_id);
                             active.fetch_sub(1, Ordering::SeqCst);
                         }));
                     }
@@ -164,7 +169,7 @@ impl Drop for BlackholeRedis {
     /// Unblocks fixture workers before joining the listener thread.
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
-        for stream in self.sockets.lock().expect("socket registry").iter() {
+        for (_, stream) in self.sockets.lock().expect("socket registry").iter() {
             let _ = stream.shutdown(Shutdown::Both);
         }
         if let Some(worker) = self.worker.take() {

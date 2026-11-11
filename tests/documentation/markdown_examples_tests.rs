@@ -159,6 +159,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {{
     let first = first_rx.recv_timeout(Duration::from_secs(5))?;
     if first != "order-42" {{ return Err(format!("unexpected first event: {{first}}").into()); }}
     first_subscription.cancel()?;
+    let report = bus.shutdown(ShutdownMode::Graceful {{ timeout: Duration::from_secs(5) }})?;
+    if report.outcome != ShutdownOutcome::Complete {{ return Err("first bus shutdown incomplete".into()); }}
+    let bus = EventBusRegistry::discover()?.create(&config)?;
 
     bus.publish(PublishRequest::new(topic.clone(), "order-43".to_owned())?)?;
     let (resume_tx, resume_rx) = mpsc::channel();

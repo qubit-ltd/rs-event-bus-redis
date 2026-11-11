@@ -324,7 +324,9 @@ fn forward(
         }
     });
     while let Ok(mut response) = internal::read_response(&mut server_reader) {
-        let Ok((command, request)) = received.recv() else { break };
+        let Ok((command, request)) = received.recv() else {
+            break;
+        };
         if gate.hold_if_armed(&command.to_ascii_uppercase(), &request) {
             break;
         }

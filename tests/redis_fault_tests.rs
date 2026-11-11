@@ -583,6 +583,52 @@ fn test_sync_invalid_claim_cursor_does_not_replace_last_valid_cursor() {
     );
 }
 
+#[cfg(feature = "sync")]
+#[test]
+fn test_sync_invalid_claim_shape_preserves_cursor_and_subscription() {
+    for malformed in [bare_id_claim(), multiple_entry_claim()] {
+        let server = ScriptedRedis::start(vec![
+            Step::reply("XGROUP", b"+OK\r\n"),
+            Step::reply("XAUTOCLAIM", b"*2\r\n$3\r\n5-0\r\n*0\r\n"),
+            Step::reply("XREADGROUP", b"*0\r\n"),
+            Step::reply("XREADGROUP", b"*0\r\n"),
+            Step::reply("XAUTOCLAIM", &malformed),
+            Step::reply("XAUTOCLAIM", &claimed_record(false)),
+            Step::reply("XPENDING", TRUSTED_PENDING_ROW),
+        ])
+        .expect("start RESP endpoint");
+        let bus = sync_bus(&server);
+        let mut subscription = bus.subscribe(request()).expect("group creation succeeds");
+        assert!(matches!(
+            subscription.receive(Duration::ZERO),
+            Ok(ReceiveOutcome::TimedOut)
+        ));
+        let error = match subscription.receive(Duration::ZERO) {
+            Err(error) => error,
+            Ok(ReceiveOutcome::Message(_)) => panic!("malformed claim must not return a message"),
+            Ok(ReceiveOutcome::Gap(_)) => panic!("malformed claim must not return a gap"),
+            Ok(ReceiveOutcome::TimedOut) => panic!("malformed claim must return an error"),
+            Ok(_) => panic!("malformed claim must not return another outcome"),
+        };
+        assert_failure(error, "receive", "outcome_unknown", Some(true));
+        let ReceiveOutcome::Message(message) = subscription.receive(Duration::ZERO).expect("healthy retry") else {
+            panic!("healthy claimed record must be delivered");
+        };
+        assert_eq!(message.id().as_str(), "claimed-event");
+        let commands = server.finish();
+        let claims: Vec<_> = commands.iter().filter(|command| command[0] == "XAUTOCLAIM").collect();
+        assert_eq!(claims.len(), 3);
+        assert_eq!(claims[0][5], "0-0");
+        assert_eq!(claims[1][5], "5-0");
+        assert_eq!(claims[2][5], "5-0");
+        assert!(
+            !commands
+                .iter()
+                .any(|command| command[0] == "XACK" || command[0] == "EVAL")
+        );
+    }
+}
+
 #[cfg(feature = "async")]
 #[test]
 fn test_async_invalid_claim_cursor_does_not_replace_last_valid_cursor() {
@@ -624,6 +670,55 @@ fn test_async_invalid_claim_cursor_does_not_replace_last_valid_cursor() {
                 .iter()
                 .any(|command| command[0] == "XACK" || command[0] == "EVAL")
         );
+    });
+}
+
+#[cfg(feature = "async")]
+#[test]
+fn test_async_invalid_claim_shape_preserves_cursor_and_subscription() {
+    block_on(async {
+        for malformed in [bare_id_claim(), multiple_entry_claim()] {
+            let server = ScriptedRedis::start(vec![
+                Step::reply("XGROUP", b"+OK\r\n"),
+                Step::reply("XAUTOCLAIM", b"*2\r\n$3\r\n5-0\r\n*0\r\n"),
+                Step::reply("XREADGROUP", b"*0\r\n"),
+                Step::reply("XREADGROUP", b"*0\r\n"),
+                Step::reply("XAUTOCLAIM", &malformed),
+                Step::reply("XAUTOCLAIM", &claimed_record(false)),
+                Step::reply("XPENDING", TRUSTED_PENDING_ROW),
+            ])
+            .expect("start RESP endpoint");
+            let bus = async_bus(&server).await;
+            let mut subscription = bus.subscribe(request()).await.expect("group creation succeeds");
+            assert!(matches!(
+                subscription.receive(Duration::ZERO).await,
+                Ok(ReceiveOutcome::TimedOut)
+            ));
+            let error = match subscription.receive(Duration::ZERO).await {
+                Err(error) => error,
+                Ok(ReceiveOutcome::Message(_)) => panic!("malformed claim must not return a message"),
+                Ok(ReceiveOutcome::Gap(_)) => panic!("malformed claim must not return a gap"),
+                Ok(ReceiveOutcome::TimedOut) => panic!("malformed claim must return an error"),
+                Ok(_) => panic!("malformed claim must not return another outcome"),
+            };
+            assert_failure(error, "receive", "outcome_unknown", Some(true));
+            let ReceiveOutcome::Message(message) = subscription.receive(Duration::ZERO).await.expect("healthy retry")
+            else {
+                panic!("healthy claimed record must be delivered");
+            };
+            assert_eq!(message.id().as_str(), "claimed-event");
+            let commands = server.finish();
+            let claims: Vec<_> = commands.iter().filter(|command| command[0] == "XAUTOCLAIM").collect();
+            assert_eq!(claims.len(), 3);
+            assert_eq!(claims[0][5], "0-0");
+            assert_eq!(claims[1][5], "5-0");
+            assert_eq!(claims[2][5], "5-0");
+            assert!(
+                !commands
+                    .iter()
+                    .any(|command| command[0] == "XACK" || command[0] == "EVAL")
+            );
+        }
     });
 }
 
@@ -819,6 +914,15 @@ fn claimed_record(with_deleted_entry: bool) -> Vec<u8> {
         parts.push(resp_array(&[resp_bulk(b"2-0")]));
     }
     resp_array(&parts)
+}
+
+fn bare_id_claim() -> Vec<u8> {
+    resp_array(&[resp_bulk(b"8-0"), resp_array(&[resp_bulk(b"1-0")])])
+}
+
+fn multiple_entry_claim() -> Vec<u8> {
+    let entry = |id: &[u8]| resp_array(&[resp_bulk(id), resp_array(&[])]);
+    resp_array(&[resp_bulk(b"8-0"), resp_array(&[entry(b"1-0"), entry(b"2-0")])])
 }
 
 fn claimed_malformed_record() -> Vec<u8> {
