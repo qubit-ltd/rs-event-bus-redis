@@ -1,18 +1,20 @@
+// =============================================================================
+//    Copyright (c) 2026 Haixing Hu.
+//
+//    SPDX-License-Identifier: Apache-2.0
+//
+//    Licensed under the Apache License, Version 2.0.
+// =============================================================================
 //! Correctness checks and an explicitly ignored Sentinel cost matrix.
 
-mod sentinel_cost;
+#![cfg(all(feature = "sync", feature = "async"))]
 
-#[path = "../benches/support/mod.rs"]
-#[allow(dead_code, unused_imports)]
-mod bench_support;
-
-#[path = "support/tls_sentinel.rs"]
-#[allow(dead_code)]
-mod tls_support;
+mod support;
 
 #[test]
 fn test_cost_statistics_retain_failures_and_unknown_outcomes() {
-    use sentinel_cost::measurement::{Sample, summarize};
+    use support::sentinel_cost::measurement::Sample;
+    use support::sentinel_cost::measurement::summarize;
 
     let report = summarize(&[
         Sample {
@@ -38,7 +40,8 @@ fn test_cost_statistics_retain_failures_and_unknown_outcomes() {
 
 #[test]
 fn test_cost_statistics_have_no_percentiles_without_success() {
-    use sentinel_cost::measurement::{Sample, summarize};
+    use support::sentinel_cost::measurement::Sample;
+    use support::sentinel_cost::measurement::summarize;
     let report = summarize(&[Sample {
         nanos: 7,
         outcome: "receive:timeout".into(),
@@ -50,7 +53,7 @@ fn test_cost_statistics_have_no_percentiles_without_success() {
 
 #[test]
 fn test_cost_connection_snapshot_delta_is_saturating() {
-    use sentinel_cost::measurement::ConnectionSnapshot;
+    use support::sentinel_cost::measurement::ConnectionSnapshot;
     assert_eq!(
         ConnectionSnapshot {
             master: 12,
@@ -60,10 +63,7 @@ fn test_cost_connection_snapshot_delta_is_saturating() {
             master: 17,
             sentinel: 9
         }),
-        ConnectionSnapshot {
-            master: 5,
-            sentinel: 5
-        }
+        ConnectionSnapshot { master: 5, sentinel: 5 }
     );
     assert_eq!(
         ConnectionSnapshot {
@@ -74,15 +74,12 @@ fn test_cost_connection_snapshot_delta_is_saturating() {
             master: 12,
             sentinel: 4
         }),
-        ConnectionSnapshot {
-            master: 0,
-            sentinel: 0
-        }
+        ConnectionSnapshot { master: 0, sentinel: 0 }
     );
 }
 
 #[test]
 #[ignore = "starts isolated Redis/Sentinel services and runs the full cost matrix"]
 fn test_sentinel_cost_matrix() -> Result<(), Box<dyn std::error::Error>> {
-    sentinel_cost::workload::run_matrix()
+    support::sentinel_cost::workload::run_matrix()
 }

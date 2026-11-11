@@ -26,10 +26,7 @@ fn test_parse_auto_claim_moves_wire_buffer_without_clone() {
         Value::BulkString(b"0-0".to_vec()),
         Value::Array(vec![Value::Array(vec![
             Value::BulkString(b"1-0".to_vec()),
-            Value::Array(vec![
-                Value::BulkString(b"wire".to_vec()),
-                Value::BulkString(wire),
-            ]),
+            Value::Array(vec![Value::BulkString(b"wire".to_vec()), Value::BulkString(wire)]),
         ])]),
         Value::Array(Vec::new()),
     ]);
@@ -58,29 +55,18 @@ fn test_parse_read_group_moves_resp2_and_resp3_wire_buffers() {
         let allocation = wire.as_ptr();
         let capacity = wire.capacity();
         let fields = if resp3 {
-            Value::Map(vec![(
-                Value::BulkString(b"wire".to_vec()),
-                Value::BulkString(wire),
-            )])
+            Value::Map(vec![(Value::BulkString(b"wire".to_vec()), Value::BulkString(wire))])
         } else {
-            Value::Array(vec![
-                Value::BulkString(b"wire".to_vec()),
-                Value::BulkString(wire),
-            ])
+            Value::Array(vec![Value::BulkString(b"wire".to_vec()), Value::BulkString(wire)])
         };
-        let rows = Value::Array(vec![Value::Array(vec![
-            Value::BulkString(b"1-0".to_vec()),
-            fields,
-        ])]);
+        let rows = Value::Array(vec![Value::Array(vec![Value::BulkString(b"1-0".to_vec()), fields])]);
         let key = Value::BulkString(b"events".to_vec());
         let reply = if resp3 {
             Value::Map(vec![(key, rows)])
         } else {
             Value::Array(vec![Value::Array(vec![key, rows])])
         };
-        let parsed = parse_read_group(reply)
-            .expect("supported RESP reply")
-            .expect("entries");
+        let parsed = parse_read_group(reply).expect("supported RESP reply").expect("entries");
         assert_eq!(parsed.keys[0].key, "events");
         let Value::BulkString(wire) = parsed.keys[0].ids[0].map.get("wire").expect("wire") else {
             panic!("bulk wire");
@@ -97,17 +83,9 @@ fn test_parse_single_read_group_validates_request_association() {
         Value::BulkString(b"events".to_vec()),
         Value::Array(Vec::new()),
     ])]);
-    assert!(
-        parse_single_read_group(Value::Nil, "events")
-            .unwrap()
-            .is_none()
-    );
+    assert!(parse_single_read_group(Value::Nil, "events").unwrap().is_none());
     assert!(parse_single_read_group(empty, "events").unwrap().is_none());
-    assert!(
-        parse_single_read_group(one_empty, "events")
-            .unwrap()
-            .is_none()
-    );
+    assert!(parse_single_read_group(one_empty, "events").unwrap().is_none());
 
     let entry = Value::Array(vec![Value::Array(vec![
         Value::BulkString(b"1-0".to_vec()),
@@ -120,39 +98,21 @@ fn test_parse_single_read_group_validates_request_association() {
         Value::BulkString(b"events".to_vec()),
         entry.clone(),
     ])]);
-    assert_eq!(
-        parse_single_read_group(valid, "events")
-            .unwrap()
-            .unwrap()
-            .id,
-        "1-0"
-    );
+    assert_eq!(parse_single_read_group(valid, "events").unwrap().unwrap().id, "1-0");
 
     let wrong_key_empty = Value::Array(vec![Value::Array(vec![
         Value::BulkString(b"other".to_vec()),
         Value::Array(Vec::new()),
     ])]);
     let two_streams = Value::Array(vec![
-        Value::Array(vec![
-            Value::BulkString(b"events".to_vec()),
-            Value::Array(Vec::new()),
-        ]),
-        Value::Array(vec![
-            Value::BulkString(b"other".to_vec()),
-            Value::Array(Vec::new()),
-        ]),
+        Value::Array(vec![Value::BulkString(b"events".to_vec()), Value::Array(Vec::new())]),
+        Value::Array(vec![Value::BulkString(b"other".to_vec()), Value::Array(Vec::new())]),
     ]);
     let two_entries = Value::Array(vec![Value::Array(vec![
         Value::BulkString(b"events".to_vec()),
         Value::Array(vec![
-            Value::Array(vec![
-                Value::BulkString(b"1-0".to_vec()),
-                Value::Array(Vec::new()),
-            ]),
-            Value::Array(vec![
-                Value::BulkString(b"2-0".to_vec()),
-                Value::Array(Vec::new()),
-            ]),
+            Value::Array(vec![Value::BulkString(b"1-0".to_vec()), Value::Array(Vec::new())]),
+            Value::Array(vec![Value::BulkString(b"2-0".to_vec()), Value::Array(Vec::new())]),
         ]),
     ])]);
     for invalid in [wrong_key_empty, two_streams, two_entries] {
@@ -162,24 +122,12 @@ fn test_parse_single_read_group_validates_request_association() {
 
 #[test]
 fn test_parse_single_read_group_rejects_unassociated_resp3_maps() {
-    let wrong_key = Value::Map(vec![(
-        Value::BulkString(b"other".to_vec()),
-        Value::Array(Vec::new()),
-    )]);
+    let wrong_key = Value::Map(vec![(Value::BulkString(b"other".to_vec()), Value::Array(Vec::new()))]);
     let multiple_streams = Value::Map(vec![
-        (
-            Value::BulkString(b"events".to_vec()),
-            Value::Array(Vec::new()),
-        ),
-        (
-            Value::BulkString(b"other".to_vec()),
-            Value::Array(Vec::new()),
-        ),
+        (Value::BulkString(b"events".to_vec()), Value::Array(Vec::new())),
+        (Value::BulkString(b"other".to_vec()), Value::Array(Vec::new())),
     ]);
-    let row = Value::Array(vec![
-        Value::BulkString(b"1-0".to_vec()),
-        Value::Map(Vec::new()),
-    ]);
+    let row = Value::Array(vec![Value::BulkString(b"1-0".to_vec()), Value::Map(Vec::new())]);
     let multiple_entries = Value::Map(vec![(
         Value::BulkString(b"events".to_vec()),
         Value::Array(vec![row.clone(), row]),
@@ -198,10 +146,7 @@ fn test_parse_range_moves_wire_and_keeps_pending_tombstones() {
     let rows = Value::Array(vec![
         Value::Array(vec![
             Value::BulkString(b"1-0".to_vec()),
-            Value::Array(vec![
-                Value::BulkString(b"wire".to_vec()),
-                Value::BulkString(wire),
-            ]),
+            Value::Array(vec![Value::BulkString(b"wire".to_vec()), Value::BulkString(wire)]),
         ]),
         Value::Array(vec![Value::BulkString(b"2-0".to_vec()), Value::Nil]),
     ]);
@@ -286,12 +231,7 @@ fn test_trusted_attempt_requires_matching_id_owner_and_positive_count() {
     assert_eq!(trusted_attempt(&overflow, "1-0", "worker-a"), None);
 }
 
-fn entry_with_count(
-    id: &str,
-    owner: &str,
-    idle_ms: u64,
-    times_delivered: u64,
-) -> crate::stream_protocol::PendingEntry {
+fn entry_with_count(id: &str, owner: &str, idle_ms: u64, times_delivered: u64) -> crate::stream_protocol::PendingEntry {
     crate::stream_protocol::PendingEntry {
         id: id.to_owned(),
         owner: owner.to_owned(),
@@ -308,15 +248,7 @@ fn test_parse_auto_claim_and_pending_entries_reject_invalid_replies() {
 
 #[test]
 fn test_parse_auto_claim_validates_cursor_and_returned_ids() {
-    for invalid_id in [
-        "bad",
-        "",
-        "1",
-        "-1",
-        "1-",
-        "1-2-3",
-        "18446744073709551616-0",
-    ] {
+    for invalid_id in ["bad", "", "1", "-1", "1-", "1-2-3", "18446744073709551616-0"] {
         let reply = Value::Array(vec![
             Value::BulkString(invalid_id.as_bytes().to_vec()),
             Value::Array(vec![]),
@@ -356,10 +288,7 @@ fn test_parse_auto_claim_validates_cursor_and_returned_ids() {
         Value::Array(vec![Value::BulkString(b"01-002".to_vec())]),
     ]))
     .expect("valid maximum and leading-zero IDs");
-    assert_eq!(
-        reply.next_stream_id,
-        String::from_utf8(maximum.clone()).unwrap()
-    );
+    assert_eq!(reply.next_stream_id, String::from_utf8(maximum.clone()).unwrap());
     assert_eq!(reply.claimed[0].id, String::from_utf8(maximum).unwrap());
     assert_eq!(reply.deleted_ids, vec!["01-002"]);
 }

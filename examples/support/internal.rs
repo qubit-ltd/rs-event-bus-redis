@@ -13,11 +13,7 @@ use qubit_event_bus::model::ProviderOptions;
 /// `sentinel` adds nodes/service for `Some`, and uses standalone mode for
 /// `None`.
 #[must_use]
-pub(crate) fn provider_options(
-    redis_url: &str,
-    namespace: &str,
-    sentinel: Option<(&str, &str)>,
-) -> ProviderOptions {
+pub(crate) fn provider_options(redis_url: &str, namespace: &str, sentinel: Option<(&str, &str)>) -> ProviderOptions {
     let mut entries = vec![
         ("redis.url".into(), redis_url.into()),
         ("redis.namespace".into(), namespace.into()),

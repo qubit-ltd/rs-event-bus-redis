@@ -59,9 +59,7 @@ fn test_readiness_blackhole_is_bounded() -> Result<(), Box<dyn Error>> {
                 Err(error) => panic!("accept failed: {error}"),
             }
         };
-        stream
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
         let mut request = [0_u8; 14];
         stream.read_exact(&mut request).unwrap();
         accepted_tx.send(()).unwrap();
@@ -133,9 +131,7 @@ fn readiness_endpoint(reply: &'static [u8]) -> Result<ReadinessEndpoint, Box<dyn
         };
         use std::io::Read;
         use std::io::Write;
-        stream
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
         let mut request = [0_u8; 14];
         stream.read_exact(&mut request).unwrap();
         requests_tx.send(()).unwrap();
@@ -166,11 +162,7 @@ fn test_child_process_entrypoint() {
             }
         }
         Ok("mark") => {
-            std::fs::write(
-                std::env::var_os("QUBIT_FIXTURE_MARKER").unwrap(),
-                b"spawned",
-            )
-            .unwrap();
+            std::fs::write(std::env::var_os("QUBIT_FIXTURE_MARKER").unwrap(), b"spawned").unwrap();
         }
         Ok("grandchild") => {
             let mut command = Command::new(std::env::current_exe().unwrap());
@@ -233,8 +225,7 @@ fn test_returns_success_stdout_and_logs_both_streams() -> Result<(), Box<dyn Err
 fn test_nonzero_exit_returns_error_with_stderr_in_log() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let log = temp.path().join("failure.log");
-    let error =
-        run_logged(&mut child_command("failure"), &log, Duration::from_secs(5)).unwrap_err();
+    let error = run_logged(&mut child_command("failure"), &log, Duration::from_secs(5)).unwrap_err();
     assert!(error.to_string().contains("17"));
     assert!(std::fs::read_to_string(log)?.contains("child failure marker"));
     Ok(())
@@ -249,9 +240,7 @@ fn test_hanging_process_times_out_and_is_reaped() -> Result<(), Box<dyn Error>> 
     let error = run_logged(&mut child_command("hang"), &log, Duration::from_secs(5)).unwrap_err();
     assert!(error.to_string().contains("timed out"));
     assert!(started.elapsed() < Duration::from_secs(15));
-    assert!(
-        std::fs::read_to_string(temp.path().join("hang.log.stdout.log"))?.contains("child ready")
-    );
+    assert!(std::fs::read_to_string(temp.path().join("hang.log.stdout.log"))?.contains("child ready"));
     Ok(())
 }
 
@@ -262,12 +251,7 @@ fn test_maximum_timeout_returns_error_without_spawning() -> Result<(), Box<dyn E
     let marker = temp.path().join("spawned");
     let mut command = child_command("mark");
     command.env("QUBIT_FIXTURE_MARKER", &marker);
-    let error = run_logged(
-        &mut command,
-        &temp.path().join("overflow.log"),
-        Duration::MAX,
-    )
-    .unwrap_err();
+    let error = run_logged(&mut command, &temp.path().join("overflow.log"), Duration::MAX).unwrap_err();
     assert!(error.to_string().contains("deadline"));
     assert!(!marker.exists(), "overflowing timeout spawned the command");
     Ok(())
@@ -309,9 +293,7 @@ fn test_poll_error_reaps_running_child_and_logs_its_path() -> Result<(), Box<dyn
         |child| {
             let until = Instant::now() + Duration::from_secs(10);
             while Instant::now() < until {
-                if std::fs::read_to_string(&stdout_log)
-                    .is_ok_and(|text| text.contains("child ready"))
-                {
+                if std::fs::read_to_string(&stdout_log).is_ok_and(|text| text.contains("child ready")) {
                     assert!(child.try_wait()?.is_none());
                     return Err(std::io::Error::other("injected poll failure"));
                 }
@@ -327,10 +309,7 @@ fn test_poll_error_reaps_running_child_and_logs_its_path() -> Result<(), Box<dyn
     let output = std::fs::read_to_string(&stdout_log)?;
     assert!(output.contains("child ready"));
     let child_pid = recorded_pid(&output, "child pid=", "child pid was not recorded")?;
-    assert!(
-        !process_is_live(child_pid),
-        "poll-error child {child_pid} survived"
-    );
+    assert!(!process_is_live(child_pid), "poll-error child {child_pid} survived");
     Ok(())
 }
 
@@ -340,12 +319,7 @@ fn test_timeout_reclaims_child_process_group() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let log = temp.path().join("tree.log");
     let started = Instant::now();
-    let error = run_logged(
-        &mut child_command("grandchild"),
-        &log,
-        Duration::from_secs(5),
-    )
-    .unwrap_err();
+    let error = run_logged(&mut child_command("grandchild"), &log, Duration::from_secs(5)).unwrap_err();
     assert!(started.elapsed() < Duration::from_secs(15));
     assert!(error.to_string().contains("timed out"));
     // The watchdog owns the command's process group. The live grandchild must
@@ -358,10 +332,7 @@ fn test_timeout_reclaims_child_process_group() -> Result<(), Box<dyn Error>> {
         }
         thread::sleep(Duration::from_millis(20));
     }
-    assert!(
-        !process_is_live(pid),
-        "grandchild {pid} survived watchdog cleanup"
-    );
+    assert!(!process_is_live(pid), "grandchild {pid} survived watchdog cleanup");
     Ok(())
 }
 
@@ -370,16 +341,8 @@ fn test_timeout_reclaims_child_process_group() -> Result<(), Box<dyn Error>> {
 fn test_successful_leader_reclaims_its_process_group() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let log = temp.path().join("leader-success.log");
-    let output = run_logged(
-        &mut child_command("grandchild-success"),
-        &log,
-        Duration::from_secs(5),
-    )?;
-    let pid = recorded_pid(
-        &output,
-        "grandchild pid=",
-        "grandchild pid was not recorded",
-    )?;
+    let output = run_logged(&mut child_command("grandchild-success"), &log, Duration::from_secs(5))?;
+    let pid = recorded_pid(&output, "grandchild pid=", "grandchild pid was not recorded")?;
     assert_process_stops(pid);
     Ok(())
 }
@@ -389,19 +352,10 @@ fn test_successful_leader_reclaims_its_process_group() -> Result<(), Box<dyn Err
 fn test_failing_leader_reclaims_its_process_group() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let log = temp.path().join("leader-failure.log");
-    let error = run_logged(
-        &mut child_command("grandchild-failure"),
-        &log,
-        Duration::from_secs(5),
-    )
-    .unwrap_err();
+    let error = run_logged(&mut child_command("grandchild-failure"), &log, Duration::from_secs(5)).unwrap_err();
     assert!(error.to_string().contains("17"));
     let output = std::fs::read_to_string(temp.path().join("leader-failure.log.stdout.log"))?;
-    let pid = recorded_pid(
-        &output,
-        "grandchild pid=",
-        "grandchild pid was not recorded",
-    )?;
+    let pid = recorded_pid(&output, "grandchild pid=", "grandchild pid was not recorded")?;
     assert_process_stops(pid);
     Ok(())
 }
@@ -414,10 +368,7 @@ fn assert_process_stops(pid: i32) {
         }
         thread::sleep(Duration::from_millis(20));
     }
-    assert!(
-        !process_is_live(pid),
-        "grandchild {pid} survived group cleanup"
-    );
+    assert!(!process_is_live(pid), "grandchild {pid} survived group cleanup");
 }
 
 #[cfg(target_os = "linux")]
@@ -437,12 +388,7 @@ fn test_timeout_kills_only_its_own_process_group() -> Result<(), Box<dyn Error>>
     wait_for_marker(&unrelated_stdout, "child ready", Duration::from_secs(15))?;
     let log = temp.path().join("isolated-tree.log");
     let started = Instant::now();
-    let error = run_logged(
-        &mut child_command("grandchild"),
-        &log,
-        Duration::from_secs(5),
-    )
-    .unwrap_err();
+    let error = run_logged(&mut child_command("grandchild"), &log, Duration::from_secs(5)).unwrap_err();
     assert!(started.elapsed() < Duration::from_secs(15));
     let unrelated_text = std::fs::read_to_string(&unrelated_stdout)?;
     assert!(
@@ -450,10 +396,7 @@ fn test_timeout_kills_only_its_own_process_group() -> Result<(), Box<dyn Error>>
         "unrelated child did not report its pid"
     );
     assert!(error.to_string().contains("timed out"));
-    assert!(
-        process_is_live(unrelated_pid),
-        "unrelated process was killed"
-    );
+    assert!(process_is_live(unrelated_pid), "unrelated process was killed");
 
     let text = std::fs::read_to_string(temp.path().join("isolated-tree.log.stdout.log"))?;
     let own_pid = recorded_pid(&text, "grandchild pid=", "grandchild pid was not recorded")?;
@@ -468,10 +411,7 @@ fn test_timeout_kills_only_its_own_process_group() -> Result<(), Box<dyn Error>>
         }
         thread::sleep(Duration::from_millis(20));
     }
-    assert!(
-        !process_is_live(own_pid),
-        "owned grandchild {own_pid} survived"
-    );
+    assert!(!process_is_live(own_pid), "owned grandchild {own_pid} survived");
     guard.terminate_and_wait()?;
     assert!(!process_is_live(unrelated_pid));
     Ok(())

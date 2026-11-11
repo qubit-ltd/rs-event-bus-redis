@@ -88,11 +88,7 @@ fn rust_blocks(path: &Path) -> Result<Vec<MarkdownBlock>, Box<dyn Error>> {
             blocks.push(MarkdownBlock { tag, code });
         }
     }
-    assert!(
-        marker.is_none(),
-        "{} has a trailing unused marker",
-        path.display()
-    );
+    assert!(marker.is_none(), "{} has a trailing unused marker", path.display());
     Ok(blocks)
 }
 
@@ -216,9 +212,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {{
                 1,
                 "manual instructions must name one discovery call"
             );
-            let main = main
-                .replace(&import, "")
-                .replace(&creation, "order_registry()?");
+            let main = main.replace(&import, "").replace(&creation, "order_registry()?");
             format!("{codec}\n{}\n{main}", code(blocks, tag))
         }
         _ => panic!("undocumented assembly for block {tag}"),
@@ -232,11 +226,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {{
 /// briefly sleeps while waiting. Spawn/log/kill errors or watchdog expiry
 /// return an error; a nonzero subprocess status panics with both logs. On
 /// expiry it kills and waits for its owned child before returning.
-fn run_command(
-    command: &mut Command,
-    log: &Path,
-    timeout: Duration,
-) -> Result<String, Box<dyn Error>> {
+fn run_command(command: &mut Command, log: &Path, timeout: Duration) -> Result<String, Box<dyn Error>> {
     let stdout_path = log.with_extension("stdout.log");
     let stderr_path = log.with_extension("stderr.log");
     command.stdout(Stdio::from(File::create(&stdout_path)?));
@@ -289,15 +279,52 @@ fn manifest(root: &Path, tag: &str) -> String {
     let provider_path = to_string(&root.to_string_lossy()).expect("path string serializes");
     let facade_root = std::env::var_os("QUBIT_EVENT_BUS_PATH")
         .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            root.parent()
-                .expect("sibling facade parent")
-                .join("rs-event-bus")
-        });
-    let facade_path = to_string(&facade_root.to_string_lossy()).expect("path string serializes");
+        .unwrap_or_else(|| root.parent().expect("sibling facade parent").join("rs-event-bus"));
+    let (facade_dependency, facade_patch) = if core_supports_021(&facade_root)
+        .expect("local core manifest must be readable")
+    {
+        let facade_path = to_string(&facade_root.to_string_lossy()).expect("path string serializes");
+        (
+            format!(
+                "qubit-event-bus = {{ version = \"^0.21\", path = {facade_path}, default-features = false, features = {facade_features} }}"
+            ),
+            format!("\n[patch.crates-io]\nqubit-event-bus = {{ path = {facade_path} }}\n"),
+        )
+    } else {
+        (
+            format!(
+                "qubit-event-bus = {{ version = \"^0.21\", default-features = false, features = {facade_features} }}"
+            ),
+            String::new(),
+        )
+    };
     format!(
-        "[package]\nname = \"markdown-consumer\"\nversion = \"0.0.0\"\nedition = \"2024\"\npublish = false\n\n[workspace]\n\n[dependencies]\nqubit-event-bus-redis = {{ path = {provider_path}, default-features = false, features = {provider_features} }}\nqubit-event-bus = {{ path = {facade_path}, default-features = false, features = {facade_features} }}\nqubit-spi = \"0.14\"\nfutures-lite = \"2\"\nfutures-channel = \"0.3\"\n\n[patch.crates-io]\nqubit-event-bus = {{ path = {facade_path} }}\n"
+        "[package]\nname = \"markdown-consumer\"\nversion = \"0.0.0\"\nedition = \"2024\"\npublish = false\n\n[workspace]\n\n[dependencies]\nqubit-event-bus-redis = {{ path = {provider_path}, default-features = false, features = {provider_features} }}\n{facade_dependency}\nqubit-spi = \"0.14\"\nfutures-lite = \"2\"\nfutures-channel = \"0.3\"{facade_patch}"
     )
+}
+
+/// Returns whether a local core checkout can satisfy the documented ^0.21
+/// requirement.
+fn core_supports_021(core_root: &Path) -> Result<bool, Box<dyn Error>> {
+    let manifest = fs::read_to_string(core_root.join("Cargo.toml"))?;
+    let package = manifest
+        .split_once("[package]")
+        .ok_or("core manifest has no package section")?
+        .1;
+    let version = package
+        .lines()
+        .find(|line| line.trim_start().starts_with("version ="))
+        .and_then(|line| line.split_once('"')?.1.split_once('"').map(|(version, _)| version))
+        .ok_or("core manifest package version is missing")?;
+    if version.contains('-') {
+        return Ok(false);
+    }
+    let numbers = version
+        .split('.')
+        .take(2)
+        .map(str::parse::<u64>)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(numbers.as_slice() == [0, 21])
 }
 
 /// Builds an isolated consumer from the README's real marked TOML block.
@@ -319,12 +346,15 @@ fn source_install_manifest(root: &Path, core_root: &Path) -> Result<String, Box<
         .0;
     let provider_path = to_string(&root.to_string_lossy())?;
     let core_path = to_string(&core_root.to_string_lossy())?;
-    let relocated = toml
-        .replace(
-            "path = \"../rs-event-bus-redis\"",
-            &format!("path = {provider_path}"),
-        )
-        .replace("path = \"../rs-event-bus\"", &format!("path = {core_path}"));
+    let mut relocated = toml.replace("path = \"../rs-event-bus-redis\"", &format!("path = {provider_path}"));
+    if core_supports_021(core_root)? {
+        relocated = relocated.replace("path = \"../rs-event-bus\"", &format!("path = {core_path}"));
+    } else {
+        relocated = relocated.replace(", path = \"../rs-event-bus\"", "").replace(
+            "\n[patch.crates-io]\nqubit-event-bus = { path = \"../rs-event-bus\" }",
+            "",
+        );
+    }
     Ok(format!(
         "[package]\nname = \"source-install-consumer\"\nversion = \"0.0.0\"\nedition = \"2024\"\npublish = false\n\n[workspace]\n\n{relocated}\n"
     ))
@@ -344,29 +374,16 @@ fn core_path_from<'section>(section: &'section str, prefix: &str) -> Option<&'se
     section
         .lines()
         .find(|line| line.trim_start().starts_with(prefix))
-        .and_then(|line| {
-            line.split_once("path = \"")?
-                .1
-                .split_once('"')
-                .map(|(path, _)| path)
-        })
+        .and_then(|line| line.split_once("path = \"")?.1.split_once('"').map(|(path, _)| path))
 }
 
 /// Seeds one same-payload legacy event into the README consumer group's PEL.
 ///
 /// The old consumer first receives the event normally; XCLAIM's IDLE option
 /// makes it immediately eligible for the README provider's recovery scan.
-fn seed_old_pending(
-    connection: &mut redis::Connection,
-    namespace: &str,
-) -> Result<(), Box<dyn Error>> {
+fn seed_old_pending(connection: &mut redis::Connection, namespace: &str) -> Result<(), Box<dyn Error>> {
     let stream = stream_key(namespace, "orders.created");
-    let group = group_name(
-        namespace,
-        "orders.created",
-        "billing-worker",
-        Some("billing"),
-    );
+    let group = group_name(namespace, "orders.created", "billing-worker", Some("billing"));
     let old = WireFields::from_outbound(&OutboundMessage::new(
         TopicAddress::new("orders.created")?,
         EventId::new("legacy-order-42")?,
@@ -402,11 +419,7 @@ fn seed_old_pending(
         .arg(">")
         .query(connection)?;
     assert_eq!(
-        received.map(|reply| reply
-            .keys
-            .into_iter()
-            .map(|key| key.ids.len())
-            .sum::<usize>()),
+        received.map(|reply| reply.keys.into_iter().map(|key| key.ids.len()).sum::<usize>()),
         Some(1),
         "old README event must enter the PEL before the program starts"
     );
@@ -430,27 +443,25 @@ fn test_source_install_manifest_has_one_core_identity() -> Result<(), Box<dyn Er
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let core_root = std::env::var_os("QUBIT_EVENT_BUS_PATH")
         .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            root.parent()
-                .expect("sibling facade parent")
-                .join("rs-event-bus")
-        });
+        .unwrap_or_else(|| root.parent().expect("sibling facade parent").join("rs-event-bus"));
     let temp = TempDir::new()?;
     let project = temp.path();
     let install_manifest = source_install_manifest(&root, &core_root)?;
-    assert!(source_install_has_matching_core_patch(&install_manifest));
-    let missing_patch = install_manifest.replacen("[patch.crates-io]", "[removed.patch]", 1);
-    assert!(
-        !source_install_has_matching_core_patch(&missing_patch),
-        "a source install without the root core patch must fail before Cargo runs"
-    );
+    if core_supports_021(&core_root)? {
+        assert!(source_install_has_matching_core_patch(&install_manifest));
+        let missing_patch = install_manifest.replacen("[patch.crates-io]", "[removed.patch]", 1);
+        assert!(
+            !source_install_has_matching_core_patch(&missing_patch),
+            "a source install without the root core patch must fail before Cargo runs"
+        );
+    } else {
+        assert!(!install_manifest.contains("../rs-event-bus"));
+        assert!(!install_manifest.contains("[patch.crates-io]"));
+    }
     fs::write(project.join("Cargo.toml"), install_manifest)?;
     fs::create_dir(project.join("src"))?;
     let readme = rust_blocks(&root.join("README.md"))?;
-    fs::write(
-        project.join("src/main.rs"),
-        code(&readme, "readme-sync-discovery"),
-    )?;
+    fs::write(project.join("src/main.rs"), code(&readme, "readme-sync-discovery"))?;
 
     let target = std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
@@ -459,31 +470,19 @@ fn test_source_install_manifest_has_one_core_identity() -> Result<(), Box<dyn Er
     fs::create_dir_all(log.parent().expect("metadata log parent"))?;
     let metadata = run_command(
         Command::new("cargo")
-            .args([
-                "+1.94.0",
-                "metadata",
-                "--format-version",
-                "1",
-                "--manifest-path",
-            ])
+            .args(["+1.94.0", "metadata", "--format-version", "1", "--manifest-path"])
             .arg(project.join("Cargo.toml")),
         &log,
         Duration::from_secs(120),
     )?;
     let metadata: serde_json::Value = serde_json::from_str(&metadata)?;
-    let packages = metadata["packages"]
-        .as_array()
-        .ok_or("metadata packages missing")?;
+    let packages = metadata["packages"].as_array().ok_or("metadata packages missing")?;
     let core_ids: Vec<_> = packages
         .iter()
         .filter(|package| package["name"] == "qubit-event-bus")
         .filter_map(|package| package["id"].as_str())
         .collect();
-    assert_eq!(
-        core_ids.len(),
-        1,
-        "metadata must contain one core package identity"
-    );
+    assert_eq!(core_ids.len(), 1, "metadata must contain one core package identity");
     let nodes = metadata["resolve"]["nodes"]
         .as_array()
         .ok_or("metadata resolve graph missing")?;
@@ -502,14 +501,8 @@ fn test_source_install_manifest_has_one_core_identity() -> Result<(), Box<dyn Er
             .and_then(|node| node["deps"].as_array())
             .is_some_and(|deps| deps.iter().any(|dep| dep["pkg"] == core_ids[0]))
     };
-    assert!(
-        depends_on_core(consumer_id),
-        "consumer must resolve the shared core"
-    );
-    assert!(
-        depends_on_core(provider_id),
-        "provider must resolve the shared core"
-    );
+    assert!(depends_on_core(consumer_id), "consumer must resolve the shared core");
+    assert!(depends_on_core(provider_id), "provider must resolve the shared core");
 
     let build_log = target.join("markdown-documentation/source-install-build");
     let mut build = Command::new("cargo");
@@ -626,10 +619,7 @@ fn test_markdown_fragments_and_programs_publish_settle_and_close() -> Result<(),
                 &evidence.join(format!("{id}-lock")),
                 Duration::from_secs(180),
             )?;
-            fs::copy(
-                project.path().join("Cargo.lock"),
-                evidence.join(format!("{id}.lock")),
-            )?;
+            fs::copy(project.path().join("Cargo.lock"), evidence.join(format!("{id}.lock")))?;
             run_command(
                 Command::new("cargo")
                     .args(["fetch", "--locked", "--manifest-path"])
@@ -673,9 +663,7 @@ fn test_markdown_fragments_and_programs_publish_settle_and_close() -> Result<(),
                 Duration::from_secs(300),
             )?;
             let namespace = format!("markdown-{id}");
-            let binary = target
-                .join("debug")
-                .join(format!("markdown-consumer{}", EXE_SUFFIX));
+            let binary = target.join("debug").join(format!("markdown-consumer{}", EXE_SUFFIX));
             let output = run_command(
                 Command::new(&binary)
                     .env("REDIS_URL", redis.url())
@@ -692,17 +680,12 @@ fn test_markdown_fragments_and_programs_publish_settle_and_close() -> Result<(),
                 let group = group_name(&namespace, "orders.created", "billing-worker", None);
                 let length: usize = cmd("XLEN").arg(&stream).query(&mut observer)?;
                 assert_eq!(length, 2, "{id} must preserve both records");
-                let pending: Value = cmd("XPENDING")
-                    .arg(&stream)
-                    .arg(group)
-                    .query(&mut observer)?;
+                let pending: Value = cmd("XPENDING").arg(&stream).arg(group).query(&mut observer)?;
                 assert!(
                     matches!(pending, Value::Array(ref values) if matches!(values.first(), Some(Value::Int(0)))),
                     "{id} must ACK the resumed record; actual PEL: {pending:?}"
                 );
-                println!(
-                    "validated Markdown {guide} block {tag}: resumed second event, preserved first, PEL empty"
-                );
+                println!("validated Markdown {guide} block {tag}: resumed second event, preserved first, PEL empty");
                 continue;
             }
             let expected = if tag.starts_with("async") {
@@ -715,25 +698,15 @@ fn test_markdown_fragments_and_programs_publish_settle_and_close() -> Result<(),
                 "{id} did not consume its own event"
             );
             let stream = stream_key(&namespace, "orders.created");
-            let group = group_name(
-                &namespace,
-                "orders.created",
-                "billing-worker",
-                Some("billing"),
-            );
+            let group = group_name(&namespace, "orders.created", "billing-worker", Some("billing"));
             let length: usize = cmd("XLEN").arg(&stream).query(&mut observer)?;
             assert_eq!(length, 1, "{id} must publish one real stream record");
-            let pending: Value = cmd("XPENDING")
-                .arg(&stream)
-                .arg(group)
-                .query(&mut observer)?;
+            let pending: Value = cmd("XPENDING").arg(&stream).arg(group).query(&mut observer)?;
             assert!(
                 matches!(pending, Value::Array(ref values) if matches!(values.first(), Some(Value::Int(0)))),
                 "{id} shutdown must finish settlement; actual PEL: {pending:?}"
             );
-            println!(
-                "validated Markdown {guide} block {tag}: consumed {expected}, PEL empty, shutdown complete"
-            );
+            println!("validated Markdown {guide} block {tag}: consumed {expected}, PEL empty, shutdown complete");
             if guide.starts_with("README") {
                 let recovery_namespace = format!("{namespace}-old-pending");
                 seed_old_pending(&mut observer, &recovery_namespace)?;
@@ -749,32 +722,20 @@ fn test_markdown_fragments_and_programs_publish_settle_and_close() -> Result<(),
                     "{id} must observe the seeded old pending event before succeeding: {recovery_output}"
                 );
                 let recovery_stream = stream_key(&recovery_namespace, "orders.created");
-                let recovery_group = group_name(
-                    &recovery_namespace,
-                    "orders.created",
-                    "billing-worker",
-                    Some("billing"),
-                );
+                let recovery_group =
+                    group_name(&recovery_namespace, "orders.created", "billing-worker", Some("billing"));
                 let records: StreamRangeReply = cmd("XRANGE")
                     .arg(&recovery_stream)
                     .arg("-")
                     .arg("+")
                     .query(&mut observer)?;
-                assert_eq!(
-                    records.ids.len(),
-                    2,
-                    "{id} must retain the legacy and new records"
-                );
+                assert_eq!(records.ids.len(), 2, "{id} must retain the legacy and new records");
                 let decoded: Vec<WireFields> = records
                     .ids
                     .iter()
                     .map(|record| {
                         let wire = redis::from_redis_value::<String>(
-                            record
-                                .map
-                                .get("wire")
-                                .expect("stream record has wire field")
-                                .clone(),
+                            record.map.get("wire").expect("stream record has wire field").clone(),
                         )?;
                         Ok(from_str(&wire)?)
                     })

@@ -106,8 +106,7 @@ impl ControlledRedis {
             while !thread_stop.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((client, _)) => {
-                        let connection_id =
-                            listener_next_connection_id.fetch_add(1, Ordering::SeqCst) + 1;
+                        let connection_id = listener_next_connection_id.fetch_add(1, Ordering::SeqCst) + 1;
                         let upstream = upstream.clone();
                         let gate = Arc::clone(&thread_gate);
                         let replacement = Arc::clone(&thread_replacement);
@@ -164,22 +163,13 @@ impl ControlledRedis {
     /// briefly and panics if the replacement mutex is poisoned; the proxy
     /// performs the IO.
     pub fn replace_next_reply(&self, command: &str, reply: &[u8]) {
-        *self
-            .replacement
-            .lock()
-            .expect("reply replacement lock is healthy") = Some((
-            command.as_bytes().to_ascii_uppercase(),
-            reply.to_vec(),
-            false,
-        ));
+        *self.replacement.lock().expect("reply replacement lock is healthy") =
+            Some((command.as_bytes().to_ascii_uppercase(), reply.to_vec(), false));
     }
 
     /// Copies the raw reply to replace only the next settlement EVAL response.
     pub fn replace_next_settlement_reply(&self, reply: &[u8]) {
-        *self
-            .replacement
-            .lock()
-            .expect("replacement mutex is healthy") =
+        *self.replacement.lock().expect("replacement mutex is healthy") =
             Some((b"EVAL".to_vec(), reply.to_vec(), true));
     }
 
@@ -216,18 +206,9 @@ impl ControlledRedis {
     }
 
     /// Waits for at least `count` forwarded `command` requests up to `timeout`.
-    pub fn wait_for_requests(
-        &self,
-        command: &'static str,
-        count: usize,
-        timeout: Duration,
-    ) -> Vec<RequestObservation> {
+    pub fn wait_for_requests(&self, command: &'static str, count: usize, timeout: Duration) -> Vec<RequestObservation> {
         let deadline = Instant::now() + timeout;
-        let mut entries = self
-            .requests
-            .entries
-            .lock()
-            .expect("request log lock is healthy");
+        let mut entries = self.requests.entries.lock().expect("request log lock is healthy");
         loop {
             if entries
                 .iter()
@@ -351,13 +332,9 @@ fn forward(
         }
         {
             let mut replacement = replacement.lock().expect("replacement mutex is healthy");
-            if replacement
-                .as_ref()
-                .is_some_and(|(name, _, settlement_only)| {
-                    name.eq_ignore_ascii_case(&command)
-                        && (!settlement_only || super::gate::is_settlement_eval(&request))
-                })
-            {
+            if replacement.as_ref().is_some_and(|(name, _, settlement_only)| {
+                name.eq_ignore_ascii_case(&command) && (!settlement_only || super::gate::is_settlement_eval(&request))
+            }) {
                 let (_, bytes, _) = replacement.take().expect("matching replacement exists");
                 response = bytes;
             }

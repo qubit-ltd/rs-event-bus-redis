@@ -20,28 +20,18 @@ fn test_error_retryability_context() {
         ("receive", true),
         ("quarantine", false),
     ] {
-        let error = to_spi_error(
-            operation,
-            None,
-            RedisProviderError::OutcomeUnknown { operation },
-        );
+        let error = to_spi_error(operation, None, RedisProviderError::OutcomeUnknown { operation });
         assert!(
             matches!(error, SpiError::Operation { kind: "outcome_unknown", retryable: Some(value), .. } if value == retryable)
         );
     }
     for (source, expected_kind, expected_retryable) in [
         (
-            RedisProviderError::ResourceLimit {
-                resource: "commands",
-            },
+            RedisProviderError::ResourceLimit { resource: "commands" },
             "resource_limit",
             true,
         ),
-        (
-            RedisProviderError::PayloadTooLarge,
-            "payload_too_large",
-            false,
-        ),
+        (RedisProviderError::PayloadTooLarge, "payload_too_large", false),
         (RedisProviderError::WireTooLarge, "wire_too_large", false),
     ] {
         assert!(

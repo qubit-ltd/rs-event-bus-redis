@@ -28,12 +28,7 @@ const SCRIPT: &str = "local pending = redis.call('XPENDING', KEYS[1], ARGV[1], A
 ///
 /// An EVAL command using one key and the settlement arguments in protocol
 /// order.
-pub(crate) fn settlement_command(
-    stream: &str,
-    group: &str,
-    consumer: &str,
-    message_id: &str,
-) -> Cmd {
+pub(crate) fn settlement_command(stream: &str, group: &str, consumer: &str, message_id: &str) -> Cmd {
     let mut command = cmd("EVAL");
     command
         .arg(SCRIPT)
@@ -73,27 +68,15 @@ mod tests {
 
     #[test]
     fn test_settlement_reply_classifies_only_protocol_integers() {
-        assert_eq!(
-            parse_settlement_reply(&Value::Int(0)),
-            Some(SettlementReply::Completed)
-        );
-        assert_eq!(
-            parse_settlement_reply(&Value::Int(1)),
-            Some(SettlementReply::Completed)
-        );
+        assert_eq!(parse_settlement_reply(&Value::Int(0)), Some(SettlementReply::Completed));
+        assert_eq!(parse_settlement_reply(&Value::Int(1)), Some(SettlementReply::Completed));
         assert_eq!(
             parse_settlement_reply(&Value::Int(-1)),
             Some(SettlementReply::OwnershipChanged)
         );
         assert_eq!(parse_settlement_reply(&Value::Int(-2)), None);
-        assert_eq!(
-            parse_settlement_reply(&Value::BulkString(b"1".to_vec())),
-            None
-        );
-        assert_eq!(
-            parse_settlement_reply(&Value::Array(vec![Value::Int(1)])),
-            None
-        );
+        assert_eq!(parse_settlement_reply(&Value::BulkString(b"1".to_vec())), None);
+        assert_eq!(parse_settlement_reply(&Value::Array(vec![Value::Int(1)])), None);
         assert_eq!(
             parse_settlement_reply(&Value::Array(vec![Value::BulkString(b"ERR".to_vec())])),
             None
@@ -105,9 +88,7 @@ mod tests {
         let packed = settlement_command("stream", "group", "consumer", "42-0").get_packed_command();
         let text = String::from_utf8(packed).expect("command is UTF-8");
         assert!(text.starts_with("*7\r\n$4\r\nEVAL\r\n"));
-        assert!(text.contains(
-            "\r\n$1\r\n1\r\n$6\r\nstream\r\n$5\r\ngroup\r\n$8\r\nconsumer\r\n$4\r\n42-0\r\n"
-        ));
+        assert!(text.contains("\r\n$1\r\n1\r\n$6\r\nstream\r\n$5\r\ngroup\r\n$8\r\nconsumer\r\n$4\r\n42-0\r\n"));
         assert!(text.contains("XPENDING"));
         assert!(text.contains("XACK"));
     }

@@ -61,8 +61,8 @@ fn test_async_sentinel_reconnects_after_master_failover() -> Result<(), Box<dyn 
     #[cfg(feature = "conformance")]
     let conformance_options = options.clone();
     let config = EventBusConfig::default().with_provider_options(options);
-    let bus = block_on(AsyncRedisEventBusProvider.create_configured(&config))
-        .map_err(|failure| failure.into_error())?;
+    let bus =
+        block_on(AsyncRedisEventBusProvider.create_configured(&config)).map_err(|failure| failure.into_error())?;
     sentinel.stop_original_master()?;
     block_on(async {
         let _ = bus
@@ -82,8 +82,7 @@ fn test_async_sentinel_reconnects_after_master_failover() -> Result<(), Box<dyn 
             .subscribe(request)
             .await
             .map_err(|error| IoError::other(format!("subscribe before promotion: {error}")))?;
-        let ReceiveOutcome::Message(received) = receiver.receive(Duration::from_secs(10)).await?
-        else {
+        let ReceiveOutcome::Message(received) = receiver.receive(Duration::from_secs(10)).await? else {
             return Err("post-promotion event was not received".into());
         };
         assert_eq!(received.id().as_str(), "after-failover-async");
@@ -99,8 +98,7 @@ fn test_async_sentinel_reconnects_after_master_failover() -> Result<(), Box<dyn 
     {
         let report = block_on(run_async(
             || {
-                let config =
-                    EventBusConfig::default().with_provider_options(conformance_options.clone());
+                let config = EventBusConfig::default().with_provider_options(conformance_options.clone());
                 async move {
                     AsyncRedisEventBusProvider
                         .create_configured(&config)
@@ -126,8 +124,8 @@ fn test_async_sentinel_claims_unsettled_record_after_promotion() -> Result<(), B
     ]
     .into();
     let config = EventBusConfig::default().with_provider_options(options);
-    let bus = block_on(AsyncRedisEventBusProvider.create_configured(&config))
-        .map_err(|failure| failure.into_error())?;
+    let bus =
+        block_on(AsyncRedisEventBusProvider.create_configured(&config)).map_err(|failure| failure.into_error())?;
     let original_port = sentinel.master_port()?;
     let pending_message = message("events", "pending-before-async-promotion", b"pending")?;
     let _ = block_on(async { bus.publish(pending_message).await })?;
@@ -146,8 +144,7 @@ fn test_async_sentinel_claims_unsettled_record_after_promotion() -> Result<(), B
             .subscribe(request)
             .await
             .map_err(|error| IoError::other(format!("subscribe after promotion: {error}")))?;
-        let ReceiveOutcome::Message(received) = receiver.receive(Duration::from_secs(2)).await?
-        else {
+        let ReceiveOutcome::Message(received) = receiver.receive(Duration::from_secs(2)).await? else {
             return Err("initial consumer did not receive the pending record".into());
         };
         assert_eq!(received.id().as_str(), "pending-before-async-promotion");
@@ -161,13 +158,7 @@ fn test_async_sentinel_claims_unsettled_record_after_promotion() -> Result<(), B
         Some("sentinel-workers"),
     );
     let (pending_id, old_owner) = sentinel.pending_identity(original_port, &stream, &group)?;
-    sentinel.wait_for_pending(
-        sentinel.replica_port(),
-        &stream,
-        &group,
-        &pending_id,
-        &old_owner,
-    )?;
+    sentinel.wait_for_pending(sentinel.replica_port(), &stream, &group, &pending_id, &old_owner)?;
     block_on(first.close())?;
     sentinel.stop_original_master()?;
     let promoted_port = sentinel.master_port()?;
@@ -184,17 +175,13 @@ fn test_async_sentinel_claims_unsettled_record_after_promotion() -> Result<(), B
             TypeId::of::<Vec<u8>>(),
         );
         let mut receiver = bus.subscribe(request).await?;
-        let ReceiveOutcome::Message(pending) = receiver.receive(Duration::from_secs(10)).await?
-        else {
+        let ReceiveOutcome::Message(pending) = receiver.receive(Duration::from_secs(10)).await? else {
             return Err("new consumer did not claim the pending record".into());
         };
         assert_eq!(pending.id().as_str(), "pending-before-async-promotion");
         let (claimed_id, new_owner) = sentinel.pending_identity(promoted_port, &stream, &group)?;
         assert_eq!(claimed_id, pending_id, "claim must preserve the stream ID");
-        assert_ne!(
-            new_owner, old_owner,
-            "claim must transfer the pending owner"
-        );
+        assert_ne!(new_owner, old_owner, "claim must transfer the pending owner");
         receiver
             .settle(
                 pending.settlement().ok_or("missing settlement token")?,
@@ -214,11 +201,7 @@ fn test_async_canceled_sentinel_query_opens_replacement_while_old_reply_is_held(
     let sentinel = SentinelServer::start().expect("real Sentinel fixture");
     let upstream = format!(
         "redis://{}/",
-        sentinel
-            .endpoints()
-            .split(',')
-            .next()
-            .expect("Sentinel endpoint")
+        sentinel.endpoints().split(',').next().expect("Sentinel endpoint")
     );
     let proxy = ControlledRedis::start(&upstream).expect("controlled Sentinel proxy");
     let gate = proxy.pause_after_reply("SENTINEL");
@@ -239,16 +222,13 @@ fn test_async_canceled_sentinel_query_opens_replacement_while_old_reply_is_held(
     let (cancel, canceled) = futures_channel::oneshot::channel();
     let (finished, result) = std::sync::mpsc::channel();
     let worker = std::thread::spawn(move || {
-        let bus = block_on(AsyncRedisEventBusProvider.create_configured(&config))
-            .expect("Sentinel provider configuration");
+        let bus =
+            block_on(AsyncRedisEventBusProvider.create_configured(&config)).expect("Sentinel provider configuration");
         block_on(async {
             let _ = or(
                 async {
                     let _ = bus
-                        .publish(
-                            message("events", "canceled-sentinel-probe", b"first")
-                                .expect("message"),
-                        )
+                        .publish(message("events", "canceled-sentinel-probe", b"first").expect("message"))
                         .await;
                 },
                 async {
@@ -257,9 +237,7 @@ fn test_async_canceled_sentinel_query_opens_replacement_while_old_reply_is_held(
             )
             .await;
             let succeeded = bus
-                .publish(
-                    message("events", "after-canceled-sentinel-probe", b"second").expect("message"),
-                )
+                .publish(message("events", "after-canceled-sentinel-probe", b"second").expect("message"))
                 .await
                 .is_ok();
             let _ = finished.send(succeeded);
@@ -269,9 +247,7 @@ fn test_async_canceled_sentinel_query_opens_replacement_while_old_reply_is_held(
     let started = std::time::Instant::now();
     let reached = gate.wait_until_reached(Duration::from_secs(15));
     if reached {
-        cancel
-            .send(())
-            .expect("first query is waiting for cancellation");
+        cancel.send(()).expect("first query is waiting for cancellation");
     } else {
         gate.release();
     }
@@ -287,16 +263,10 @@ fn test_async_canceled_sentinel_query_opens_replacement_while_old_reply_is_held(
     gate.release();
     let after_release = before_release.or_else(|| result.recv_timeout(Duration::from_secs(5)).ok());
     let released_wait_elapsed = started.elapsed();
-    worker
-        .join()
-        .expect("canceled query and retry worker exits");
+    worker.join().expect("canceled query and retry worker exits");
 
     assert!(reached, "first SENTINEL reply reached the held gate");
-    assert_eq!(
-        sentinel_requests.len(),
-        2,
-        "both requests reached the real Sentinel"
-    );
+    assert_eq!(sentinel_requests.len(), 2, "both requests reached the real Sentinel");
     assert_eq!(
         before_release,
         Some(true),

@@ -7,6 +7,9 @@
 // =============================================================================
 //! Test support for isolated Redis services.
 
+#[cfg(all(feature = "sync", feature = "async"))]
+#[allow(dead_code)]
+pub mod bench_support;
 #[allow(dead_code)]
 pub mod controlled_redis;
 #[allow(dead_code)]
@@ -19,6 +22,10 @@ pub mod redis_server;
 pub mod scripted_redis;
 #[allow(dead_code)]
 pub mod sentinel;
+#[cfg(all(feature = "sync", feature = "async"))]
+#[allow(dead_code)]
+#[path = "../../tests/sentinel_cost/mod.rs"]
+pub mod sentinel_cost;
 #[cfg(any(feature = "sync", feature = "async"))]
 #[allow(dead_code)]
 pub mod settlement_fault;

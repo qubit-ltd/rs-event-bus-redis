@@ -16,10 +16,7 @@ use crate::config::RedisEventBusConfig;
 fn test_provider_options_validate_pool_and_stream_limits() {
     let options: ProviderOptions = [
         ("redis.max_idle_connections".into(), "64".into()),
-        (
-            "redis.max_unsettled_per_subscription".into(),
-            "10000".into(),
-        ),
+        ("redis.max_unsettled_per_subscription".into(), "10000".into()),
         ("redis.stream_maxlen_approx".into(), "42".into()),
         ("redis.allow_lossy_retention".into(), "true".into()),
     ]

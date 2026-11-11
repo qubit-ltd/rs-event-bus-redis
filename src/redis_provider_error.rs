@@ -101,10 +101,8 @@ pub(crate) fn from_redis_error(operation: &'static str, error: &RedisError) -> R
     let code_class = redis_error_code_class(error.code().unwrap_or_default());
     let script_acl_failure = error.code() == Some("ERR")
         && error.detail().is_some_and(|detail| {
-            (detail.starts_with("ACL failure in script:")
-                && detail.contains("has no permissions to run"))
-                || detail
-                    .contains("The user executing the script can't run this command or subcommand")
+            (detail.starts_with("ACL failure in script:") && detail.contains("has no permissions to run"))
+                || detail.contains("The user executing the script can't run this command or subcommand")
         });
     let (kind, retryable) = code_class
         .or_else(|| script_acl_failure.then_some(("authentication", Some(false))))
@@ -118,13 +116,9 @@ pub(crate) fn from_redis_error(operation: &'static str, error: &RedisError) -> R
             ErrorKind::Server(ServerErrorKind::BusyLoading)
             | ErrorKind::Server(ServerErrorKind::TryAgain)
             | ErrorKind::Server(ServerErrorKind::MasterDown)
-            | ErrorKind::Server(ServerErrorKind::ReadOnly) => {
-                ("temporarily_unavailable", Some(true))
-            }
+            | ErrorKind::Server(ServerErrorKind::ReadOnly) => ("temporarily_unavailable", Some(true)),
             ErrorKind::Io => ("transport", Some(true)),
-            ErrorKind::Parse | ErrorKind::RESP3NotSupported | ErrorKind::ResponseTooLarge => {
-                ("protocol", Some(false))
-            }
+            ErrorKind::Parse | ErrorKind::RESP3NotSupported | ErrorKind::ResponseTooLarge => ("protocol", Some(false)),
             ErrorKind::Server(ServerErrorKind::Moved)
             | ErrorKind::Server(ServerErrorKind::Ask)
             | ErrorKind::Server(ServerErrorKind::CrossSlot)
@@ -156,12 +150,8 @@ fn redis_error_code_class(code: &str) -> Option<(&'static str, Option<bool>)> {
         "NOAUTH" | "WRONGPASS" | "NOPERM" => Some(("authentication", Some(false))),
         "WRONGTYPE" => Some(("wrong_type", Some(false))),
         "OOM" => Some(("out_of_memory", Some(false))),
-        "LOADING" | "TRYAGAIN" | "MASTERDOWN" | "READONLY" => {
-            Some(("temporarily_unavailable", Some(true)))
-        }
-        "MOVED" | "ASK" | "CROSSSLOT" | "CLUSTERDOWN" => {
-            Some(("unsupported_topology", Some(false)))
-        }
+        "LOADING" | "TRYAGAIN" | "MASTERDOWN" | "READONLY" => Some(("temporarily_unavailable", Some(true))),
+        "MOVED" | "ASK" | "CROSSSLOT" | "CLUSTERDOWN" => Some(("unsupported_topology", Some(false))),
         _ => None,
     }
 }

@@ -27,11 +27,7 @@ use super::measurement::Sample;
 use super::workload_result::WorkloadResult;
 
 /// Encodes exactly the requested raw byte length; wire metadata is additional.
-pub fn message(
-    topic: &str,
-    id: &str,
-    payload: Arc<[u8]>,
-) -> Result<OutboundMessage, Box<dyn Error>> {
+pub fn message(topic: &str, id: &str, payload: Arc<[u8]>) -> Result<OutboundMessage, Box<dyn Error>> {
     Ok(OutboundMessage::new(
         TopicAddress::new(topic)?,
         EventId::new(id)?,

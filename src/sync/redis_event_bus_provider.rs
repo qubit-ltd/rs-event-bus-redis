@@ -82,19 +82,16 @@ impl ServiceProvider<EventBusSpec> for RedisEventBusProvider {
         &self,
         config: &EventBusConfig,
     ) -> Result<Arc<dyn EventBusSpi>, ProviderFailure<EventBusProviderError>> {
-        let settings = RedisEventBusConfig::from_event_bus_config(config).map_err(|error| {
-            ProviderFailure::invalid_configuration(EventBusProviderError::provider(error))
-        })?;
+        let settings = RedisEventBusConfig::from_event_bus_config(config)
+            .map_err(|error| ProviderFailure::invalid_configuration(EventBusProviderError::provider(error)))?;
         let mut client = Client::new(&settings).map_err(|_| {
-            ProviderFailure::invalid_configuration(EventBusProviderError::provider(
-                RedisProviderError::Configuration("invalid Redis connection configuration"),
-            ))
+            ProviderFailure::invalid_configuration(EventBusProviderError::provider(RedisProviderError::Configuration(
+                "invalid Redis connection configuration",
+            )))
         })?;
         client
             .attach_diagnostics(RedisProviderMode::Sync, settings.namespace())
-            .map_err(|error| {
-                ProviderFailure::invalid_configuration(EventBusProviderError::provider(error))
-            })?;
+            .map_err(|error| ProviderFailure::invalid_configuration(EventBusProviderError::provider(error)))?;
         Ok(Arc::new(RedisEventBus {
             client: Arc::new(client),
             settings,

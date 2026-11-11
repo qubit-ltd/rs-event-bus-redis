@@ -27,9 +27,7 @@ impl RedisDiagnosticsDirectory {
     ///
     /// An empty directory with no registered provider states.
     fn new() -> Self {
-        Self {
-            entries: Vec::new(),
-        }
+        Self { entries: Vec::new() }
     }
 
     /// Drops expired entries before retaining the new state.
@@ -122,11 +120,7 @@ mod tests {
         }
 
         assert_eq!(directory.entries.len(), 3);
-        let actual: BTreeSet<_> = directory
-            .live()
-            .iter()
-            .map(|state| state.instance_id)
-            .collect();
+        let actual: BTreeSet<_> = directory.live().iter().map(|state| state.instance_id).collect();
         let expected = BTreeSet::from([first.instance_id, second.instance_id]);
         assert_eq!(actual, expected);
         assert_eq!(directory.entries.len(), 2);

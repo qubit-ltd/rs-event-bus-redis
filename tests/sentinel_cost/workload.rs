@@ -1,16 +1,29 @@
+// =============================================================================
+//    Copyright (c) 2026 Haixing Hu.
+//
+//    SPDX-License-Identifier: Apache-2.0
+//
+//    Licensed under the Apache License, Version 2.0.
+// =============================================================================
 //! Sentinel cost matrix built on the existing public-SPI benchmark workers.
 
 use std::error::Error;
-use std::fs::{self, File, OpenOptions};
+use std::fs;
+use std::fs::File;
+use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::process::Command;
+use std::process::Stdio;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 
 use qubit_event_bus::model::ProviderOptions;
 use qubit_event_bus_redis::diagnostics::RedisProviderDiagnostics;
 
-use super::measurement::{Config, Sample, summarize};
+use super::measurement::Config;
+use super::measurement::Sample;
+use super::measurement::summarize;
 
 static IDS: AtomicU64 = AtomicU64::new(1);
 
@@ -42,11 +55,13 @@ pub fn run_matrix() -> Result<(), Box<dyn Error>> {
                             &config,
                             &mut raw,
                             &mut summary,
-                            mode,
-                            transport,
-                            concurrency,
-                            scenario,
-                            round,
+                            MatrixDimension {
+                                mode,
+                                transport,
+                                concurrency,
+                                scenario,
+                                round,
+                            },
                         )?;
                     }
                 }
@@ -116,9 +131,7 @@ fn json(value: &str) -> String {
 }
 
 fn dirty_content_hash() -> Result<String, Box<dyn Error>> {
-    let status = Command::new("git")
-        .args(["status", "--porcelain"])
-        .output()?;
+    let status = Command::new("git").args(["status", "--porcelain"]).output()?;
     let mut bytes = Vec::new();
     for line in String::from_utf8_lossy(&status.stdout).lines() {
         let path = line.get(3..).unwrap_or("").trim();
@@ -130,10 +143,7 @@ fn dirty_content_hash() -> Result<String, Box<dyn Error>> {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()?;
-    hash.stdin
-        .take()
-        .ok_or("sha256sum stdin missing")?
-        .write_all(&bytes)?;
+    hash.stdin.take().ok_or("sha256sum stdin missing")?.write_all(&bytes)?;
     Ok(String::from_utf8(hash.wait_with_output()?.stdout)?
         .split_whitespace()
         .next()
@@ -182,8 +192,8 @@ impl CountSnapshot {
 
 fn capture_counts(
     namespace: &str,
-    plain: Option<&crate::bench_support::redis_fixture::SentinelFixture>,
-    tls: Option<&crate::tls_support::TlsSentinel>,
+    plain: Option<&super::super::bench_support::redis_fixture::SentinelFixture>,
+    tls: Option<&super::super::tls_sentinel::TlsSentinel>,
 ) -> Result<CountSnapshot, Box<dyn Error>> {
     let snapshot = snapshot(namespace)?;
     let (sentinels, role) = if let Some(fixture) = plain {
@@ -192,8 +202,7 @@ fn capture_counts(
             fixture.master.role_probe_calls()?,
         )
     } else {
-        tls.ok_or("missing TLS fixture")?
-            .cost_connection_snapshot()?
+        tls.ok_or("missing TLS fixture")?.cost_connection_snapshot()?
     };
     Ok(CountSnapshot {
         attempts: snapshot.0,
@@ -204,22 +213,24 @@ fn capture_counts(
 }
 
 fn run_settle_workers(
-    bus: &crate::bench_support::backend::Backend,
+    bus: &super::super::bench_support::backend::Backend,
     prefix: &str,
     concurrency: usize,
     samples: usize,
     capture: &dyn Fn() -> Result<CountSnapshot, Box<dyn Error>>,
 ) -> Result<
     (
-        crate::bench_support::workload_result::WorkloadResult,
+        super::super::bench_support::workload_result::WorkloadResult,
         Option<CountSnapshot>,
     ),
     Box<dyn Error>,
 > {
-    use crate::bench_support::workload::message;
-    use std::sync::{Arc, Barrier};
+    use std::sync::Arc;
+    use std::sync::Barrier;
     use std::thread;
     use std::time::Instant;
+
+    use super::super::bench_support::workload::message;
 
     let batch_size = 32usize;
     let max_worker_samples = samples.div_ceil(concurrency);
@@ -235,11 +246,7 @@ fn run_settle_workers(
         let mut receiver = bus.subscribe(&topic, worker)?;
         let worker_bus = bus.clone();
         let worker_payload = Arc::clone(&payload);
-        let (prepared, release, finished) = (
-            Arc::clone(&prepared),
-            Arc::clone(&release),
-            Arc::clone(&finished),
-        );
+        let (prepared, release, finished) = (Arc::clone(&prepared), Arc::clone(&release), Arc::clone(&finished));
         workers.push(thread::spawn(move || {
             let mut records = Vec::with_capacity(worker_samples);
             for batch in 0..batch_count {
@@ -248,12 +255,10 @@ fn run_settle_workers(
                 let mut tokens = Vec::with_capacity(end.saturating_sub(begin));
                 for sequence in begin..end {
                     let id = format!("event-{worker}-{sequence}");
-                    let published = worker_bus.publish(
-                        message(&topic, &id, Arc::clone(&worker_payload))
-                            .expect("valid preparation message"),
-                    );
+                    let published = worker_bus
+                        .publish(message(&topic, &id, Arc::clone(&worker_payload)).expect("valid preparation message"));
                     if published != "ok" {
-                        records.push(crate::bench_support::measurement::Sample {
+                        records.push(super::super::bench_support::measurement::Sample {
                             nanos: 0,
                             outcome: format!("prepare:{published}"),
                         });
@@ -261,7 +266,7 @@ fn run_settle_workers(
                     }
                     match receive_token(&mut receiver, &id) {
                         Ok(token) => tokens.push(token),
-                        Err(error) => records.push(crate::bench_support::measurement::Sample {
+                        Err(error) => records.push(super::super::bench_support::measurement::Sample {
                             nanos: 0,
                             outcome: format!("prepare:{error}"),
                         }),
@@ -272,7 +277,7 @@ fn run_settle_workers(
                 for token in tokens {
                     let started = Instant::now();
                     let outcome = settle_token(&mut receiver, token);
-                    records.push(crate::bench_support::measurement::Sample {
+                    records.push(super::super::bench_support::measurement::Sample {
                         nanos: started.elapsed().as_nanos(),
                         outcome,
                     });
@@ -302,7 +307,7 @@ fn run_settle_workers(
         receivers.push(receiver);
     }
     Ok((
-        crate::bench_support::workload_result::WorkloadResult {
+        super::super::bench_support::workload_result::WorkloadResult {
             elapsed,
             groups,
             receivers,
@@ -315,15 +320,18 @@ fn run_round(
     config: &Config,
     raw: &mut File,
     summary: &mut File,
-    mode: &str,
-    transport: &str,
-    concurrency: usize,
-    scenario: &str,
-    round: usize,
+    dimension: MatrixDimension<'_>,
 ) -> Result<(), Box<dyn Error>> {
-    use crate::bench_support::backend::Backend;
-    use crate::bench_support::redis_fixture::SentinelFixture;
+    use super::super::bench_support::backend::Backend;
+    use super::super::bench_support::redis_fixture::SentinelFixture;
 
+    let MatrixDimension {
+        mode,
+        transport,
+        concurrency,
+        scenario,
+        round,
+    } = dimension;
     let namespace = format!(
         "rer_cost_{}_{}_{}_{}_{}",
         mode,
@@ -341,7 +349,7 @@ fn run_round(
         options.insert("redis.sentinel.service_name".into(), "benchmaster".into());
         plain_fixture = Some(fixture);
     } else {
-        let fixture = crate::tls_support::TlsSentinel::start(false)?;
+        let fixture = super::super::tls_sentinel::TlsSentinel::start(false)?;
         options.insert(
             "redis.url".into(),
             format!("rediss://localhost:{}/", fixture.original_master_port()),
@@ -353,14 +361,7 @@ fn run_round(
     }
     let bus = Backend::new(mode, options)?;
     let capture = || capture_counts(&namespace, plain_fixture.as_ref(), tls_fixture.as_ref());
-    let (warm, _) = scenario_run(
-        &bus,
-        &format!("{namespace}-warm"),
-        concurrency,
-        100,
-        scenario,
-        &capture,
-    )?;
+    let (warm, _) = scenario_run(&bus, &format!("{namespace}-warm"), concurrency, 100, scenario, &capture)?;
     for mut receiver in warm.receivers {
         receiver.close()?;
     }
@@ -370,10 +371,7 @@ fn run_round(
             fixture.master.role_probe_calls()?,
         )
     } else {
-        tls_fixture
-            .as_ref()
-            .expect("TLS fixture")
-            .cost_connection_snapshot()?
+        tls_fixture.as_ref().expect("TLS fixture").cost_connection_snapshot()?
     };
     let before = snapshot(&namespace)?;
     let (workload, stage_counts) = scenario_run(
@@ -391,10 +389,7 @@ fn run_round(
             fixture.master.role_probe_calls()?,
         )
     } else {
-        tls_fixture
-            .as_ref()
-            .expect("TLS fixture")
-            .cost_connection_snapshot()?
+        tls_fixture.as_ref().expect("TLS fixture").cost_connection_snapshot()?
     };
     let mut samples = Vec::new();
     for (worker, group) in workload.groups.iter().enumerate() {
@@ -433,16 +428,10 @@ fn run_round(
         |c| c.sentinel,
     );
     let measured_provider = stage_counts.as_ref().map_or(
-        (
-            after.0.saturating_sub(before.0),
-            after.1.saturating_sub(before.1),
-        ),
+        (after.0.saturating_sub(before.0), after.1.saturating_sub(before.1)),
         |c| (c.attempts, c.failures),
     );
-    let throughput = format!(
-        "{:.6}",
-        result.successes as f64 / workload.elapsed.as_secs_f64()
-    );
+    let throughput = format!("{:.6}", result.successes as f64 / workload.elapsed.as_secs_f64());
     let role_delta = stage_counts
         .as_ref()
         .map_or_else(|| role_after.saturating_sub(role_before), |c| c.role);
@@ -471,14 +460,23 @@ fn run_round(
     Ok(())
 }
 
+struct MatrixDimension<'a> {
+    mode: &'a str,
+    transport: &'a str,
+    concurrency: usize,
+    scenario: &'a str,
+    round: usize,
+}
+
 fn assert_measurement_pel_empty(
     namespace: &str,
     prefix: &str,
     concurrency: usize,
-    plain: Option<&crate::bench_support::redis_fixture::SentinelFixture>,
-    tls: Option<&crate::tls_support::TlsSentinel>,
+    plain: Option<&super::super::bench_support::redis_fixture::SentinelFixture>,
+    tls: Option<&super::super::tls_sentinel::TlsSentinel>,
 ) -> Result<(), Box<dyn Error>> {
-    use qubit_event_bus_redis::naming::{group_name, stream_key};
+    use qubit_event_bus_redis::naming::group_name;
+    use qubit_event_bus_redis::naming::stream_key;
     for worker in 0..concurrency {
         let topic = format!("{prefix}-worker-{worker}");
         let group = group_name(
@@ -498,9 +496,7 @@ fn assert_measurement_pel_empty(
                 .arg(10)
                 .query(&mut connection)?;
             if !pending.ids.is_empty() {
-                return Err(
-                    format!("worker {worker} left {} pending entries", pending.ids.len()).into(),
-                );
+                return Err(format!("worker {worker} left {} pending entries", pending.ids.len()).into());
             }
         } else {
             tls.ok_or("missing TLS fixture")?.assert_pending_empty(
@@ -514,7 +510,7 @@ fn assert_measurement_pel_empty(
 }
 
 fn scenario_run(
-    bus: &crate::bench_support::backend::Backend,
+    bus: &super::super::bench_support::backend::Backend,
     prefix: &str,
     concurrency: usize,
     samples: usize,
@@ -522,15 +518,17 @@ fn scenario_run(
     capture: &dyn Fn() -> Result<CountSnapshot, Box<dyn Error>>,
 ) -> Result<
     (
-        crate::bench_support::workload_result::WorkloadResult,
+        super::super::bench_support::workload_result::WorkloadResult,
         Option<CountSnapshot>,
     ),
     Box<dyn Error>,
 > {
-    use crate::bench_support::workload::message;
-    use std::sync::{Arc, Barrier};
+    use std::sync::Arc;
+    use std::sync::Barrier;
     use std::thread;
     use std::time::Instant;
+
+    use super::super::bench_support::workload::message;
 
     if scenario == "settle_only" {
         return run_settle_workers(bus, prefix, concurrency, samples, capture);
@@ -566,7 +564,7 @@ fn scenario_run(
                 } else {
                     worker_bus.attempt(&mut receiver, Some(message))
                 };
-                records.push(crate::bench_support::measurement::Sample {
+                records.push(super::super::bench_support::measurement::Sample {
                     nanos: started.elapsed().as_nanos(),
                     outcome,
                 });
@@ -588,7 +586,7 @@ fn scenario_run(
     }
     let after = capture()?;
     Ok((
-        crate::bench_support::workload_result::WorkloadResult {
+        super::super::bench_support::workload_result::WorkloadResult {
             elapsed: started.elapsed(),
             groups,
             receivers,
@@ -598,18 +596,18 @@ fn scenario_run(
 }
 
 fn receive_token(
-    receiver: &mut crate::bench_support::receiver::Receiver,
+    receiver: &mut super::super::bench_support::receiver::Receiver,
     expected: &str,
 ) -> Result<qubit_event_bus::spi::SettlementToken, String> {
-    use crate::bench_support::receiver::Receiver;
-    use qubit_event_bus::spi::ReceiveOutcome;
     use std::time::Duration;
+
+    use qubit_event_bus::spi::ReceiveOutcome;
+
+    use super::super::bench_support::receiver::Receiver;
     match receiver {
         Receiver::Sync(subscription) => match subscription.receive(Duration::from_secs(3)) {
             Ok(ReceiveOutcome::Message(mut message)) if message.id().as_str() == expected => {
-                message
-                    .take_settlement()
-                    .ok_or_else(|| "missing_token".into())
+                message.take_settlement().ok_or_else(|| "missing_token".into())
             }
             Ok(ReceiveOutcome::Message(_)) => Err("event_id_mismatch".into()),
             Ok(_) => Err("receive_not_message".into()),
@@ -618,9 +616,7 @@ fn receive_token(
         Receiver::Async(subscription) => futures_lite::future::block_on(async {
             match subscription.receive(Duration::from_secs(3)).await {
                 Ok(ReceiveOutcome::Message(mut message)) if message.id().as_str() == expected => {
-                    message
-                        .take_settlement()
-                        .ok_or_else(|| "missing_token".into())
+                    message.take_settlement().ok_or_else(|| "missing_token".into())
                 }
                 Ok(ReceiveOutcome::Message(_)) => Err("event_id_mismatch".into()),
                 Ok(_) => Err("receive_not_message".into()),
@@ -631,24 +627,22 @@ fn receive_token(
 }
 
 fn settle_token(
-    receiver: &mut crate::bench_support::receiver::Receiver,
+    receiver: &mut super::super::bench_support::receiver::Receiver,
     token: qubit_event_bus::spi::SettlementToken,
 ) -> String {
-    use crate::bench_support::receiver::Receiver;
     use qubit_event_bus::spi::DeliveryDisposition;
+
+    use super::super::bench_support::receiver::Receiver;
     match receiver {
-        Receiver::Sync(subscription) => subscription
-            .settle(&token, DeliveryDisposition::Accept)
-            .map_or_else(
+        Receiver::Sync(subscription) => subscription.settle(&token, DeliveryDisposition::Accept).map_or_else(
+            |error| format!("{}:{}", error.operation(), error.kind()),
+            |_| "ok".into(),
+        ),
+        Receiver::Async(subscription) => {
+            futures_lite::future::block_on(subscription.settle(&token, DeliveryDisposition::Accept)).map_or_else(
                 |error| format!("{}:{}", error.operation(), error.kind()),
                 |_| "ok".into(),
-            ),
-        Receiver::Async(subscription) => {
-            futures_lite::future::block_on(subscription.settle(&token, DeliveryDisposition::Accept))
-                .map_or_else(
-                    |error| format!("{}:{}", error.operation(), error.kind()),
-                    |_| "ok".into(),
-                )
+            )
         }
     }
 }

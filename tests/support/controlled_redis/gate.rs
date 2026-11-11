@@ -176,20 +176,14 @@ pub(super) fn is_settlement_eval(request: &[u8]) -> bool {
     let mut fields = Vec::new();
     let mut cursor = 0;
     while cursor < request.len() {
-        let Some(end) = request[cursor..]
-            .windows(2)
-            .position(|pair| pair == b"\r\n")
-        else {
+        let Some(end) = request[cursor..].windows(2).position(|pair| pair == b"\r\n") else {
             return false;
         };
         let header_end = cursor + end;
         let Ok(header) = std::str::from_utf8(&request[cursor..header_end]) else {
             return false;
         };
-        let Some(length) = header
-            .strip_prefix('$')
-            .and_then(|value| value.parse::<usize>().ok())
-        else {
+        let Some(length) = header.strip_prefix('$').and_then(|value| value.parse::<usize>().ok()) else {
             if header.starts_with('*') && fields.is_empty() {
                 cursor = header_end + 2;
                 continue;

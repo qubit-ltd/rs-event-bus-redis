@@ -195,12 +195,7 @@ impl ConnectionLike for PooledConnection {
     /// # Panics
     ///
     /// Panics only if the live-lease socket invariant has been violated.
-    fn req_packed_commands(
-        &mut self,
-        command: &[u8],
-        offset: usize,
-        count: usize,
-    ) -> RedisResult<Vec<Value>> {
+    fn req_packed_commands(&mut self, command: &[u8], offset: usize, count: usize) -> RedisResult<Vec<Value>> {
         let result = self
             .connection
             .as_mut()
@@ -222,10 +217,7 @@ impl ConnectionLike for PooledConnection {
     /// Panics only if the live-lease socket invariant has been violated.
     #[inline]
     fn get_db(&self) -> i64 {
-        self.connection
-            .as_ref()
-            .expect("pooled connection present")
-            .get_db()
+        self.connection.as_ref().expect("pooled connection present").get_db()
     }
     /// Sends a blocking PING using the currently configured socket waits.
     ///
@@ -258,9 +250,6 @@ impl ConnectionLike for PooledConnection {
     /// Panics only if the live-lease socket invariant has been violated.
     #[inline]
     fn is_open(&self) -> bool {
-        self.connection
-            .as_ref()
-            .expect("pooled connection present")
-            .is_open()
+        self.connection.as_ref().expect("pooled connection present").is_open()
     }
 }

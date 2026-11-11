@@ -51,9 +51,7 @@ impl DecodeFailure {
                 resource: Some(topic.as_str().into()),
                 kind: "unsupported_wire_version",
                 retryable: Some(false),
-                source: Box::new(
-                    crate::redis_provider_error::RedisProviderError::UnsupportedWireVersion,
-                ),
+                source: Box::new(crate::redis_provider_error::RedisProviderError::UnsupportedWireVersion),
             }),
         }
     }

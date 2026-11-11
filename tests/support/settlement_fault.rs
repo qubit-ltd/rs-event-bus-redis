@@ -60,12 +60,7 @@ impl Observation {
             .is_some_and(|a| a.succeeded)
     }
 
-    fn record(
-        &self,
-        address: usize,
-        disposition: DeliveryDisposition,
-        result: &Result<(), SpiError>,
-    ) {
+    fn record(&self, address: usize, disposition: DeliveryDisposition, result: &Result<(), SpiError>) {
         self.attempts
             .lock()
             .expect("settlement observations lock")
@@ -104,10 +99,7 @@ impl EventBusSpi for SyncObservedBus {
     fn publish(&self, message: OutboundMessage) -> Result<PublishAcknowledgement, SpiError> {
         self.inner.publish(message)
     }
-    fn subscribe(
-        &self,
-        request: SpiSubscriptionRequest,
-    ) -> Result<Box<dyn EventSubscriptionSpi>, SpiError> {
+    fn subscribe(&self, request: SpiSubscriptionRequest) -> Result<Box<dyn EventSubscriptionSpi>, SpiError> {
         let owner = request.subscription_id();
         Ok(Box::new(SyncObservedReceiver {
             inner: self.inner.subscribe(request)?,
@@ -134,11 +126,7 @@ impl EventSubscriptionSpi for SyncObservedReceiver {
     fn receive(&mut self, timeout: Duration) -> Result<ReceiveOutcome, SpiError> {
         self.inner.receive(timeout)
     }
-    fn settle(
-        &mut self,
-        token: &SettlementToken,
-        disposition: DeliveryDisposition,
-    ) -> Result<(), SpiError> {
+    fn settle(&mut self, token: &SettlementToken, disposition: DeliveryDisposition) -> Result<(), SpiError> {
         assert!(
             token.belongs_to(self.owner),
             "token stays with its original Redis receiver"
@@ -146,16 +134,11 @@ impl EventSubscriptionSpi for SyncObservedReceiver {
         let result = if self.fail_before_settle {
             Err(permanent_failure())
         } else {
-            self.observation
-                .underlying_settles
-                .fetch_add(1, Ordering::SeqCst);
+            self.observation.underlying_settles.fetch_add(1, Ordering::SeqCst);
             self.inner.settle(token, disposition)
         };
-        self.observation.record(
-            token as *const SettlementToken as usize,
-            disposition,
-            &result,
-        );
+        self.observation
+            .record(token as *const SettlementToken as usize, disposition, &result);
         result
     }
     fn close(&mut self) -> Result<(), SpiError> {
@@ -177,10 +160,7 @@ impl AsyncEventBusSpi for AsyncObservedBus {
     fn capabilities(&self) -> EventBusCapabilities {
         self.inner.capabilities()
     }
-    fn publish<'a>(
-        &'a self,
-        message: OutboundMessage,
-    ) -> SpiFuture<'a, Result<PublishAcknowledgement, SpiError>> {
+    fn publish<'a>(&'a self, message: OutboundMessage) -> SpiFuture<'a, Result<PublishAcknowledgement, SpiError>> {
         self.inner.publish(message)
     }
     fn subscribe<'a>(
@@ -198,10 +178,7 @@ impl AsyncEventBusSpi for AsyncObservedBus {
             }) as Box<dyn AsyncEventSubscriptionSpi>)
         })
     }
-    fn shutdown<'a>(
-        &'a self,
-        mode: ShutdownMode,
-    ) -> SpiFuture<'a, Result<ShutdownOutcome, SpiError>> {
+    fn shutdown<'a>(&'a self, mode: ShutdownMode) -> SpiFuture<'a, Result<ShutdownOutcome, SpiError>> {
         self.inner.shutdown(mode)
     }
 }
@@ -216,10 +193,7 @@ struct AsyncObservedReceiver {
 
 #[cfg(feature = "async")]
 impl AsyncEventSubscriptionSpi for AsyncObservedReceiver {
-    fn receive<'a>(
-        &'a mut self,
-        timeout: Duration,
-    ) -> SpiFuture<'a, Result<ReceiveOutcome, SpiError>> {
+    fn receive<'a>(&'a mut self, timeout: Duration) -> SpiFuture<'a, Result<ReceiveOutcome, SpiError>> {
         self.inner.receive(timeout)
     }
     fn settle<'a>(
@@ -237,9 +211,7 @@ impl AsyncEventSubscriptionSpi for AsyncObservedReceiver {
         let future = if self.fail_before_settle {
             Box::pin(async { Err(permanent_failure()) }) as SpiFuture<'a, Result<(), SpiError>>
         } else {
-            self.observation
-                .underlying_settles
-                .fetch_add(1, Ordering::SeqCst);
+            self.observation.underlying_settles.fetch_add(1, Ordering::SeqCst);
             self.inner.settle(token, disposition)
         };
         let observation = self.observation.clone();

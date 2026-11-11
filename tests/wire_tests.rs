@@ -109,9 +109,7 @@ fn config(server: &RedisServer, namespace: &str, payload: usize, wire: usize) ->
 #[cfg(any(feature = "sync", feature = "async"))]
 fn assert_limit(error: SpiError, expected: &str) {
     match error {
-        SpiError::Operation {
-            kind, retryable, ..
-        } => {
+        SpiError::Operation { kind, retryable, .. } => {
             assert_eq!(kind, expected);
             assert_eq!(retryable, Some(false));
         }
@@ -265,14 +263,9 @@ fn test_sync_subscribe_stream_id_cursor_properties() -> TestResult {
             TypeId::of::<Vec<u8>>(),
         )
     };
-    for (index, cursor) in [
-        "0-0",
-        "1-0",
-        "0-1",
-        "18446744073709551615-18446744073709551615",
-    ]
-    .into_iter()
-    .enumerate()
+    for (index, cursor) in ["0-0", "1-0", "0-1", "18446744073709551615-18446744073709551615"]
+        .into_iter()
+        .enumerate()
     {
         let mut receiver = bus.subscribe(request(index as u64 + 1, cursor))?;
         receiver.close()?;
@@ -376,10 +369,8 @@ fn long_metadata_message(field: &str) -> OutboundMessage {
     } else {
         ContentType::new("application/octet-stream").expect("content type")
     };
-    let schema_id =
-        (field == "schema_id").then(|| SchemaId::new(&long).expect("long legal schema"));
-    let ordering_key = (field == "ordering_key")
-        .then(|| OrderingKey::new(&long).expect("long legal ordering key"));
+    let schema_id = (field == "schema_id").then(|| SchemaId::new(&long).expect("long legal schema"));
+    let ordering_key = (field == "ordering_key").then(|| OrderingKey::new(&long).expect("long legal ordering key"));
     OutboundMessage::new(
         TopicAddress::new("events").expect("topic"),
         EventId::new("metadata-limit").expect("id"),
@@ -387,11 +378,7 @@ fn long_metadata_message(field: &str) -> OutboundMessage {
         Headers::new(),
         ordering_key,
         None,
-        TransportPayload::Encoded(EncodedPayload::new(
-            Arc::from(&[255][..]),
-            content_type,
-            schema_id,
-        )),
+        TransportPayload::Encoded(EncodedPayload::new(Arc::from(&[255][..]), content_type, schema_id)),
     )
 }
 

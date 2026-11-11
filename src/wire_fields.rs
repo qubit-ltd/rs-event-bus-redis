@@ -87,9 +87,7 @@ pub(crate) fn clear_encode_gate() {
 
 #[cfg(all(test, any(feature = "sync", feature = "async")))]
 pub(crate) fn encode_gate_test_lock() -> std::sync::MutexGuard<'static, ()> {
-    ENCODE_GATE_TEST_LOCK
-        .lock()
-        .expect("encoding gate test lock")
+    ENCODE_GATE_TEST_LOCK.lock().expect("encoding gate test lock")
 }
 
 #[cfg(all(test, any(feature = "sync", feature = "async")))]
@@ -100,8 +98,7 @@ fn wait_at_encode_gate(message: &OutboundMessage) {
         .expect("encoding gate lock")
         .as_ref()
         .filter(|(event_id, _, _, used)| {
-            event_id == message.id().as_str()
-                && !used.swap(true, std::sync::atomic::Ordering::AcqRel)
+            event_id == message.id().as_str() && !used.swap(true, std::sync::atomic::Ordering::AcqRel)
         })
         .map(|(_, entered, release, _)| (entered.clone(), std::sync::Arc::clone(release)));
     if let Some((entered, release)) = gate {
@@ -220,9 +217,7 @@ impl WireFields {
     /// budgets.
     pub fn from_outbound(message: &OutboundMessage) -> Result<Self, RedisProviderError> {
         let TransportPayload::Encoded(payload) = message.payload() else {
-            return Err(RedisProviderError::Configuration(
-                "encoded payload required",
-            ));
+            return Err(RedisProviderError::Configuration("encoded payload required"));
         };
         let timestamp_ms = message
             .timestamp()
@@ -233,8 +228,7 @@ impl WireFields {
             version: 1,
             event_id: message.id().as_str().to_owned(),
             timestamp_ms,
-            headers_json: to_string(message.headers())
-                .map_err(|_| RedisProviderError::Operation("encode headers"))?,
+            headers_json: to_string(message.headers()).map_err(|_| RedisProviderError::Operation("encode headers"))?,
             ordering_key: message.ordering_key().map(|key| key.as_str().to_owned()),
             content_type: payload.content_type().as_str().to_owned(),
             schema_id: payload.schema_id().map(|schema| schema.as_str().to_owned()),
@@ -272,18 +266,16 @@ impl WireFields {
         if self.version != 1 {
             return Err(RedisProviderError::UnsupportedWireVersion);
         }
-        let id = EventId::new(self.event_id.as_str())
-            .map_err(|_| RedisProviderError::Operation("decode event ID"))?;
-        let timestamp_ms = u64::try_from(self.timestamp_ms).map_err(|_| {
-            RedisProviderError::Configuration("timestamp_ms exceeds the supported range")
-        })?;
-        let timestamp = UNIX_EPOCH
-            .checked_add(Duration::from_millis(timestamp_ms))
-            .ok_or(RedisProviderError::Configuration(
-                "timestamp_ms exceeds the platform range",
-            ))?;
-        let headers = from_str(&self.headers_json)
-            .map_err(|_| RedisProviderError::Operation("decode headers"))?;
+        let id = EventId::new(self.event_id.as_str()).map_err(|_| RedisProviderError::Operation("decode event ID"))?;
+        let timestamp_ms = u64::try_from(self.timestamp_ms)
+            .map_err(|_| RedisProviderError::Configuration("timestamp_ms exceeds the supported range"))?;
+        let timestamp =
+            UNIX_EPOCH
+                .checked_add(Duration::from_millis(timestamp_ms))
+                .ok_or(RedisProviderError::Configuration(
+                    "timestamp_ms exceeds the platform range",
+                ))?;
+        let headers = from_str(&self.headers_json).map_err(|_| RedisProviderError::Operation("decode headers"))?;
         let content_type = ContentType::new(self.content_type.as_str())
             .map_err(|_| RedisProviderError::Operation("decode content type"))?;
         let schema_id = self
@@ -294,10 +286,9 @@ impl WireFields {
             .map_err(|_| RedisProviderError::Operation("decode schema ID"))?;
         let payload = EncodedPayload::new(Arc::from(self.payload), content_type, schema_id);
         let ordering_key = match self.ordering_key.as_deref() {
-            Some(value) => Some(
-                OrderingKey::new(value)
-                    .ok_or(RedisProviderError::Configuration("invalid ordering key"))?,
-            ),
+            Some(value) => {
+                Some(OrderingKey::new(value).ok_or(RedisProviderError::Configuration("invalid ordering key"))?)
+            }
             None => None,
         };
         Ok((
@@ -330,10 +321,7 @@ impl WireFields {
     /// Version 1 field validation runs only after version selection.
     /// Decoding performs no external I/O.
     #[cfg(any(feature = "sync", feature = "async"))]
-    pub(crate) fn decode_wire(
-        encoded: &str,
-        limits: WireLimits,
-    ) -> Result<Self, RedisProviderError> {
+    pub(crate) fn decode_wire(encoded: &str, limits: WireLimits) -> Result<Self, RedisProviderError> {
         crate::bounded_wire_decoder::decode(encoded.as_bytes(), limits)
     }
 }
@@ -358,22 +346,16 @@ impl WireFields {
 /// header and complete wire strings are allocated. No Redis command or other
 /// external I/O is performed.
 #[cfg(any(feature = "sync", feature = "async"))]
-pub(crate) fn encode_bounded(
-    message: &OutboundMessage,
-    limits: WireLimits,
-) -> Result<String, RedisProviderError> {
+pub(crate) fn encode_bounded(message: &OutboundMessage, limits: WireLimits) -> Result<String, RedisProviderError> {
     #[cfg(all(test, any(feature = "sync", feature = "async")))]
     ENCODE_COUNT.set(ENCODE_COUNT.get() + 1);
     #[cfg(all(test, any(feature = "sync", feature = "async")))]
     wait_at_encode_gate(message);
     let TransportPayload::Encoded(payload) = message.payload() else {
-        return Err(RedisProviderError::Configuration(
-            "encoded payload required",
-        ));
+        return Err(RedisProviderError::Configuration("encoded payload required"));
     };
     limits.check_payload(payload.bytes().len())?;
-    let headers_json =
-        BoundedWriter::new(limits.headers.min(limits.wire)).serialize(message.headers())?;
+    let headers_json = BoundedWriter::new(limits.headers.min(limits.wire)).serialize(message.headers())?;
     let timestamp_ms = message
         .timestamp()
         .duration_since(UNIX_EPOCH)
@@ -399,14 +381,9 @@ pub(crate) fn encode_bounded(
 /// Returns an error when the message is not encoded or its payload exceeds the
 /// configured limit.
 #[cfg(any(feature = "sync", feature = "async"))]
-pub(crate) fn check_publish_payload(
-    message: &OutboundMessage,
-    limits: WireLimits,
-) -> Result<(), RedisProviderError> {
+pub(crate) fn check_publish_payload(message: &OutboundMessage, limits: WireLimits) -> Result<(), RedisProviderError> {
     let TransportPayload::Encoded(payload) = message.payload() else {
-        return Err(RedisProviderError::Configuration(
-            "encoded payload required",
-        ));
+        return Err(RedisProviderError::Configuration("encoded payload required"));
     };
     limits.check_payload(payload.bytes().len())
 }

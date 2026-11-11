@@ -29,12 +29,8 @@ use qubit_event_bus_redis::RedisSubscriptionProfile;
 use qubit_spi::ProviderSelection;
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let redis_url = args()
-        .nth(1)
-        .unwrap_or_else(|| "redis://127.0.0.1/".to_owned());
-    let namespace = args()
-        .nth(2)
-        .unwrap_or_else(|| "sync-orders-example".to_owned());
+    let redis_url = args().nth(1).unwrap_or_else(|| "redis://127.0.0.1/".to_owned());
+    let namespace = args().nth(2).unwrap_or_else(|| "sync-orders-example".to_owned());
     let config = EventBusConfig::default()
         .with_selection(ProviderSelection::named("redis-streams")?)
         .with_provider_options(support::provider_options(&redis_url, &namespace, None))

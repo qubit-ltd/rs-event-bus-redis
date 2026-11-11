@@ -17,11 +17,7 @@ use crate::redis_provider_error::from_redis_error;
 #[test]
 fn test_redis_error_categories_are_stable_and_secret_safe() {
     for (error_kind, expected_kind, expected_retryable) in [
-        (
-            ErrorKind::AuthenticationFailed,
-            "authentication",
-            Some(false),
-        ),
+        (ErrorKind::AuthenticationFailed, "authentication", Some(false)),
         (ErrorKind::UnexpectedReturnType, "wrong_type", Some(false)),
         (ErrorKind::InvalidClientConfig, "configuration", Some(false)),
         (ErrorKind::EmptySentinelList, "configuration", Some(false)),

@@ -90,18 +90,14 @@ mod synchronous {
 
     /// Ensures provider creation errors hide invalid TLS paths and PEM bytes.
     #[test]
-    fn test_sync_tls_certificate_configuration_errors_are_sanitized() -> Result<(), Box<dyn Error>>
-    {
+    fn test_sync_tls_certificate_configuration_errors_are_sanitized() -> Result<(), Box<dyn Error>> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("private-ca.pem");
         std::fs::write(&path, b"TEST-PRIVATE-CERTIFICATE-CONTENT")?;
         let ca_path = path.to_string_lossy().into_owned();
-        let error = create_bus(
-            "rediss://localhost:6379/",
-            &[("redis.tls_ca_cert_path", &ca_path)],
-        )
-        .err()
-        .ok_or("invalid PEM must fail during provider construction")?;
+        let error = create_bus("rediss://localhost:6379/", &[("redis.tls_ca_cert_path", &ca_path)])
+            .err()
+            .ok_or("invalid PEM must fail during provider construction")?;
         let diagnostic = format!("{error:?} {error}");
         assert!(!diagnostic.contains(&ca_path));
         assert!(!diagnostic.contains("TEST-PRIVATE-CERTIFICATE-CONTENT"));
@@ -109,10 +105,7 @@ mod synchronous {
     }
 
     /// Builds a synchronous public provider with the supplied TLS options.
-    fn create_bus(
-        url: &str,
-        tls_options: &[(&str, &str)],
-    ) -> Result<Arc<dyn EventBusSpi>, Box<dyn Error>> {
+    fn create_bus(url: &str, tls_options: &[(&str, &str)]) -> Result<Arc<dyn EventBusSpi>, Box<dyn Error>> {
         let mut options = ProviderOptions::new();
         options.insert("redis.url".into(), url.into());
         options.insert("redis.namespace".into(), "sync-tls-tests".into());
@@ -129,8 +122,7 @@ mod synchronous {
     fn verify_round_trip(bus: Arc<dyn EventBusSpi>) -> Result<(), Box<dyn Error>> {
         let _ = bus.publish(message("tls-orders", "sync-tls-event", b"verified tls")?)?;
         let mut receiver = bus.subscribe(request("tls-orders", "sync-tls-worker")?)?;
-        let ReceiveOutcome::Message(mut received) = receiver.receive(Duration::from_secs(3))?
-        else {
+        let ReceiveOutcome::Message(mut received) = receiver.receive(Duration::from_secs(3))? else {
             return Err("TLS event was not received".into());
         };
         let TransportPayload::Encoded(payload) = received.payload() else {
@@ -207,21 +199,15 @@ mod asynchronous {
         let _ = bus
             .publish(message("tls-orders", "async-tls-event", b"verified tls")?)
             .await?;
-        let mut receiver = bus
-            .subscribe(request("tls-orders", "async-tls-worker")?)
-            .await?;
-        let ReceiveOutcome::Message(mut received) =
-            receiver.receive(Duration::from_secs(3)).await?
-        else {
+        let mut receiver = bus.subscribe(request("tls-orders", "async-tls-worker")?).await?;
+        let ReceiveOutcome::Message(mut received) = receiver.receive(Duration::from_secs(3)).await? else {
             return Err("async TLS event was not received".into());
         };
         let TransportPayload::Encoded(payload) = received.payload() else {
             return Err("async TLS event payload was not encoded".into());
         };
         assert_eq!(payload.bytes(), b"verified tls");
-        let token = received
-            .take_settlement()
-            .ok_or("missing async ACK token")?;
+        let token = received.take_settlement().ok_or("missing async ACK token")?;
         receiver.settle(&token, DeliveryDisposition::Accept).await?;
         receiver.close().await?;
         Ok(())

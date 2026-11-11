@@ -64,8 +64,8 @@ fn test_async_tls_sentinel_discovers_tls_master() -> Result<(), Box<dyn Error>> 
 
     let sentinel = TlsSentinel::start(true)?;
     let config = config(&sentinel, true, &namespace());
-    let bus = block_on(AsyncRedisEventBusProvider.create_configured(&config))
-        .map_err(|failure| failure.into_error())?;
+    let bus =
+        block_on(AsyncRedisEventBusProvider.create_configured(&config)).map_err(|failure| failure.into_error())?;
     let event = message("tls-sentinel-to-tls-master")?;
     let _ = block_on(async { bus.publish(event).await })?;
     Ok(())
@@ -81,10 +81,8 @@ fn test_async_tls_sentinel_rediscovers_tls_master_after_failover() -> Result<(),
     let mut sentinel = stage(TlsSentinel::start(true), "start async TLS Sentinel fixture")?;
     let namespace = namespace();
     let bus = stage(
-        block_on(
-            AsyncRedisEventBusProvider.create_configured(&config(&sentinel, true, &namespace)),
-        )
-        .map_err(|failure| failure.into_error()),
+        block_on(AsyncRedisEventBusProvider.create_configured(&config(&sentinel, true, &namespace)))
+            .map_err(|failure| failure.into_error()),
         "create async Redis provider",
     )?;
     let mut receiver = stage(
@@ -166,18 +164,14 @@ fn test_async_tls_sentinel_rediscovers_tls_master_after_failover() -> Result<(),
             }
         }
     }
-    let mut recovered = recovered
-        .ok_or("same async receiver did not recover the pending record before deadline")?;
+    let mut recovered = recovered.ok_or("same async receiver did not recover the pending record before deadline")?;
     assert_eq!(
         recovered.id().as_str(),
         event_id,
         "recovery must preserve the business event ID"
     );
     let (recovered_id, _) = sentinel.pending_identity(promoted_master, &stream, &group)?;
-    assert_eq!(
-        recovered_id, pending_id,
-        "recovery must preserve the Redis stream ID"
-    );
+    assert_eq!(recovered_id, pending_id, "recovery must preserve the Redis stream ID");
     let token = recovered
         .take_settlement()
         .ok_or("recovered message has no settlement token")?;
@@ -211,10 +205,8 @@ fn test_sync_tls_sentinel_rediscovers_tls_master_after_failover() -> Result<(), 
     let before_failover = message("before-tls-sentinel-failover")?;
     let event_id = before_failover.id().as_str().to_owned();
     let _ = stage(bus.publish(before_failover), "publish initial sync event")?;
-    let ReceiveOutcome::Message(mut pending) = stage(
-        receiver.receive(Duration::from_secs(5)),
-        "receive initial sync event",
-    )?
+    let ReceiveOutcome::Message(mut pending) =
+        stage(receiver.receive(Duration::from_secs(5)), "receive initial sync event")?
     else {
         return Err("TLS Sentinel receiver did not receive the pre-failover record".into());
     };
@@ -278,18 +270,14 @@ fn test_sync_tls_sentinel_rediscovers_tls_master_after_failover() -> Result<(), 
             }
         }
     }
-    let mut recovered =
-        recovered.ok_or("same sync receiver did not recover the pending record before deadline")?;
+    let mut recovered = recovered.ok_or("same sync receiver did not recover the pending record before deadline")?;
     assert_eq!(
         recovered.id().as_str(),
         event_id,
         "recovery must preserve the business event ID"
     );
     let (recovered_id, _) = sentinel.pending_identity(promoted_master, &stream, &group)?;
-    assert_eq!(
-        recovered_id, pending_id,
-        "recovery must preserve the Redis stream ID"
-    );
+    assert_eq!(recovered_id, pending_id, "recovery must preserve the Redis stream ID");
     let token = recovered
         .take_settlement()
         .ok_or("recovered message has no settlement token")?;
@@ -314,10 +302,7 @@ fn config(sentinel: &TlsSentinel, sentinel_tls: bool, namespace: &str) -> EventB
     .into();
     if sentinel_tls {
         options.insert("redis.sentinel.tls".into(), "true".into());
-        options.insert(
-            "redis.sentinel.tls_ca_cert_path".into(),
-            sentinel.ca_path().into(),
-        );
+        options.insert("redis.sentinel.tls_ca_cert_path".into(), sentinel.ca_path().into());
     }
     EventBusConfig::default().with_provider_options(options)
 }
@@ -330,10 +315,7 @@ fn stage<T, E: std::fmt::Display>(result: Result<T, E>, label: &str) -> Result<T
     result.map_err(|error| format!("{label}: {error}").into())
 }
 
-fn subscription_request(
-    id: u64,
-    subscriber: &str,
-) -> Result<SpiSubscriptionRequest, Box<dyn Error>> {
+fn subscription_request(id: u64, subscriber: &str) -> Result<SpiSubscriptionRequest, Box<dyn Error>> {
     Ok(SpiSubscriptionRequest::new(
         Id::new(id),
         qubit_event_bus::spi::TopicAddress::new("tls-sentinel-events")?,

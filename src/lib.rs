@@ -6,6 +6,7 @@
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 //! Redis Streams providers for the Qubit Event Bus.
+
 //!
 //! This crate implements durable event-bus publication and consumption over
 //! Redis Streams. It provides blocking and runtime-neutral asynchronous
@@ -111,6 +112,9 @@
     doc = "\nThe asynchronous implementation is [`async::AsyncRedisEventBusProvider`]."
 )]
 #![forbid(unsafe_code)]
+
+#[cfg(test)]
+extern crate self as qubit_event_bus_redis;
 
 #[cfg(any(feature = "sync", feature = "async"))]
 #[path = "internal/bounded_wire_decoder.rs"]

@@ -36,12 +36,7 @@ mod tests {
 
     #[test]
     fn test_valid_stream_id_accepts_decimal_components_within_u64() {
-        for value in [
-            "0-0",
-            "123-0",
-            "01-002",
-            "18446744073709551615-18446744073709551615",
-        ] {
+        for value in ["0-0", "123-0", "01-002", "18446744073709551615-18446744073709551615"] {
             assert!(valid_stream_id(value), "rejected valid ID {value:?}");
         }
     }

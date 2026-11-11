@@ -10,14 +10,20 @@
 use std::error::Error;
 use std::fs;
 use std::io::copy;
-use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
+use std::net::Shutdown;
+use std::net::SocketAddr;
+use std::net::TcpListener;
+use std::net::TcpStream;
 use std::process::Child;
 use std::process::Command;
 use std::process::Stdio;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
+use std::thread;
+use std::thread::JoinHandle;
 use std::thread::sleep;
-use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use std::time::Instant;
 
@@ -45,8 +51,7 @@ impl TlsSentinel {
     /// Starts a Redis 7 TLS master/replica and three TLS or plaintext
     /// Sentinels.
     pub fn start(sentinel_tls: bool) -> Result<Self, Box<dyn Error>> {
-        let mut fixture =
-            Self::start_docker(sentinel_tls).or_else(|_| Self::start_local(sentinel_tls))?;
+        let mut fixture = Self::start_docker(sentinel_tls).or_else(|_| Self::start_local(sentinel_tls))?;
         fixture.sentinel_proxies = fixture
             .sentinel_ports
             .iter()
@@ -57,14 +62,8 @@ impl TlsSentinel {
 
     fn start_docker(sentinel_tls: bool) -> Result<Self, Box<dyn Error>> {
         let certs = context(TempDir::new(), "create TLS certificate directory")?;
-        context(
-            generate_certificates(certs.path()),
-            "generate TLS certificates",
-        )?;
-        context(
-            make_readable(certs.path()),
-            "make TLS certificates readable",
-        )?;
+        context(generate_certificates(certs.path()), "generate TLS certificates")?;
+        context(make_readable(certs.path()), "make TLS certificates readable")?;
         let master_port = context(free_port(), "allocate TLS master port")?;
         let replica_port = context(free_port(), "allocate TLS replica port")?;
         let mut fixture = Self {
@@ -197,14 +196,8 @@ impl TlsSentinel {
 
     fn start_local(sentinel_tls: bool) -> Result<Self, Box<dyn Error>> {
         let certs = context(TempDir::new(), "create TLS certificate directory")?;
-        context(
-            generate_certificates(certs.path()),
-            "generate TLS certificates",
-        )?;
-        context(
-            make_readable(certs.path()),
-            "make TLS certificates readable",
-        )?;
+        context(generate_certificates(certs.path()), "generate TLS certificates")?;
+        context(make_readable(certs.path()), "make TLS certificates readable")?;
         let master_port = context(free_port(), "allocate TLS master port")?;
         let replica_port = context(free_port(), "allocate TLS replica port")?;
         let cert_path = certs.path().to_string_lossy().into_owned();
@@ -251,10 +244,7 @@ impl TlsSentinel {
             "yes".into(),
         ]);
         let master_data = context(TempDir::new(), "create local TLS master data directory")?;
-        master_args.extend([
-            "--dir".into(),
-            master_data.path().to_string_lossy().into_owned(),
-        ]);
+        master_args.extend(["--dir".into(), master_data.path().to_string_lossy().into_owned()]);
         fixture.children.push(spawn_redis(&master_args)?);
         fixture.directories.push(master_data);
 
@@ -270,10 +260,7 @@ impl TlsSentinel {
             master_port.to_string(),
         ]);
         let replica_data = context(TempDir::new(), "create local TLS replica data directory")?;
-        replica_args.extend([
-            "--dir".into(),
-            replica_data.path().to_string_lossy().into_owned(),
-        ]);
+        replica_args.extend(["--dir".into(), replica_data.path().to_string_lossy().into_owned()]);
         fixture.children.push(spawn_redis(&replica_args)?);
         fixture.directories.push(replica_data);
 
@@ -294,11 +281,7 @@ impl TlsSentinel {
                 "make Sentinel configuration writable",
             )?;
             fixture.children.push(spawn_redis(&[
-                directory
-                    .path()
-                    .join("sentinel.conf")
-                    .to_string_lossy()
-                    .into_owned(),
+                directory.path().join("sentinel.conf").to_string_lossy().into_owned(),
                 "--sentinel".into(),
             ])?);
             fixture.directories.push(directory);
@@ -366,27 +349,15 @@ impl TlsSentinel {
     }
 
     /// Reads the sole pending stream ID and its owner from a verified TLS node.
-    pub fn pending_identity(
-        &self,
-        port: u16,
-        stream: &str,
-        group: &str,
-    ) -> Result<(String, String), Box<dyn Error>> {
+    pub fn pending_identity(&self, port: u16, stream: &str, group: &str) -> Result<(String, String), Box<dyn Error>> {
         let (cursor, pending) = self.group_state(port, stream, group)?;
         assert_eq!(
             pending.ids.len(),
             1,
             "the delivered record must be the sole pending entry"
         );
-        let entry = pending
-            .ids
-            .into_iter()
-            .next()
-            .ok_or("missing pending entry")?;
-        assert_eq!(
-            cursor, entry.id,
-            "group cursor must identify the pending delivery"
-        );
+        let entry = pending.ids.into_iter().next().ok_or("missing pending entry")?;
+        assert_eq!(cursor, entry.id, "group cursor must identify the pending delivery");
         Ok((entry.id, entry.consumer))
     }
 
@@ -405,10 +376,7 @@ impl TlsSentinel {
         )?;
         let _: String = context(
             cmd("SET")
-                .arg(format!(
-                    "tls-sentinel:barrier:{}",
-                    expected_id.replace('-', "_")
-                ))
+                .arg(format!("tls-sentinel:barrier:{}", expected_id.replace('-', "_")))
                 .arg("ready")
                 .query(&mut connection),
             "write replication barrier on TLS master connection",
@@ -449,17 +417,9 @@ impl TlsSentinel {
 
     /// Confirms the stream group has no pending entries on the verified TLS
     /// node.
-    pub fn assert_pending_empty(
-        &self,
-        port: u16,
-        stream: &str,
-        group: &str,
-    ) -> Result<(), Box<dyn Error>> {
+    pub fn assert_pending_empty(&self, port: u16, stream: &str, group: &str) -> Result<(), Box<dyn Error>> {
         let (_, pending) = self.group_state(port, stream, group)?;
-        assert!(
-            pending.ids.is_empty(),
-            "ACK must empty the PEL: {pending:?}"
-        );
+        assert!(pending.ids.is_empty(), "ACK must empty the PEL: {pending:?}");
         Ok(())
     }
 
@@ -495,15 +455,9 @@ impl TlsSentinel {
         stream: &str,
         group: &str,
     ) -> Result<(String, StreamPendingCountReply), Box<dyn Error>> {
-        let mut connection = context(
-            self.tls_connection(port),
-            "open TLS connection for group inspection",
-        )?;
+        let mut connection = context(self.tls_connection(port), "open TLS connection for group inspection")?;
         let groups: StreamInfoGroupsReply = context(
-            cmd("XINFO")
-                .arg("GROUPS")
-                .arg(stream)
-                .query(&mut connection),
+            cmd("XINFO").arg("GROUPS").arg(stream).query(&mut connection),
             "query XINFO GROUPS over TLS",
         )?;
         let cursor = groups
@@ -529,9 +483,7 @@ impl TlsSentinel {
     pub fn master_port(&self) -> Result<u16, Box<dyn Error>> {
         let deadline = Instant::now() + Duration::from_secs(20);
         loop {
-            if let Ok(port) =
-                query_master_port(self.sentinel_ports[0], self.sentinel_tls, &self.ca_path)
-            {
+            if let Ok(port) = query_master_port(self.sentinel_ports[0], self.sentinel_tls, &self.ca_path) {
                 return Ok(port);
             }
             if Instant::now() >= deadline {
@@ -551,21 +503,13 @@ impl TlsSentinel {
             wait_result?;
             return Ok(());
         }
-        let id = self
-            .containers
-            .first()
-            .ok_or("missing original master")?
-            .clone();
+        let id = self.containers.first().ok_or("missing original master")?.clone();
         let output = Command::new("docker").args(["stop", &id]).output()?;
         if output.status.success() {
             self.containers.remove(0);
             Ok(())
         } else {
-            Err(format!(
-                "docker stop failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            )
-            .into())
+            Err(format!("docker stop failed: {}", String::from_utf8_lossy(&output.stderr)).into())
         }
     }
 
@@ -579,15 +523,10 @@ impl TlsSentinel {
             let healthy_sentinel_count = self
                 .sentinel_ports
                 .iter()
-                .filter(|port| {
-                    sentinel_has_healthy_replica(**port, self.sentinel_tls, &self.ca_path)
-                })
+                .filter(|port| sentinel_has_healthy_replica(**port, self.sentinel_tls, &self.ca_path))
                 .count();
             let replica_ready = tls_replica_online(self.master_port, &self.ca_path);
-            if all_sentinels_ready
-                && healthy_sentinel_count > self.sentinel_ports.len() / 2
-                && replica_ready
-            {
+            if all_sentinels_ready && healthy_sentinel_count > self.sentinel_ports.len() / 2 && replica_ready {
                 return Ok(());
             }
             if Instant::now() >= deadline {
@@ -663,8 +602,7 @@ impl Drop for TlsSentinelConnectionCounter {
 }
 
 fn relay_tls(client: TcpStream, server: TcpStream) {
-    let (Ok(mut client_reader), Ok(mut server_reader)) = (client.try_clone(), server.try_clone())
-    else {
+    let (Ok(mut client_reader), Ok(mut server_reader)) = (client.try_clone(), server.try_clone()) else {
         return;
     };
     let (mut client_writer, mut server_writer) = (client, server);
@@ -694,8 +632,7 @@ impl Drop for TlsSentinel {
 }
 
 fn spawn_redis(args: &[String]) -> Result<Child, Box<dyn Error>> {
-    let server =
-        std::env::var_os("RER_TLS_TEST_REDIS_SERVER").unwrap_or_else(|| "redis-server".into());
+    let server = std::env::var_os("RER_TLS_TEST_REDIS_SERVER").unwrap_or_else(|| "redis-server".into());
     Ok(Command::new(server)
         .args(args)
         .arg("--daemonize")
@@ -712,10 +649,7 @@ fn query_master_port(port: u16, tls: bool, ca_path: &str) -> Result<u16, Box<dyn
         .arg("get-master-addr-by-name")
         .arg("qeventbus")
         .query(&mut connection)?;
-    Ok(result
-        .get(1)
-        .ok_or("Sentinel returned no master port")?
-        .parse()?)
+    Ok(result.get(1).ok_or("Sentinel returned no master port")?.parse()?)
 }
 
 fn tls_client(port: u16, ca_path: &str) -> Result<Client, Box<dyn Error>> {
@@ -756,9 +690,7 @@ fn sentinel_has_healthy_replica(port: u16, tls: bool, ca_path: &str) -> bool {
         fields
             .get("flags")
             .is_some_and(|flags| !flags.contains("s_down") && !flags.contains("o_down"))
-            && fields
-                .get("master-link-status")
-                .is_some_and(|status| status == "ok")
+            && fields.get("master-link-status").is_some_and(|status| status == "ok")
     })
 }
 
@@ -775,10 +707,7 @@ fn tls_replica_online(port: u16, ca_path: &str) -> bool {
         .is_ok_and(|info| info.contains("connected_slaves:1") && info.contains("state=online"))
 }
 
-fn context<T, E: std::fmt::Display>(
-    result: Result<T, E>,
-    stage: &str,
-) -> Result<T, Box<dyn Error>> {
+fn context<T, E: std::fmt::Display>(result: Result<T, E>, stage: &str) -> Result<T, Box<dyn Error>> {
     result.map_err(|error| format!("{stage}: {error}").into())
 }
 
@@ -787,17 +716,14 @@ fn make_sentinel_config_writable(directory: &std::path::Path) -> Result<(), Box<
     {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(directory, fs::Permissions::from_mode(0o777))?;
-        fs::set_permissions(
-            directory.join("sentinel.conf"),
-            fs::Permissions::from_mode(0o666),
-        )?;
+        fs::set_permissions(directory.join("sentinel.conf"), fs::Permissions::from_mode(0o666))?;
     }
     Ok(())
 }
 
 fn free_port() -> Result<u16, Box<dyn Error>> {
-    let listener = TcpListener::bind(("127.0.0.1", 0))
-        .map_err(|error| format!("bind temporary loopback port: {error}"))?;
+    let listener =
+        TcpListener::bind(("127.0.0.1", 0)).map_err(|error| format!("bind temporary loopback port: {error}"))?;
     Ok(listener
         .local_addr()
         .map_err(|error| format!("read temporary loopback port: {error}"))?
@@ -812,11 +738,7 @@ fn start_container<const N: usize>(args: [&str; N]) -> Result<String, Box<dyn Er
     if output.status.success() {
         Ok(String::from_utf8(output.stdout)?.trim().to_owned())
     } else {
-        Err(format!(
-            "docker run failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        )
-        .into())
+        Err(format!("docker run failed: {}", String::from_utf8_lossy(&output.stderr)).into())
     }
 }
 
@@ -881,10 +803,7 @@ fn generate_certificates(directory: &std::path::Path) -> Result<(), Box<dyn Erro
     Ok(())
 }
 
-fn openssl<const N: usize>(
-    directory: &std::path::Path,
-    args: [&str; N],
-) -> Result<(), Box<dyn Error>> {
+fn openssl<const N: usize>(directory: &std::path::Path, args: [&str; N]) -> Result<(), Box<dyn Error>> {
     let output = Command::new("openssl")
         .current_dir(directory)
         .args(args)
@@ -893,11 +812,7 @@ fn openssl<const N: usize>(
     if output.status.success() {
         Ok(())
     } else {
-        Err(format!(
-            "openssl failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        )
-        .into())
+        Err(format!("openssl failed: {}", String::from_utf8_lossy(&output.stderr)).into())
     }
 }
 

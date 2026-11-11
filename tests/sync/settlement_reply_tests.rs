@@ -91,12 +91,7 @@ fn assert_ack_applied(server: &RedisServer) -> TestResult {
     let mut observer = Client::open(server.url())?.get_connection()?;
     let pending: Vec<Value> = cmd("XPENDING")
         .arg(stream_key("settlement-tests", "settlement"))
-        .arg(group_name(
-            "settlement-tests",
-            "settlement",
-            "worker",
-            Some("group"),
-        ))
+        .arg(group_name("settlement-tests", "settlement", "worker", Some("group")))
         .arg("-")
         .arg("+")
         .arg(10)

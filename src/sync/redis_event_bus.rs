@@ -95,25 +95,19 @@ impl EventBusSpi for RedisEventBus {
     /// malformed reply after send returns outcome-unknown without replay.
     fn publish(&self, message: OutboundMessage) -> Result<PublishAcknowledgement, SpiError> {
         let limits = WireLimits::from_config(&self.settings);
-        check_publish_payload(&message, limits).map_err(|error| {
-            to_publish_error(message.topic(), error, PublishEffect::NotAccepted)
-        })?;
+        check_publish_payload(&message, limits)
+            .map_err(|error| to_publish_error(message.topic(), error, PublishEffect::NotAccepted))?;
         let permit = self
             .client
             .try_command_permit(CommandClass::General)
-            .map_err(|error| {
-                to_publish_error(message.topic(), error, PublishEffect::NotAccepted)
-            })?;
-        let payload = encode_bounded(&message, limits).map_err(|error| {
-            to_publish_error(message.topic(), error, PublishEffect::NotAccepted)
-        })?;
+            .map_err(|error| to_publish_error(message.topic(), error, PublishEffect::NotAccepted))?;
+        let payload = encode_bounded(&message, limits)
+            .map_err(|error| to_publish_error(message.topic(), error, PublishEffect::NotAccepted))?;
         let key = stream_key(self.settings.namespace(), message.topic().as_str());
         let mut connection = self
             .client
             .get_connection_with_permit(permit)
-            .map_err(|error| {
-                to_publish_error(message.topic(), error, PublishEffect::NotAccepted)
-            })?;
+            .map_err(|error| to_publish_error(message.topic(), error, PublishEffect::NotAccepted))?;
         let mut command = cmd("XADD");
         command.arg(&key);
         if let Some(maxlen) = self.settings.stream_maxlen_approx() {
@@ -196,10 +190,7 @@ impl EventBusSpi for RedisEventBus {
     /// or rejection also remains `subscribe/outcome_unknown`. The single
     /// retry can succeed on `+OK`, or on `BUSYGROUP` when the request accepts
     /// the existing cursor (`New` or explicit `resume`).
-    fn subscribe(
-        &self,
-        request: SpiSubscriptionRequest,
-    ) -> Result<Box<dyn EventSubscriptionSpi>, SpiError> {
+    fn subscribe(&self, request: SpiSubscriptionRequest) -> Result<Box<dyn EventSubscriptionSpi>, SpiError> {
         let topic = request.topic().clone();
         if request.durability() != SubscriptionDurability::Durable {
             return Err(SpiError::Operation {
@@ -257,20 +248,19 @@ impl EventBusSpi for RedisEventBus {
             .arg(&group)
             .arg(start)
             .arg("MKSTREAM");
-        let (result, malformed_reply): (Result<(), RedisError>, bool) =
-            match connection.req_command(&create_command) {
-                Ok(Value::Okay) => (Ok(()), false),
-                Ok(Value::ServerError(error)) => (Err(error.into()), false),
-                Ok(_) => {
-                    connection.discard();
-                    (Ok(()), true)
-                }
-                Err(error) if error.is_io_error() || error.is_timeout() => (Err(error), false),
-                Err(error) => {
-                    connection.discard();
-                    (Err(error), true)
-                }
-            };
+        let (result, malformed_reply): (Result<(), RedisError>, bool) = match connection.req_command(&create_command) {
+            Ok(Value::Okay) => (Ok(()), false),
+            Ok(Value::ServerError(error)) => (Err(error.into()), false),
+            Ok(_) => {
+                connection.discard();
+                (Ok(()), true)
+            }
+            Err(error) if error.is_io_error() || error.is_timeout() => (Err(error), false),
+            Err(error) => {
+                connection.discard();
+                (Err(error), true)
+            }
+        };
         let first_result_unknown = result
             .as_ref()
             .is_err_and(|error| error.is_io_error() || error.is_timeout());
@@ -279,31 +269,25 @@ impl EventBusSpi for RedisEventBus {
         } else if first_result_unknown {
             connection.discard();
             drop(connection);
-            let mut retry_connection =
-                self.client
-                    .get_connection(CommandClass::General)
-                    .map_err(|_| {
-                        spi_error(
-                            "subscribe",
-                            Some(&topic),
-                            RedisProviderError::OutcomeUnknown {
-                                operation: "subscribe",
-                            },
-                        )
-                    })?;
-            let (retry_result, malformed_reply) =
-                match retry_connection.req_command(&create_command) {
-                    Ok(Value::Okay) => (Ok(()), false),
-                    Ok(Value::ServerError(error)) => (Err(error.into()), false),
-                    Ok(_) => {
-                        retry_connection.discard();
-                        (Ok(()), true)
-                    }
-                    Err(error) => {
-                        retry_connection.discard();
-                        (Err(error), true)
-                    }
-                };
+            let mut retry_connection = self.client.get_connection(CommandClass::General).map_err(|_| {
+                spi_error(
+                    "subscribe",
+                    Some(&topic),
+                    RedisProviderError::OutcomeUnknown { operation: "subscribe" },
+                )
+            })?;
+            let (retry_result, malformed_reply) = match retry_connection.req_command(&create_command) {
+                Ok(Value::Okay) => (Ok(()), false),
+                Ok(Value::ServerError(error)) => (Err(error.into()), false),
+                Ok(_) => {
+                    retry_connection.discard();
+                    (Ok(()), true)
+                }
+                Err(error) => {
+                    retry_connection.discard();
+                    (Err(error), true)
+                }
+            };
             (retry_result, malformed_reply)
         } else {
             (result, false)
@@ -312,9 +296,7 @@ impl EventBusSpi for RedisEventBus {
             return Err(spi_error(
                 "subscribe",
                 Some(&topic),
-                RedisProviderError::OutcomeUnknown {
-                    operation: "subscribe",
-                },
+                RedisProviderError::OutcomeUnknown { operation: "subscribe" },
             ));
         }
         if matches!(&result, Err(error) if error.code() == Some("BUSYGROUP")) {
@@ -323,9 +305,7 @@ impl EventBusSpi for RedisEventBus {
                     spi_error(
                         "subscribe",
                         Some(&topic),
-                        RedisProviderError::OutcomeUnknown {
-                            operation: "subscribe",
-                        },
+                        RedisProviderError::OutcomeUnknown { operation: "subscribe" },
                     )
                 } else {
                     error
@@ -336,9 +316,7 @@ impl EventBusSpi for RedisEventBus {
                 return Err(spi_error(
                     "subscribe",
                     Some(&topic),
-                    RedisProviderError::OutcomeUnknown {
-                        operation: "subscribe",
-                    },
+                    RedisProviderError::OutcomeUnknown { operation: "subscribe" },
                 ));
             }
             return Err(spi_error(
@@ -409,11 +387,7 @@ impl EventBusSpi for RedisEventBus {
 /// reflects both the failure category and whether that operation can safely
 /// recover.
 #[inline]
-pub(super) fn spi_error(
-    operation: &'static str,
-    topic: Option<&TopicAddress>,
-    source: RedisProviderError,
-) -> SpiError {
+pub(super) fn spi_error(operation: &'static str, topic: Option<&TopicAddress>, source: RedisProviderError) -> SpiError {
     crate::error::to_spi_error(operation, topic, source)
 }
 
@@ -604,10 +578,7 @@ mod tests {
 
         let result = bus.publish(outbound(vec![1; 1_048_577]));
 
-        assert_publish_error(
-            result.expect_err("oversized payload must fail"),
-            "payload_too_large",
-        );
+        assert_publish_error(result.expect_err("oversized payload must fail"), "payload_too_large");
         assert_eq!(crate::wire_fields::encode_count(), 0);
         drop(permits);
     }
@@ -628,8 +599,7 @@ mod tests {
         let bus = RedisEventBus { client, settings };
 
         assert_publish_error(
-            bus.publish(outbound_native())
-                .expect_err("native payload is invalid"),
+            bus.publish(outbound_native()).expect_err("native payload is invalid"),
             "configuration",
         );
 
@@ -674,8 +644,7 @@ mod tests {
 
         crate::wire_fields::reset_encode_count();
         assert_publish_error(
-            bus.publish(outbound_with_large_headers())
-                .expect_err("header limit"),
+            bus.publish(outbound_with_large_headers()).expect_err("header limit"),
             "wire_too_large",
         );
         assert_eq!(crate::wire_fields::encode_count(), 1);
@@ -697,8 +666,7 @@ mod tests {
             .collect();
         crate::wire_fields::reset_encode_count();
         assert_publish_error(
-            bus.publish(outbound_with_large_headers())
-                .expect_err("full admission"),
+            bus.publish(outbound_with_large_headers()).expect_err("full admission"),
             "resource_limit",
         );
         assert_eq!(crate::wire_fields::encode_count(), 0);
@@ -717,8 +685,7 @@ mod tests {
 
         crate::wire_fields::reset_encode_count();
         assert_publish_error(
-            bus.publish(outbound(vec![42; 100]))
-                .expect_err("wire limit"),
+            bus.publish(outbound(vec![42; 100])).expect_err("wire limit"),
             "wire_too_large",
         );
         assert_eq!(crate::wire_fields::encode_count(), 1);
@@ -740,8 +707,7 @@ mod tests {
             .collect();
         crate::wire_fields::reset_encode_count();
         assert_publish_error(
-            bus.publish(outbound(vec![42; 100]))
-                .expect_err("full admission"),
+            bus.publish(outbound(vec![42; 100])).expect_err("full admission"),
             "resource_limit",
         );
         assert_eq!(crate::wire_fields::encode_count(), 0);
@@ -788,10 +754,7 @@ mod tests {
             "resource_limit",
         );
         assert_eq!(second_encode_count, 0);
-        assert!(
-            first_result.is_err(),
-            "offline endpoint fails after encoding"
-        );
+        assert!(first_result.is_err(), "offline endpoint fails after encoding");
         assert_eq!(first_encode_count, 1);
         let permit = client
             .try_command(crate::client::CommandClass::General)
@@ -812,12 +775,10 @@ mod tests {
 
     #[test]
     fn test_receiver_connection_failure_is_returned_before_delivery() {
-        let settings = RedisEventBusConfig::new("redis://127.0.0.1:1/", "connection-errors")
-            .expect("valid test configuration");
+        let settings =
+            RedisEventBusConfig::new("redis://127.0.0.1:1/", "connection-errors").expect("valid test configuration");
         let bus = RedisEventBus {
-            client: Arc::new(
-                Client::new(&settings).expect("unreachable Redis URL is syntactically valid"),
-            ),
+            client: Arc::new(Client::new(&settings).expect("unreachable Redis URL is syntactically valid")),
             settings,
         };
         let mut receiver = super::Subscription {

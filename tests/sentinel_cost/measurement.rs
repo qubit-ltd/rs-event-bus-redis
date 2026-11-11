@@ -1,3 +1,12 @@
+// =============================================================================
+//    Copyright (c) 2026 Haixing Hu.
+//
+//    SPDX-License-Identifier: Apache-2.0
+//
+//    Licensed under the Apache License, Version 2.0.
+// =============================================================================
+//! Samples, configuration and summaries for the Sentinel cost matrix.
+
 use std::path::PathBuf;
 
 #[derive(Clone, Debug)]
@@ -33,25 +42,17 @@ pub struct Summary {
 }
 
 pub fn summarize(samples: &[Sample]) -> Summary {
-    let mut successful: Vec<_> = samples
-        .iter()
-        .filter(|s| s.outcome == "ok")
-        .map(|s| s.nanos)
-        .collect();
+    let mut successful: Vec<_> = samples.iter().filter(|s| s.outcome == "ok").map(|s| s.nanos).collect();
     successful.sort_unstable();
     let percentile = |pct: usize| {
-        (!successful.is_empty())
-            .then(|| successful[(successful.len() * pct).div_ceil(100).saturating_sub(1)])
+        (!successful.is_empty()).then(|| successful[(successful.len() * pct).div_ceil(100).saturating_sub(1)])
     };
     let successes = successful.len();
     Summary {
         attempts: samples.len(),
         successes,
         errors: samples.len() - successes,
-        unknown: samples
-            .iter()
-            .filter(|s| s.outcome.contains("outcome_unknown"))
-            .count(),
+        unknown: samples.iter().filter(|s| s.outcome.contains("outcome_unknown")).count(),
         p50_ns: percentile(50),
         p95_ns: percentile(95),
         p99_ns: percentile(99),
