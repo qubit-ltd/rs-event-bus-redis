@@ -164,21 +164,12 @@ event-bus SPI 允许应用更换传输实现，而不改业务 handler。Redis S
 - 支持 Redis 单实例与 Sentinel 主节点发现；异步调用可由 Smol 或 Tokio host 驱动，应用无需启动 Tokio。
 - 使用带版本的 stream 记录保存编码 payload、headers、事件 ID、content type，以及可选 schema 和排序元数据。
 - 支持消费组、`Accept`/`Reject` 确认、通过待处理列表执行 `Retry`，并用 `XAUTOCLAIM` 恢复消息。
-- 提供 client 级命令/receiver 准入限制、有限连接/命令等待、payload/wire 字节限制，以及每个订阅的未结算投递上限；确定性格式错误的历史记录通过单条 Lua 脚本隔离，配置容量超限的记录则保留为 pending；Redis 订阅必须显式使用 `Durable`。
-- 通过进程内 `RedisProviderDiagnostics::snapshots()` 读取存活 SPI 的准入、连接、发布和恢复计数；PEL 与内存仍须查询 Redis。[运维指南](doc/user_guide.zh_CN.md#11-怎样维护消费组和处理下游通知)提供采集、告警和人工保留决策流程。
+- 提供有界的命令与 receiver 准入、payload/wire 容量限制、恢复调度，以及进程内 `RedisProviderDiagnostics::snapshots()` 诊断。Redis 订阅必须显式使用 `Durable`。
 - 测试会通过 Docker 启动隔离的 Redis 6.2、Redis 7 和 Sentinel 服务。
 
-Redis 短命令额度默认是 64，其中 8 个名额专供结算；专用 receiver 连接有独立的 256 个默认上限。这些准入规则属于破坏性变更：`redis.max_concurrent_commands=1` 会被拒绝。降低总额度时，未显式设置的结算保留数会自动调整为 `min(8, 总额 - 1)`；只有需要自定义保留数时才设置 `redis.reserved_settlement_commands`。详见[迁移指南](doc/migration.zh_CN.md)。每个持久订阅第一次 receive 都会检查 pending；之后恢复时钟跨调用保存，并按 `redis.recovery_interval_ms`（默认 1,000 毫秒）重新扫描。Retry、receive 失败或已开始轮询的 future 被取消时，会强制下一次 receive 执行恢复。额度按 provider 实例隔离，不是 Redis 或进程级全局额度；应监控命令拒绝、`XPENDING`、stream `XLEN` 和隔离流增长。
+Redis 至少一次投递，业务 handler 应能处理重复事件。`XADD` 被接纳只表示 Redis 接受了命令，不代表已 fsync、已送达消费者或业务处理完成；若发布回复丢失，结果未知，不应盲目重试。stream 默认不裁剪，超过接收容量的记录会留在 pending。终态结算需要 Redis ACL 允许 `EVAL`、`XPENDING` 和 `XACK`。恢复、RESP/wire 限制、结果未知、重试和权限细节见[投递与重试指南](doc/user_guide.zh_CN.md#6-理解投递重试和清理)、[资源与消息大小限制](doc/user_guide.zh_CN.md#10-怎样限制资源和消息尺寸)、[Redis ACL 指南](doc/user_guide.zh_CN.md#按职责配置-redis-acl)及[结算迁移说明](doc/migration.zh_CN.md#结算-owner-校验)。
 
-Redis 使用至少一次投递，业务 handler 应能处理重复事件。`XADD` 成功只表示 Redis 接受了命令，不能证明记录已经 fsync 或完成处理。默认不会裁剪 stream。只有同时设置 `redis.stream_maxlen_approx` 和 `redis.allow_lossy_retention=true`，并完成人工损失评估，才启用 Redis `XADD MAXLEN ~ N`；近似保留策略可能删除尚未消费或仍处于 pending 的历史记录并产生缺口。单实例和 Sentinel 连接均可按需启用 TLS，并验证证书及主机名；Sentinel 与主节点的 TLS 设置彼此独立。当前不支持 Cluster、native/delayed delivery 或死信策略。stream 和消费组由运维人员负责清理。
-
-provider 对单条 wire、payload 和解码后的 headers 字符串设置有限容量，默认分别为 8 MiB、1 MiB 和 64 KiB；facade 另有默认各 1 MiB 的编码发布/接收限制。可读取记录超过上述配置容量时返回 `receive_limit_exceeded`，保留在 PEL 中，不确认也不隔离。专用 receiver 另将完整 RESP 响应帧限制在 `redis.max_wire_bytes + 65,536` 字节以内。响应帧超限会停止订阅、释放 receiver 准入，并保留可能形成的 PEL 记录。应先用 `XPENDING` 排查；是否删除或隔离记录须由运维人员评估后决定。恢复消息的 provider attempt 只有在 Redis `XPENDING` 明细中的记录 ID 和 consumer owner 均匹配时才可信；查询失败或不匹配时仍为未知（`None`）。因此每条实际交付的恢复消息会额外执行一次 Redis 命令；新消息仍报告 `Some(1)`。公开发布错误可通过 `PublishFailure.effect()` 判断效果；`XADD` 回复丢失属于未知结果，默认禁止盲目重发。仍支持 wire 版本 1。详见[用户指南](doc/user_guide.zh_CN.md#6-理解投递重试和清理)和[迁移指南](doc/migration.zh_CN.md)。
-
-已有 Redis 消费组的起始位置现在有明确规则：`StartPosition::New` 沿用已保存游标；默认情况下，`Earliest` 和 `At` 返回 `existing_group_start_position_ignored`，不再静默忽略请求的位置。订阅可通过 `redis.existing_group_start=resume` 显式选择继续使用已有游标；该选项不会执行 `XGROUP SETID`。详见[消费组恢复指南](doc/user_guide.zh_CN.md#6-理解投递重试和清理)和[迁移指南](doc/migration.zh_CN.md#已有消费组起始位置变更)。
-
-只有 RESP `+OK` 才能确认 `XGROUP CREATE`；畸形回复返回 `outcome_unknown` 和 `retryable=Some(false)`。命令可能已执行但回复丢失时，provider 最多重试一次。若重试连接失败或被拒绝，结果仍为未知，因为这不能证明首次命令没有创建 group。重试收到 `BUSYGROUP` 时，`New` 或显式 `resume` 可继续沿用已有游标；`Earliest` 或 `At` 配合默认 `reject` 策略时仍属未知。停止盲目重试；使用 `XINFO GROUPS` 和 `XPENDING` 检查 stream 与消费组；只有业务接受沿用已有游标时才设置 `redis.existing_group_start=resume`。若要从新位置重放，请使用新的 group 名称。provider 不会通过 `XGROUP SETID` 自动恢复或修改游标。
-
-当前源码工作树中的 Core 0.21 分别限制 handler 运行数、全局持有投递数、每订阅持有量和注册订阅数。`RedisSubscriptionProfile` 要求明确指定起始位置，并构造 durable options；新读取的 stream entry 报告 provider attempt `Some(1)`。恢复 pending 或 claim 记录时，只有 Redis 中的记录 ID、当前 consumer owner 匹配，且非零次数可由 SPI 的 `u32` 表示时，才报告投递次数；否则仍为未知。结算只对明确可重试的错误执行有限重试，重试性未知时停止订阅。[用户指南](doc/user_guide.zh_CN.md) 说明首个终止原因、投递指标、持久恢复、provider snapshot 采集，以及限制等待时间但不保证强制退出进程的关闭策略。
+已有消费组会按明确规则处理订阅起始位置，详见[消费组迁移说明](doc/migration.zh_CN.md#已有消费组起始位置变更)。单实例和 Sentinel 连接均可按需启用 TLS。当前不支持 Cluster、native/delayed delivery 或死信路由；stream 和消费组由运维人员负责清理。
 
 ## 延伸阅读
 
@@ -190,10 +181,6 @@ Redis 端点通过 `rediss://` 启用 TLS；Sentinel TLS 则由独立的 `redis.
 - [覆盖率评估](doc/coverage-review.zh_CN.md)（[English](doc/coverage-review.md)）
 - [API 文档](https://docs.rs/qubit-event-bus-redis)
 - [English README](README.md)
-
-## 有损 Stream 保留策略
-
-Redis Stream 默认不裁剪。启用近似 `MAXLEN` 裁剪时，必须同时设置 `redis.stream_maxlen_approx=<正整数>` 和 `redis.allow_lossy_retention=true`。裁剪可能删除尚未读取或仍处于 pending 状态的条目；订阅默认会在缺口后停止。验证保留策略时检查 `XLEN`、`XPENDING` 和 `XINFO`。`XADD` 接纳不代表 fsync 或副本持久化保证。
 
 ## 测试
 
@@ -212,11 +199,6 @@ cargo test --all-features
 ```
 
 格式化请运行 `./.infra/bin/align-ci.sh`；它会按项目规则改写文件。`./.infra/bin/ci-check.sh` 用于验证 CI 要求。单独运行 `cargo fmt --check` 不能替代项目的正式格式门禁。
-
-终态结算现在通过一条原子 Redis `EVAL` 在 `XACK` 前校验 PEL 当前仍由本 consumer
-拥有。ACL 需允许对源 stream 执行 `EVAL`、`XPENDING` 和 `XACK`。旧 owner token 会返回
-`settlement_ownership_changed`；停止该订阅，并用新 receiver 恢复同一消费组。详见
-[投递指南](doc/user_guide.zh_CN.md#6-理解投递重试和清理)和[迁移指南](doc/migration.zh_CN.md#结算-owner-校验)。
 
 ## 许可证
 

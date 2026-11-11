@@ -166,32 +166,26 @@ The event-bus SPI lets an application choose a transport without changing busine
 - Redis standalone and Sentinel master discovery; async calls can be driven by Smol or Tokio hosts without requiring the application to start Tokio.
 - Stream records with a versioned encoded payload, headers, event ID, content type, and optional schema and ordering metadata.
 - Consumer groups, `Accept`/`Reject` acknowledgement, `Retry` through the pending entries list, and recovery with `XAUTOCLAIM`.
-- Per-client command/receiver admission, finite connection/command waits, payload/wire byte limits, and per-subscription unsettled tracking; deterministic malformed history is quarantined with a serialized Lua script, while configured capacity overflows remain pending; Redis subscriptions must explicitly use `Durable`.
-- Process-local `RedisProviderDiagnostics::snapshots()` for live SPI admission, connection, publish and recovery counters; Redis PEL and memory still require Redis commands. The [operations guide](doc/user_guide.md#11-operate-groups-and-downstream-notifications) covers collection, alerts and manual retention decisions.
+- Bounded command and receiver admission, payload and wire limits, recovery scheduling, and process-local `RedisProviderDiagnostics::snapshots()`. Redis subscriptions must explicitly use `Durable`.
 - Test fixtures that start isolated Redis 6.2, Redis 7, and Sentinel services in Docker.
 
-The Redis command budget defaults to 64 short operations, with 8 slots reserved for
-settlement; dedicated receiver connections have a separate default cap of 256.
-These admission rules are a breaking change: `redis.max_concurrent_commands=1`
-is rejected. When the total is lowered, the omitted settlement reservation
-adapts to `min(8, total - 1)`; set `redis.reserved_settlement_commands` only when
-a different reserve is needed. See the [migration guide](doc/migration.md).
-Each durable subscription checks pending work on its first receive, then carries
-its recovery schedule across calls and rescans at `redis.recovery_interval_ms`
-(default 1,000 ms). Retry, receive failure, or cancellation after polling forces
-the next receive to recover. Admission is per provider instance, not global to
-Redis or the process; monitor command rejections, `XPENDING`, stream `XLEN`, and
-quarantine growth.
+Redis delivery is at least once, so handlers should tolerate duplicates. An accepted
+`XADD` confirms Redis accepted the command; it does not prove fsync, consumer
+delivery, or application work completed. A lost publish reply has an unknown
+effect and must not be blindly retried. Streams are not trimmed by default, and
+records over configured receive capacity remain pending. Terminal settlement
+requires Redis ACL permission for `EVAL`, `XPENDING`, and `XACK`. See the
+[delivery and retry guide](doc/user_guide.md#6-understand-delivery-retry-and-cleanup),
+[resource limits](doc/user_guide.md#10-bound-resources-and-message-sizes),
+[Redis ACL guide](doc/user_guide.md#grant-redis-acl-access-by-role), and
+[settlement migration notes](doc/migration.md#settlement-owner-check) for recovery,
+RESP and wire limits, retention decisions, and operational details.
 
-Redis delivery is at least once. Handlers should tolerate duplicates. A successful `XADD` means Redis accepted the command; it does not prove the record was fsynced or processed. By default streams are not trimmed. Set both `redis.stream_maxlen_approx` and `redis.allow_lossy_retention=true` to opt into Redis `XADD MAXLEN ~ N`; this approximate retention can remove unread or pending history and cause gaps, so use it only after a manual loss review. TLS is opt-in for standalone and Sentinel connections, with certificate and hostname verification. The provider does not implement Cluster, native/delayed delivery, or a dead-letter policy. Stream and group cleanup is an operator task.
-
-Each wire record, payload, and decoded headers string has a finite provider limit (8 MiB, 1 MiB, and 64 KiB by default), in addition to the facade's 1 MiB encoded publish/receive limits. A readable record that exceeds one of these configured capacities returns `receive_limit_exceeded` and remains pending without ACK or quarantine. The dedicated receiver separately caps each complete RESP response frame at `redis.max_wire_bytes + 65,536` bytes. An oversized response stops the subscription, releases its receiver admission, and leaves any resulting PEL entry untouched. Check `XPENDING` first; deleting or isolating retained work requires an operator decision. Recovered delivery attempts are reported only when the exact entry ID and current consumer owner match Redis `XPENDING` details and the nonzero count fits the SPI's `u32` range; failed, missing, malformed, mismatched, zero, or unrepresentable counts remain unknown (`None`). Each recovered message therefore adds one Redis command; new messages still report `Some(1)`. Public publication errors report `PublishFailure.effect()`; lost `XADD` replies are uncertain and default retry policy forbids blind resubmission. Version 1 wire data remains supported. See the [user guide](doc/user_guide.md#6-understand-delivery-retry-and-cleanup) and [migration guide](doc/migration.md).
-
-Redis consumer-group startup is explicit when a group already exists: `StartPosition::New` resumes its stored cursor, while `Earliest` and `At` return `existing_group_start_position_ignored` by default instead of silently ignoring the requested position. A subscription can opt in with `redis.existing_group_start=resume` to keep reading from the existing cursor; this does not run `XGROUP SETID`. See the [group recovery guide](doc/user_guide.md#6-understand-delivery-retry-and-cleanup) and [migration guide](doc/migration.md#existing-consumer-group-start-position-change).
-
-Only a RESP `+OK` confirms `XGROUP CREATE`; malformed replies return `outcome_unknown` with `retryable=Some(false)`. If the command may have run but its reply is lost, the provider retries once. A retry connection failure or rejection also remains `outcome_unknown`, since it cannot prove the first command did not create the group. A retry `BUSYGROUP` can continue for `New` or explicit `resume`; with `Earliest` or `At` and the default `reject` policy it remains unknown. Stop blind retries; inspect the stream and group with `XINFO GROUPS` and `XPENDING`, then use `redis.existing_group_start=resume` only if continuing the stored cursor is acceptable. To replay from a new position, use a new group name. The provider never changes a cursor with `XGROUP SETID` as recovery.
-
-In the current source checkout, core 0.21 bounds running handlers, owned deliveries, per-subscription ownership, and registered subscriptions separately. `RedisSubscriptionProfile` requires an explicit start position and builds durable options; new stream entries report provider attempt `Some(1)`, while recovered pending and claimed entries use a verified Redis delivery count only when ID, current owner, and nonzero `u32` representability match, otherwise remaining unknown. Settlement retries are finite and require explicitly retryable errors; unknown retryability stops the subscription. The [user guide](doc/user_guide.md) covers first-cause diagnostics, delivery metrics, durable recovery, provider snapshot sampling, and bounded shutdown waits that do not guarantee forced process exit.
+For existing groups, the configured start position is handled explicitly; see the
+[consumer group migration notes](doc/migration.md#existing-consumer-group-start-position-change).
+TLS is opt-in for standalone and Sentinel connections. The provider does not
+implement Cluster, native or delayed delivery, or dead-letter routing; operators
+manage stream and group cleanup.
 
 ## Learn More
 
@@ -203,10 +197,6 @@ TLS uses `rediss://` for Redis itself. Sentinel TLS has a separate `redis.sentin
 - [Coverage review](doc/coverage-review.md) ([简体中文](doc/coverage-review.zh_CN.md))
 - [API documentation](https://docs.rs/qubit-event-bus-redis)
 - [简体中文 README](README.zh_CN.md)
-
-## Lossy stream retention
-
-Redis streams are not trimmed by default. To enable approximate `MAXLEN` trimming, configure both `redis.stream_maxlen_approx=<positive integer>` and `redis.allow_lossy_retention=true`. Trimming can remove unread or pending entries and cause delivery gaps; subscriptions stop on gaps by default. Monitor `XLEN`, `XPENDING`, and `XINFO` when validating retention behavior. An accepted `XADD` is not an fsync or replication guarantee.
 
 ## Testing
 
@@ -225,13 +215,6 @@ cargo test --all-features
 ```
 
 For formatting, `./.infra/bin/align-ci.sh` applies the project's formatting rules and may rewrite files; `./.infra/bin/ci-check.sh` verifies the CI requirements. A standalone `cargo fmt --check` does not replace these project checks.
-
-Terminal settlement now uses one atomic Redis `EVAL` to verify the pending
-entry is still owned by this consumer before `XACK`. ACLs must allow `EVAL`,
-`XPENDING`, and `XACK` on the source stream. A stale token returns
-`settlement_ownership_changed`; stop that subscription and recover the same
-group with a new receiver. See the [delivery guide](doc/user_guide.md#6-understand-delivery-retry-and-cleanup)
-and [migration guide](doc/migration.md#settlement-owner-check).
 
 ## License
 
