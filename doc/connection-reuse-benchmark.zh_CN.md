@@ -1,5 +1,45 @@
 # Redis 公开 API 工作负载基准
 
+## 2026-11-11 Sentinel 分阶段连接成本核查
+
+忽略执行的测试矩阵对每轮全新 fixture/provider 测量 public SPI：sync/async、明文/TLS Redis master（Sentinel 连接仍为明文）、并发 1/8、64 字节 payload；每格预热 100 次、测量 1,000 次，重复五轮。`publish_only` 只计 publish；`settle_only` 在 accept 计时批次外准备 delivery（每个 worker 每批最多 32 个未结算 token）；`round_trip` 计时 publish、receive、accept 全流程。每个 worker 使用独立 receiver。120 格全部完成，每格 1,000/1,000 成功，error/unknown 为 0；事件 ID 匹配，清理后 PEL 为空。
+
+下表是五轮各自 p50/p95/p99 的中位数，以及每秒成功操作数中位数。结果来自一台共享主机，不是生产 SLO 测量。
+
+| 模式 | 传输 | 并发 | 场景 | p50 / p95 / p99（毫秒） | 成功次数/秒 |
+| --- | --- | ---: | --- | ---: | ---: |
+| sync | 明文 | 1 | 纯发布 | 0.955 / 1.611 / 6.532 | 886.2 |
+| sync | 明文 | 1 | 纯结算 | 0.654 / 0.847 / 0.943 | 1464.8 |
+| sync | 明文 | 1 | 完整往返 | 1.646 / 2.125 / 2.403 | 585.0 |
+| sync | 明文 | 8 | 纯发布 | 1.257 / 2.476 / 2.790 | 5193.2 |
+| sync | 明文 | 8 | 纯结算 | 1.010 / 2.365 / 2.544 | 5818.9 |
+| sync | 明文 | 8 | 完整往返 | 2.916 / 4.614 / 4.924 | 2550.0 |
+| sync | TLS | 1 | 纯发布 | 4.853 / 7.553 / 8.068 | 192.1 |
+| sync | TLS | 1 | 纯结算 | 5.549 / 8.140 / 9.517 | 177.2 |
+| sync | TLS | 1 | 完整往返 | 10.668 / 17.884 / 20.936 | 87.6 |
+| sync | TLS | 8 | 纯发布 | 13.456 / 21.272 / 23.082 | 546.6 |
+| sync | TLS | 8 | 纯结算 | 13.260 / 37.764 / 55.144 | 469.8 |
+| sync | TLS | 8 | 完整往返 | 27.650 / 43.312 / 57.791 | 262.2 |
+| async | 明文 | 1 | 纯发布 | 1.220 / 1.622 / 1.799 | 810.4 |
+| async | 明文 | 1 | 纯结算 | 1.194 / 1.610 / 1.709 | 810.3 |
+| async | 明文 | 1 | 完整往返 | 2.933 / 3.830 / 4.251 | 335.8 |
+| async | 明文 | 8 | 纯发布 | 2.888 / 3.742 / 4.388 | 2354.0 |
+| async | 明文 | 8 | 纯结算 | 3.549 / 4.756 / 5.471 | 1813.0 |
+| async | 明文 | 8 | 完整往返 | 7.191 / 11.053 / 15.923 | 979.0 |
+| async | TLS | 1 | 纯发布 | 6.395 / 10.068 / 12.756 | 152.8 |
+| async | TLS | 1 | 纯结算 | 6.398 / 9.262 / 10.282 | 142.8 |
+| async | TLS | 1 | 完整往返 | 14.522 / 19.541 / 21.955 | 68.1 |
+| async | TLS | 8 | 纯发布 | 16.078 / 29.596 / 33.603 | 445.5 |
+| async | TLS | 8 | 纯结算 | 17.637 / 29.235 / 36.661 | 413.2 |
+| async | TLS | 8 | 完整往返 | 34.175 / 50.194 / 59.785 | 221.5 |
+
+Provider 诊断统计测量区间内的逻辑连接打开尝试和失败。`publish_only` 与 `settle_only` 的 provider 尝试中位数为 1,000，`round_trip` 为 2,000。零失败行的 `provider_role_probes_estimate` 根据 resolver 每次成功的逻辑 provider open 会执行一次经过验证的 ROLE 探测推算；有失败时该估算留空。单独保留的 `redis_server_role_calls_mixed` 来自 Redis INFO commandstats，可能包含 Sentinel/后台 ROLE 调用，不作为 provider 专属计数。Sentinel socket 在 provider 入口的透明 TCP 代理统计；observer 和 Sentinel peer/后台连接绕过代理。预热后并发 1 的 Sentinel socket 新建数为 0；并发 8 的计数随模式/传输变化，逐行保留在 CSV。TLS 握手耗时未单独测量，不从端到端操作时延推算握手时长。
+
+本机重复 TLS 测量显示操作时延明显较高：c=1 的 round-trip p50 中位数为 10.668–14.522 ms，c=8 为 27.650–34.175 ms；明文对应为 c=1 的 1.646–2.933 ms、c=8 的 2.916–7.191 ms。这足以支持**继续有限原型研究**，在有代表性的负载下验证连接复用；不等于授权实施生产缓存，也不能据此声称复用收益百分比。没有提供应用 SLO，也没有相同条件的 A/B 实现，因此不能据此认定 SLO 违约或量化复用收益。
+
+本次使用 Redis 7.0.15、Rust/Cargo 1.94.0，以及 x86_64 Intel Xeon E5-2680 v4 主机。结束时 load average 为 17.58 / 22.54 / 24.52；启动时负载未记录。精确输入和环境见[运行清单](../.infra/benchmark/evidence-73af5c86/final/manifest.json)。逐次样本和逐轮汇总分别见[样本 CSV](../.infra/benchmark/evidence-73af5c86/final/sentinel-cost-samples.csv)与[汇总 CSV](../.infra/benchmark/evidence-73af5c86/final/sentinel-cost-summary.csv)，哈希见[SHA256SUMS](../.infra/benchmark/evidence-73af5c86/final/SHA256SUMS)。较早停止的尝试保存在相邻 `partial-*` 目录，并明确标记为已取代。
+
+
 集成重构源码的补充测量见[2026-10-03 重构基准](redis-redesign-benchmark-2026-10-03.zh_CN.md)。原始证据保存在 `/tmp/redis-event-bus-redesign-benchmark-20261003`。
 
 ## 2026-11-09 Sentinel 控制连接对照

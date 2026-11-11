@@ -9,11 +9,15 @@
 
 use std::error::Error;
 use std::fs;
-use std::net::TcpListener;
+use std::io::copy;
+use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::process::Child;
 use std::process::Command;
 use std::process::Stdio;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread::sleep;
+use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use std::time::Instant;
 
@@ -30,6 +34,7 @@ pub struct TlsSentinel {
     children: Vec<Child>,
     directories: Vec<TempDir>,
     sentinel_ports: Vec<u16>,
+    sentinel_proxies: Vec<TlsSentinelConnectionCounter>,
     master_port: u16,
     replica_port: u16,
     ca_path: String,
@@ -40,7 +45,14 @@ impl TlsSentinel {
     /// Starts a Redis 7 TLS master/replica and three TLS or plaintext
     /// Sentinels.
     pub fn start(sentinel_tls: bool) -> Result<Self, Box<dyn Error>> {
-        Self::start_docker(sentinel_tls).or_else(|_| Self::start_local(sentinel_tls))
+        let mut fixture =
+            Self::start_docker(sentinel_tls).or_else(|_| Self::start_local(sentinel_tls))?;
+        fixture.sentinel_proxies = fixture
+            .sentinel_ports
+            .iter()
+            .map(|port| TlsSentinelConnectionCounter::start(*port))
+            .collect::<Result<_, _>>()?;
+        Ok(fixture)
     }
 
     fn start_docker(sentinel_tls: bool) -> Result<Self, Box<dyn Error>> {
@@ -60,6 +72,7 @@ impl TlsSentinel {
             children: Vec::new(),
             directories: vec![certs],
             sentinel_ports: Vec::new(),
+            sentinel_proxies: Vec::new(),
             master_port,
             replica_port,
             ca_path: String::new(),
@@ -200,6 +213,7 @@ impl TlsSentinel {
             children: Vec::new(),
             directories: vec![certs],
             sentinel_ports: Vec::new(),
+            sentinel_proxies: Vec::new(),
             master_port,
             replica_port,
             ca_path: String::new(),
@@ -301,11 +315,20 @@ impl TlsSentinel {
     /// options.
     #[must_use]
     pub fn endpoints(&self) -> String {
-        self.sentinel_ports
+        self.sentinel_proxies
             .iter()
-            .map(|port| format!("localhost:{port}"))
+            .map(TlsSentinelConnectionCounter::endpoint)
             .collect::<Vec<_>>()
             .join(",")
+    }
+
+    /// Returns provider-only sockets accepted at the transparent endpoint
+    /// proxies. Sentinel peers and fixture observers bypass these listeners.
+    pub fn sentinel_proxy_counts(&self) -> Vec<u64> {
+        self.sentinel_proxies
+            .iter()
+            .map(TlsSentinelConnectionCounter::accepted)
+            .collect()
     }
 
     /// Returns the isolated CA path used by Sentinel and master TLS clients.
@@ -318,6 +341,22 @@ impl TlsSentinel {
     #[must_use]
     pub fn original_master_port(&self) -> u16 {
         self.master_port
+    }
+
+    /// Returns provider-only Sentinel proxy socket counts and a raw master
+    /// ROLE counter. The latter is a mixed Redis server total and is not
+    /// provider-attributable.
+    pub fn cost_connection_snapshot(&self) -> Result<(Vec<u64>, u64), Box<dyn Error>> {
+        let sentinel_counts = self.sentinel_proxy_counts();
+        let mut master = self.tls_connection(self.master_port)?;
+        let info: String = cmd("INFO").arg("commandstats").query(&mut master)?;
+        let roles = info
+            .lines()
+            .find_map(|line| line.strip_prefix("cmdstat_role:calls="))
+            .map(|value| value.split(',').next().unwrap_or(value).parse())
+            .transpose()?
+            .unwrap_or(0);
+        Ok((sentinel_counts, roles))
     }
 
     /// Returns the TLS replica port allocated for this fixture.
@@ -557,6 +596,85 @@ impl TlsSentinel {
             sleep(Duration::from_millis(100));
         }
     }
+}
+
+/// Counts only provider sockets accepted on the proxy address used in options.
+struct TlsSentinelConnectionCounter {
+    address: SocketAddr,
+    accepted: Arc<AtomicU64>,
+    stop: Arc<AtomicBool>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl TlsSentinelConnectionCounter {
+    fn start(target_port: u16) -> Result<Self, Box<dyn Error>> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        listener.set_nonblocking(true)?;
+        let accepted = Arc::new(AtomicU64::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (count, stopping) = (Arc::clone(&accepted), Arc::clone(&stop));
+        let worker = thread::spawn(move || {
+            let mut relays = Vec::new();
+            while !stopping.load(Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((client, _)) => {
+                        count.fetch_add(1, Ordering::SeqCst);
+                        relays.push(thread::spawn(move || {
+                            if let Ok(server) = TcpStream::connect(("127.0.0.1", target_port)) {
+                                relay_tls(client, server);
+                            }
+                        }));
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(1))
+                    }
+                    Err(_) => break,
+                }
+            }
+            for relay in relays {
+                let _ = relay.join();
+            }
+        });
+        Ok(Self {
+            address,
+            accepted,
+            stop,
+            worker: Some(worker),
+        })
+    }
+
+    fn endpoint(&self) -> String {
+        format!("localhost:{}", self.address.port())
+    }
+    fn accepted(&self) -> u64 {
+        self.accepted.load(Ordering::SeqCst)
+    }
+}
+
+impl Drop for TlsSentinelConnectionCounter {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        let _ = TcpStream::connect(self.address);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+fn relay_tls(client: TcpStream, server: TcpStream) {
+    let (Ok(mut client_reader), Ok(mut server_reader)) = (client.try_clone(), server.try_clone())
+    else {
+        return;
+    };
+    let (mut client_writer, mut server_writer) = (client, server);
+    let reverse = thread::spawn(move || {
+        let _ = copy(&mut server_reader, &mut client_writer);
+        let _ = client_writer.shutdown(Shutdown::Write);
+    });
+    let _ = copy(&mut client_reader, &mut server_writer);
+    let _ = server_writer.shutdown(Shutdown::Write);
+    let _ = reverse.join();
 }
 
 impl Drop for TlsSentinel {

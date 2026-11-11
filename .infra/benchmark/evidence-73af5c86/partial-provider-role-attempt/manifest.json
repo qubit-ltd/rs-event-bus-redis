@@ -1,0 +1,1 @@
+{"status":"superseded_partial","command_exit":130,"reason":"raw Redis INFO commandstats ROLE includes Sentinel/background traffic and is not provider-attributable","interpretation":"not final evidence; raw rows retained"}

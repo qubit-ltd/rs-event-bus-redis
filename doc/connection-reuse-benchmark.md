@@ -1,5 +1,45 @@
 # Redis public API workload benchmark
 
+## 2026-11-11 staged Sentinel connection-cost check
+
+The ignored test matrix measured public SPI operations on a fresh fixture/provider for each round: sync and async, plaintext and a TLS Redis master (Sentinel transport remained plaintext), concurrency 1 and 8, 64-byte payloads, 100 warmups and 1,000 measured attempts per cell, five rounds. `publish_only` times only publish; `settle_only` prepares each delivery outside the timed accept batches (up to 32 unsettled tokens per worker); `round_trip` times publish, receive and accept. Each worker had its own receiver. All 120 cells completed with 1,000/1,000 successful outcomes, zero errors/unknowns, matching event IDs, and empty PELs after cleanup.
+
+The table shows the median of the five per-round p50/p95/p99 values and median successful operations per second. These are measurements from one shared host, not production SLO results.
+
+| Mode | Transport | c | Scenario | p50 / p95 / p99 (ms) | Successes/s |
+| --- | --- | ---: | --- | ---: | ---: |
+| sync | plaintext | 1 | publish_only | 0.955 / 1.611 / 6.532 | 886.2 |
+| sync | plaintext | 1 | settle_only | 0.654 / 0.847 / 0.943 | 1464.8 |
+| sync | plaintext | 1 | round_trip | 1.646 / 2.125 / 2.403 | 585.0 |
+| sync | plaintext | 8 | publish_only | 1.257 / 2.476 / 2.790 | 5193.2 |
+| sync | plaintext | 8 | settle_only | 1.010 / 2.365 / 2.544 | 5818.9 |
+| sync | plaintext | 8 | round_trip | 2.916 / 4.614 / 4.924 | 2550.0 |
+| sync | tls | 1 | publish_only | 4.853 / 7.553 / 8.068 | 192.1 |
+| sync | tls | 1 | settle_only | 5.549 / 8.140 / 9.517 | 177.2 |
+| sync | tls | 1 | round_trip | 10.668 / 17.884 / 20.936 | 87.6 |
+| sync | tls | 8 | publish_only | 13.456 / 21.272 / 23.082 | 546.6 |
+| sync | tls | 8 | settle_only | 13.260 / 37.764 / 55.144 | 469.8 |
+| sync | tls | 8 | round_trip | 27.650 / 43.312 / 57.791 | 262.2 |
+| async | plaintext | 1 | publish_only | 1.220 / 1.622 / 1.799 | 810.4 |
+| async | plaintext | 1 | settle_only | 1.194 / 1.610 / 1.709 | 810.3 |
+| async | plaintext | 1 | round_trip | 2.933 / 3.830 / 4.251 | 335.8 |
+| async | plaintext | 8 | publish_only | 2.888 / 3.742 / 4.388 | 2354.0 |
+| async | plaintext | 8 | settle_only | 3.549 / 4.756 / 5.471 | 1813.0 |
+| async | plaintext | 8 | round_trip | 7.191 / 11.053 / 15.923 | 979.0 |
+| async | tls | 1 | publish_only | 6.395 / 10.068 / 12.756 | 152.8 |
+| async | tls | 1 | settle_only | 6.398 / 9.262 / 10.282 | 142.8 |
+| async | tls | 1 | round_trip | 14.522 / 19.541 / 21.955 | 68.1 |
+| async | tls | 8 | publish_only | 16.078 / 29.596 / 33.603 | 445.5 |
+| async | tls | 8 | settle_only | 17.637 / 29.235 / 36.661 | 413.2 |
+| async | tls | 8 | round_trip | 34.175 / 50.194 / 59.785 | 221.5 |
+
+Provider diagnostics counted logical connection open attempts and failures in the measured interval. The median was 1,000 provider attempts for publish_only and settle_only and 2,000 for round_trip. On zero-failure rows, `provider_role_probes_estimate` uses the resolver's one validated ROLE probe per successful logical provider open. When failures occur, that estimate is blank. The separate `redis_server_role_calls_mixed` column comes from Redis INFO commandstats and can include Sentinel/background ROLE calls, so it is not used as a provider-specific count. Sentinel sockets were counted at the provider-facing transparent TCP proxy; observer and Sentinel peer/background sockets bypass it. Sentinel socket opens were zero at concurrency 1 after warmup; at concurrency 8 they varied by mode/transport and remain visible per row in the CSV. TLS handshake duration was not measured separately, and end-to-end operation latency is not used as a handshake estimate.
+
+The repeated TLS cells show materially higher operation latency on this host: median round-trip p50 was 10.668–14.522 ms at c=1 and 27.650–34.175 ms at c=8; plaintext round-trip p50 was 1.646–2.933 ms at c=1 and 2.916–7.191 ms at c=8. This justifies **limited prototype research** to test connection reuse under a representative workload, not a production cache or a claimed reuse percentage. No application SLO was supplied, and there is no same-condition A/B implementation, so these measurements do not establish an SLO violation or quantify reuse benefit.
+
+The run used Redis 7.0.15, Rust/Cargo 1.94.0, and an x86_64 Intel Xeon E5-2680 v4 host. The ending load average was 17.58 / 22.54 / 24.52; the launch-time load was not captured. Exact inputs and environment are in [the manifest](../.infra/benchmark/evidence-73af5c86/final/manifest.json). Per-attempt and per-round data are [samples CSV](../.infra/benchmark/evidence-73af5c86/final/sentinel-cost-samples.csv) and [summary CSV](../.infra/benchmark/evidence-73af5c86/final/sentinel-cost-summary.csv); hashes are in [SHA256SUMS](../.infra/benchmark/evidence-73af5c86/final/SHA256SUMS). Earlier stopped attempts are retained in adjacent `partial-*` directories and are explicitly superseded.
+
+
 Follow-up measurements against the integrated redesign source are in the [2026-10-03 redesign benchmark](redis-redesign-benchmark-2026-10-03.md). Its raw evidence is retained under `/tmp/redis-event-bus-redesign-benchmark-20261003`.
 
 ## 2026-11-09 Sentinel control connection comparison
