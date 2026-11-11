@@ -153,9 +153,9 @@ impl EventSubscriptionSpi for Subscription {
     ///   non-blocking phase reads, or Duration::MAX for repeated finite BLOCK
     ///   intervals. When local unsettled capacity is full, a positive timeout
     ///   sleeps for at most 10 ms (and no longer than `timeout`) before
-    ///   returning `TimedOut`; zero returns immediately. OS scheduling can
-    ///   make the actual delay longer. Individual I/O waits can also extend
-    ///   beyond the receive scheduling deadline.
+    ///   returning `TimedOut`; zero returns immediately. OS scheduling can make
+    ///   the actual delay longer. Individual I/O waits can also extend beyond
+    ///   the receive scheduling deadline.
     ///
     /// # Returns
     ///

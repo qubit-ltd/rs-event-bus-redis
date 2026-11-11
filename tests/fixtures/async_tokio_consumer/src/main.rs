@@ -155,9 +155,7 @@ async fn exercise() -> Result<(), Box<dyn Error>> {
     assert_eq!(second.id().as_str(), "isolated-runtime-second-event");
     receiver
         .settle(
-            second
-                .settlement()
-                .ok_or("missing second settlement token")?,
+            second.settlement().ok_or("missing second settlement token")?,
             DeliveryDisposition::Accept,
         )
         .await?;
@@ -200,10 +198,7 @@ async fn exercise_facade_gate(provider: Arc<dyn AsyncEventBusSpi>) -> Result<(),
         )
         .await?;
     let _ = facade
-        .publish(PublishRequest::new(
-            topic.clone(),
-            "facade-first".to_owned(),
-        )?)
+        .publish(PublishRequest::new(topic.clone(), "facade-first".to_owned())?)
         .await?;
     let _ = facade
         .publish(PublishRequest::new(topic, "facade-second".to_owned())?)
@@ -251,9 +246,7 @@ async fn exercise_facade_gate(provider: Arc<dyn AsyncEventBusSpi>) -> Result<(),
         let deadline = Instant::now() + Duration::from_secs(5);
         while !driver_started.load(Ordering::Acquire) {
             if Instant::now() >= deadline {
-                let _ = facade_for_shutdown
-                    .shutdown(ShutdownMode::Immediate)
-                    .await?;
+                let _ = facade_for_shutdown.shutdown(ShutdownMode::Immediate).await?;
                 return Err("facade first handler did not enter before watchdog".into());
             }
             tokio::task::yield_now().await;
@@ -262,9 +255,7 @@ async fn exercise_facade_gate(provider: Arc<dyn AsyncEventBusSpi>) -> Result<(),
         while Instant::now() < release_at {
             if Instant::now() >= deadline {
                 driver_gate.store(true, Ordering::Release);
-                let _ = facade_for_shutdown
-                    .shutdown(ShutdownMode::Immediate)
-                    .await?;
+                let _ = facade_for_shutdown.shutdown(ShutdownMode::Immediate).await?;
                 return Err("facade gate window exceeded watchdog".into());
             }
             driver_progress.fetch_add(1, Ordering::Relaxed);
@@ -273,9 +264,7 @@ async fn exercise_facade_gate(provider: Arc<dyn AsyncEventBusSpi>) -> Result<(),
         driver_gate.store(true, Ordering::Release);
         while !driver_second.load(Ordering::Acquire) {
             if Instant::now() >= deadline {
-                let report = facade_for_shutdown
-                    .shutdown(ShutdownMode::Immediate)
-                    .await?;
+                let report = facade_for_shutdown.shutdown(ShutdownMode::Immediate).await?;
                 let _ = report;
                 return Err("second facade event did not complete before watchdog".into());
             }

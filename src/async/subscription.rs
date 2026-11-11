@@ -147,8 +147,8 @@ impl AsyncEventSubscriptionSpi for Subscription {
     ///
     /// - `timeout`: Scheduling wait for new entries, zero for one non-blocking
     ///   read per phase, or Duration::MAX for repeated finite BLOCK intervals.
-    ///   When local unsettled capacity is full, a positive timeout suspends
-    ///   for at most 10 ms (and no longer than `timeout`) before returning
+    ///   When local unsettled capacity is full, a positive timeout suspends for
+    ///   at most 10 ms (and no longer than `timeout`) before returning
     ///   `TimedOut`; zero returns immediately. Runtime scheduling can make the
     ///   actual delay longer. Socket/response waits are bounded separately and
     ///   can extend past this deadline.
