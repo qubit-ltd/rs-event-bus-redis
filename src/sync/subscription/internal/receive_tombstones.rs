@@ -135,15 +135,8 @@ pub(super) fn scan(
                 &id,
                 PoisonReason::MissingWire,
             )
-            .map_err(|_error| {
-                spi_error(
-                    "receive",
-                    Some(&subscription.topic),
-                    RedisProviderError::OutcomeUnknown {
-                        operation: "quarantine",
-                    },
-                )
-            })? {
+            .map_err(|error| spi_error("receive", Some(&subscription.topic), error))?
+            {
                 PoisonOutcome::TombstoneCleared => deleted_count += 1,
                 PoisonOutcome::SourceGone | PoisonOutcome::OwnershipChanged => {}
                 PoisonOutcome::Quarantined => {

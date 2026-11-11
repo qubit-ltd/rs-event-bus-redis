@@ -63,7 +63,7 @@ use crate::poison::quarantine_async;
 use crate::stream_protocol::parse_auto_claim;
 use crate::stream_protocol::parse_pending_entries;
 use crate::stream_protocol::parse_range;
-use crate::stream_protocol::parse_read_group;
+use crate::stream_protocol::parse_single_read_group;
 use crate::stream_protocol::trusted_attempt;
 
 /// Asynchronous receiver whose cancelled reads remain in Redis PEL.
@@ -298,17 +298,14 @@ impl AsyncEventSubscriptionSpi for Subscription {
                                     .query_receive(&mut connection)
                                     .await
                                     .map_err(|error| spi_error("receive", &self.topic, error))?;
-                            let pending = parse_read_group(raw_pending).map_err(|_| {
+                            let entry = parse_single_read_group(raw_pending, &self.key).map_err(|_| {
                                 spi_error(
                                     "receive",
                                     &self.topic,
                                     RedisProviderError::OutcomeUnknown { operation: "receive" },
                                 )
                             })?;
-                            if let Some(entry) = pending
-                                .and_then(|reply| reply.keys.into_iter().next())
-                                .and_then(|stream| stream.ids.into_iter().next())
-                            {
+                            if let Some(entry) = entry {
                                 driver.reply(ReceiveReply::PendingEntry);
                                 let id = entry.id.clone();
                                 lock_state(&self.recovery, &self.topic, "receive", "recovery lock")?
@@ -348,16 +345,13 @@ impl AsyncEventSubscriptionSpi for Subscription {
                                     .query_receive(&mut connection)
                                     .await
                                     .map_err(|error| spi_error("receive", &self.topic, error))?;
-                            let reply = parse_read_group(raw_reply).map_err(|_| {
+                            let entry = parse_single_read_group(raw_reply, &self.key).map_err(|_| {
                                 spi_error(
                                     "receive",
                                     &self.topic,
                                     RedisProviderError::OutcomeUnknown { operation: "receive" },
                                 )
                             })?;
-                            let entry = reply
-                                .and_then(|reply| reply.keys.into_iter().next())
-                                .and_then(|stream| stream.ids.into_iter().next());
                             driver.reply(if entry.is_some() {
                                 ReceiveReply::NewEntry
                             } else {
@@ -662,15 +656,8 @@ async fn scan_missing_tombstones(
                 PoisonReason::MissingWire,
             )
             .await
-            .map_err(|_error| {
-                spi_error(
-                    "receive",
-                    &subscription.topic,
-                    RedisProviderError::OutcomeUnknown {
-                        operation: "quarantine",
-                    },
-                )
-            })? {
+            .map_err(|error| spi_error("receive", &subscription.topic, error))?
+            {
                 PoisonOutcome::TombstoneCleared => deleted_count += 1,
                 PoisonOutcome::SourceGone | PoisonOutcome::OwnershipChanged => {}
                 PoisonOutcome::Quarantined => {
@@ -751,15 +738,7 @@ async fn read_entry(
                 reason,
             )
             .await
-            .map_err(|_error| {
-                spi_error(
-                    "receive",
-                    &subscription.topic,
-                    RedisProviderError::OutcomeUnknown {
-                        operation: "quarantine",
-                    },
-                )
-            })?;
+            .map_err(|error| spi_error("receive", &subscription.topic, error))?;
             if outcome == PoisonOutcome::Quarantined
                 && let Some(diagnostics) = subscription.client.diagnostics()
             {
@@ -828,9 +807,11 @@ async fn read_entry(
 ///
 /// # Errors
 ///
-/// Returns a deterministic poison category for malformed fields, invalid
-/// metadata, or byte-budget rejection; unknown numeric versions remain
-/// unsupported without ACK.
+/// Returns `LimitExceeded` when configured wire, payload, or header capacity
+/// is exceeded, `UnsupportedVersion` for a valid unknown wire version, or
+/// `Poison` for deterministic malformed fields or metadata. Limit and
+/// unsupported-version failures leave the entry pending; the caller handles
+/// poison through its quarantine policy.
 fn decode_entry(subscription: &Subscription, entry: StreamId) -> Result<InboundMessage, DecodeFailure> {
     decode_wire_entry(
         subscription.subscription_id,

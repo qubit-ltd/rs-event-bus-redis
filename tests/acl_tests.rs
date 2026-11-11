@@ -79,6 +79,11 @@ fn test_sync_acl_missing_quarantine_key() {
 }
 #[cfg(feature = "sync")]
 #[test]
+fn test_sync_acl_quarantine_xack_denial_is_unknown_after_copy() {
+    parent("quarantine_missing_xack", "test_sync_acl_child");
+}
+#[cfg(feature = "sync")]
+#[test]
 fn test_sync_acl_settlement_missing_eval() {
     parent("settlement_missing_eval", "test_sync_acl_child");
 }
@@ -106,6 +111,11 @@ fn test_async_acl_missing_eval() {
 #[test]
 fn test_async_acl_missing_quarantine_key() {
     parent("missing_quarantine_key", "test_async_acl_child");
+}
+#[cfg(feature = "async")]
+#[test]
+fn test_async_acl_quarantine_xack_denial_is_unknown_after_copy() {
+    parent("quarantine_missing_xack", "test_async_acl_child");
 }
 #[cfg(feature = "async")]
 #[test]
@@ -239,14 +249,17 @@ fn sync_child() -> Result<(), Box<dyn Error>> {
         );
     } else {
         match outcome {
-            Err(SpiError::Operation {
-                kind: "authentication" | "outcome_unknown",
-                retryable: Some(false),
-                ..
-            }) => {}
-            Err(error) => {
-                return Err(format!("ACL denial had unexpected stable category: {error}").into());
+            Err(error @ SpiError::Operation { .. }) => {
+                let expected = if matches!(case.as_str(), "missing_eval" | "missing_quarantine_key") {
+                    "authentication"
+                } else {
+                    "outcome_unknown"
+                };
+                assert_eq!(error.kind(), expected, "ACL denial category for {case}");
+                assert_eq!(error.retryable(), Some(false));
+                assert!(!error.to_string().contains("ephemeral-acl-test-password"));
             }
+            Err(error) => return Err(format!("ACL denial had unexpected error variant: {error}").into()),
             Ok(ReceiveOutcome::Gap(_)) => {
                 return Err("ACL denial was incorrectly reported as quarantine success".into());
             }
@@ -309,14 +322,17 @@ async fn async_child() -> Result<(), Box<dyn Error>> {
         );
     } else {
         match outcome {
-            Err(SpiError::Operation {
-                kind: "authentication" | "outcome_unknown",
-                retryable: Some(false),
-                ..
-            }) => {}
-            Err(error) => {
-                return Err(format!("ACL denial had unexpected stable category: {error}").into());
+            Err(error @ SpiError::Operation { .. }) => {
+                let expected = if matches!(case.as_str(), "missing_eval" | "missing_quarantine_key") {
+                    "authentication"
+                } else {
+                    "outcome_unknown"
+                };
+                assert_eq!(error.kind(), expected, "ACL denial category for {case}");
+                assert_eq!(error.retryable(), Some(false));
+                assert!(!error.to_string().contains("ephemeral-acl-test-password"));
             }
+            Err(error) => return Err(format!("ACL denial had unexpected error variant: {error}").into()),
             Ok(ReceiveOutcome::Gap(_)) => {
                 return Err("ACL denial was incorrectly reported as quarantine success".into());
             }

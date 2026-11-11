@@ -9,13 +9,13 @@
 
 #[cfg(feature = "sync")]
 use redis::ConnectionLike;
-use redis::ErrorKind;
 use redis::RedisError;
-use redis::ServerErrorKind;
+use redis::Value;
 #[cfg(feature = "async")]
 use redis::aio::MultiplexedConnection;
 use redis::cmd;
 
+use crate::error::RedisProviderError;
 pub(crate) use crate::internal::PoisonOutcome;
 pub(crate) use crate::internal::PoisonReason;
 
@@ -94,8 +94,8 @@ pub(crate) fn quarantine<C: ConnectionLike>(
     consumer: &str,
     id: &str,
     reason: PoisonReason,
-) -> Result<PoisonOutcome, RedisError> {
-    let status: i64 = cmd("EVAL")
+) -> Result<PoisonOutcome, RedisProviderError> {
+    let result: Result<Value, RedisError> = cmd("EVAL")
         .arg(QUARANTINE_SCRIPT)
         .arg(2)
         .arg(source)
@@ -104,17 +104,8 @@ pub(crate) fn quarantine<C: ConnectionLike>(
         .arg(consumer)
         .arg(id)
         .arg(reason.as_str())
-        .query(connection)?;
-    match status {
-        1 => Ok(PoisonOutcome::Quarantined),
-        0 => Ok(PoisonOutcome::SourceGone),
-        2 => Ok(PoisonOutcome::TombstoneCleared),
-        -1 => Ok(PoisonOutcome::OwnershipChanged),
-        _ => Err(RedisError::from((
-            ErrorKind::Server(ServerErrorKind::ResponseError),
-            "invalid quarantine result",
-        ))),
-    }
+        .query(connection);
+    parse_quarantine_reply(result)
 }
 
 /// Executes the quarantine script on a dedicated async receiver connection.
@@ -148,8 +139,8 @@ pub(crate) async fn quarantine_async(
     consumer: &str,
     id: &str,
     reason: PoisonReason,
-) -> Result<PoisonOutcome, RedisError> {
-    let status: i64 = cmd("EVAL")
+) -> Result<PoisonOutcome, RedisProviderError> {
+    let result: Result<Value, RedisError> = cmd("EVAL")
         .arg(QUARANTINE_SCRIPT)
         .arg(2)
         .arg(source)
@@ -159,15 +150,155 @@ pub(crate) async fn quarantine_async(
         .arg(id)
         .arg(reason.as_str())
         .query_async(connection)
-        .await?;
+        .await;
+    parse_quarantine_reply(result)
+}
+
+/// Converts the quarantine EVAL result into a confirmed outcome or a sanitized
+/// error. Only a server-level permission response proves that the script did
+/// not begin executing; every other failure can hide partial writes.
+///
+/// # Parameters
+///
+/// - `result`: The owned EVAL response, or the Redis error returned while
+///   reading it.
+///
+/// # Returns
+///
+/// The confirmed quarantine outcome when Redis returns a recognized integer
+/// status.
+///
+/// # Errors
+///
+/// Returns a sanitized authentication error for a direct permission rejection,
+/// or an unknown outcome when the script's side effects cannot be confirmed.
+fn parse_quarantine_reply(result: Result<Value, RedisError>) -> Result<PoisonOutcome, RedisProviderError> {
+    let status = match result {
+        Ok(Value::Int(status)) => status,
+        Ok(Value::ServerError(error)) => {
+            if is_direct_permission_error(error.code(), error.details()) {
+                return Err(RedisProviderError::Transport {
+                    operation: "quarantine",
+                    kind: "authentication",
+                    retryable: Some(false),
+                });
+            }
+            return Err(unknown_quarantine_outcome());
+        }
+        Ok(_) => return Err(unknown_quarantine_outcome()),
+        Err(error) => {
+            if is_direct_permission_error(error.code().unwrap_or_default(), error.detail()) {
+                return Err(RedisProviderError::Transport {
+                    operation: "quarantine",
+                    kind: "authentication",
+                    retryable: Some(false),
+                });
+            }
+            return Err(unknown_quarantine_outcome());
+        }
+    };
     match status {
         1 => Ok(PoisonOutcome::Quarantined),
         0 => Ok(PoisonOutcome::SourceGone),
         2 => Ok(PoisonOutcome::TombstoneCleared),
         -1 => Ok(PoisonOutcome::OwnershipChanged),
-        _ => Err(RedisError::from((
-            ErrorKind::Server(ServerErrorKind::ResponseError),
-            "invalid quarantine result",
-        ))),
+        _ => Err(unknown_quarantine_outcome()),
+    }
+}
+
+/// Determines whether a structured server error proves EVAL was rejected before
+/// execution.
+///
+/// # Parameters
+///
+/// - `code`: The structured Redis error code.
+/// - `detail`: The optional server detail used to exclude errors raised inside
+///   a Lua script.
+fn is_direct_permission_error(code: &str, detail: Option<&str>) -> bool {
+    matches!(code, "NOPERM" | "NOAUTH" | "WRONGPASS")
+        && !detail.is_some_and(|detail| detail.starts_with("user_script:"))
+}
+
+/// Creates a sanitized error for a quarantine result whose effects are
+/// unconfirmed.
+///
+/// The error deliberately has no source so server diagnostics and record data
+/// cannot leak.
+fn unknown_quarantine_outcome() -> RedisProviderError {
+    RedisProviderError::OutcomeUnknown {
+        operation: "quarantine",
+    }
+}
+
+#[cfg(test)]
+mod poison_tests {
+    use std::error::Error;
+
+    use redis::Value;
+
+    use super::parse_quarantine_reply;
+    use crate::error::RedisProviderError;
+    use crate::internal::PoisonOutcome;
+
+    fn redis_error(reply: &[u8]) -> redis::RedisError {
+        match redis::parse_redis_value(reply).expect("parse test server error") {
+            Value::ServerError(error) => error.into(),
+            other => panic!("expected server error, got {other:?}"),
+        }
+    }
+
+    fn assert_unknown(result: Result<Value, redis::RedisError>) {
+        let error = parse_quarantine_reply(result).expect_err("ambiguous quarantine result");
+        assert!(matches!(
+            error,
+            RedisProviderError::OutcomeUnknown {
+                operation: "quarantine"
+            }
+        ));
+        assert!(!error.to_string().contains("fixture-secret"));
+        assert!(Error::source(&error).is_none());
+    }
+
+    #[test]
+    fn test_poison_quarantine_reply_classifies_only_direct_permission_codes() {
+        for code in ["NOPERM", "NOAUTH", "WRONGPASS"] {
+            let error = parse_quarantine_reply(Err(redis_error(format!("-{code} fixture-secret\r\n").as_bytes())))
+                .expect_err("direct permission failure");
+            assert!(matches!(
+                error,
+                RedisProviderError::Transport {
+                    operation: "quarantine",
+                    kind: "authentication",
+                    retryable: Some(false)
+                }
+            ));
+            assert!(!error.to_string().contains("fixture-secret"));
+            assert!(Error::source(&error).is_none());
+        }
+    }
+
+    #[test]
+    fn test_poison_quarantine_reply_requires_exact_integer_status() {
+        for (value, expected) in [
+            (Value::Int(1), PoisonOutcome::Quarantined),
+            (Value::Int(0), PoisonOutcome::SourceGone),
+            (Value::Int(2), PoisonOutcome::TombstoneCleared),
+            (Value::Int(-1), PoisonOutcome::OwnershipChanged),
+        ] {
+            assert!(matches!(parse_quarantine_reply(Ok(value)), Ok(outcome) if outcome == expected));
+        }
+        let nested_error = redis::ServerError::try_from(redis_error(b"-ERR fixture-secret\r\n")).expect("server error");
+        for value in [
+            Value::Int(9),
+            Value::BulkString(b"1".to_vec()),
+            Value::Array(vec![Value::ServerError(nested_error)]),
+        ] {
+            assert_unknown(Ok(value));
+        }
+        assert_unknown(Err(redis_error(
+            b"-ERR ACL failure in script: NOPERM fixture-secret\r\n",
+        )));
+        assert_unknown(Err(redis_error(b"-ERR fixture-secret\r\n")));
+        assert_unknown(Err(redis::RedisError::from(std::io::Error::other("fixture-secret"))));
     }
 }

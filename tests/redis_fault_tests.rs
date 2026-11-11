@@ -56,6 +56,50 @@ const TOMBSTONE_CLAIM: &[u8] = b"*2\r\n$3\r\n0-0\r\n*1\r\n*1\r\n$-1\r\n";
 const PENDING_ROW: &[u8] = b"*1\r\n*4\r\n$3\r\n1-0\r\n$5\r\nowner\r\n:100\r\n:1\r\n";
 const TRUSTED_PENDING_ROW: &[u8] = b"*1\r\n*4\r\n$13\r\nclaimed-event\r\n$6\r\nworker\r\n:100\r\n:2\r\n";
 const FAULT: &[u8] = b"-ERR password=fault-secret\r\n";
+struct AssociationFault {
+    name: &'static str,
+    pending: bool,
+    reply: Vec<u8>,
+}
+
+fn association_faults() -> Vec<AssociationFault> {
+    let key = qubit_event_bus_redis::naming::stream_key("fault-tests", "events");
+    let key = key.as_bytes();
+    let replies = [
+        (
+            "wrong stream key with no entries",
+            resp_array(&[resp_array(&[resp_bulk(b"other"), resp_array(&[])])]),
+        ),
+        (
+            "two streams",
+            resp_array(&[
+                resp_array(&[resp_bulk(key), resp_array(&[])]),
+                resp_array(&[resp_bulk(b"other"), resp_array(&[])]),
+            ]),
+        ),
+        (
+            "two entries",
+            resp_array(&[resp_array(&[
+                resp_bulk(key),
+                resp_array(&[
+                    resp_array(&[resp_bulk(b"1-0"), resp_array(&[])]),
+                    resp_array(&[resp_bulk(b"2-0"), resp_array(&[])]),
+                ]),
+            ])]),
+        ),
+    ];
+    let mut faults = Vec::new();
+    for pending in [true, false] {
+        for (name, reply) in &replies {
+            faults.push(AssociationFault {
+                name,
+                pending,
+                reply: reply.clone(),
+            });
+        }
+    }
+    faults
+}
 
 struct ReceiveFault {
     name: &'static str,
@@ -119,6 +163,30 @@ fn receive_faults() -> Vec<ReceiveFault> {
             ],
         },
         ReceiveFault {
+            name: "tombstone direct EVAL permission denial",
+            timeout: Duration::MAX,
+            expected_kind: "authentication",
+            expected_retryable: Some(false),
+            steps: vec![
+                Step::reply("XAUTOCLAIM", TOMBSTONE_CLAIM),
+                Step::reply("XPENDING", PENDING_ROW),
+                Step::reply("XRANGE", b"*0\r\n"),
+                Step::reply("EVAL", b"-NOPERM fixture-secret\r\n"),
+            ],
+        },
+        ReceiveFault {
+            name: "tombstone script-internal ACL error",
+            timeout: Duration::MAX,
+            expected_kind: "outcome_unknown",
+            expected_retryable: Some(false),
+            steps: vec![
+                Step::reply("XAUTOCLAIM", TOMBSTONE_CLAIM),
+                Step::reply("XPENDING", PENDING_ROW),
+                Step::reply("XRANGE", b"*0\r\n"),
+                Step::reply("EVAL", b"-ERR ACL failure in script: NOPERM fixture-secret\r\n"),
+            ],
+        },
+        ReceiveFault {
             name: "pending XREADGROUP failure",
             timeout: Duration::ZERO,
             expected_kind: "redis_error",
@@ -158,6 +226,17 @@ fn receive_script(steps: Vec<Step>) -> Vec<Step> {
         Step::reply("XAUTOCLAIM", EMPTY_CLAIM),
         Step::reply("XREADGROUP", b"*0\r\n"),
         Step::reply("XREADGROUP", b"*0\r\n"),
+    ]);
+    script
+}
+
+fn association_receive_script(steps: Vec<Step>) -> Vec<Step> {
+    let mut script = vec![Step::reply("XGROUP", b"+OK\r\n")];
+    script.extend(steps);
+    script.extend([
+        Step::reply("XAUTOCLAIM", EMPTY_CLAIM),
+        Step::reply("XREADGROUP", b"*0\r\n"),
+        Step::reply("XREADGROUP", &read_group_record()),
     ]);
     script
 }
@@ -254,6 +333,80 @@ fn test_sync_receive_protocol_faults_are_sanitized_and_retryable() {
     }
 }
 
+#[cfg(feature = "sync")]
+#[test]
+fn test_sync_read_group_rejects_unassociated_replies_without_side_effects() {
+    for fault in association_faults() {
+        let mut failing = vec![Step::reply("XAUTOCLAIM", EMPTY_CLAIM)];
+        if !fault.pending {
+            failing.push(Step::reply("XREADGROUP", b"*0\r\n"));
+        }
+        failing.push(Step::reply("XREADGROUP", &fault.reply));
+        let server = ScriptedRedis::start(association_receive_script(failing)).expect("start RESP endpoint");
+        let bus = sync_bus(&server);
+        let mut subscription = bus.subscribe(request()).expect("scripted group creation succeeds");
+        let error = match subscription.receive(Duration::ZERO) {
+            Err(error) => error,
+            Ok(_) => panic!("{} must be rejected", fault.name),
+        };
+        assert_failure(error, "receive", "outcome_unknown", Some(true));
+        let retry = match subscription.receive(Duration::ZERO) {
+            Ok(outcome) => outcome,
+            Err(error) => panic!("legal retry failed: {error}"),
+        };
+        let ReceiveOutcome::Message(message) = retry else {
+            panic!("{} must permit delivery after rejection", fault.name);
+        };
+        assert_eq!(message.id().as_str(), "associated-event");
+        let commands = server.finish();
+        assert!(
+            !commands
+                .iter()
+                .any(|command| command[0] == "EVAL" || command[0] == "XACK")
+        );
+        let reads: Vec<_> = commands.iter().filter(|command| command[0] == "XREADGROUP").collect();
+        let failed_read = usize::from(!fault.pending);
+        assert_eq!(
+            reads[failed_read].last().map(String::as_str),
+            Some(if fault.pending { "0-0" } else { ">" })
+        );
+        assert_eq!(
+            reads[failed_read + 1].last().map(String::as_str),
+            Some("0-0"),
+            "the next recovery scan must retain the pre-error pending cursor"
+        );
+    }
+}
+
+#[cfg(feature = "sync")]
+#[test]
+fn test_sync_poison_quarantine_direct_denial_and_inner_err_are_classified() {
+    for (reply, kind, retryable) in [
+        (b"-NOPERM fixture-secret\r\n".as_slice(), "authentication", Some(false)),
+        (
+            b"-ERR ACL failure in script: NOPERM fixture-secret\r\n".as_slice(),
+            "outcome_unknown",
+            Some(false),
+        ),
+    ] {
+        let server = ScriptedRedis::start(vec![
+            Step::reply("XGROUP", b"+OK\r\n"),
+            Step::reply("XAUTOCLAIM", &claimed_malformed_record()),
+            Step::reply("EVAL", reply),
+        ])
+        .expect("start RESP endpoint");
+        let bus = sync_bus(&server);
+        let mut subscription = bus.subscribe(request()).expect("scripted group creation succeeds");
+        let error = match subscription.receive(Duration::ZERO) {
+            Err(error) => error,
+            Ok(_) => panic!("quarantine EVAL failure must be returned"),
+        };
+        assert_failure(error, "receive", kind, retryable);
+        let commands = server.finish();
+        assert_eq!(commands.iter().filter(|command| command[0] == "EVAL").count(), 1);
+    }
+}
+
 #[cfg(feature = "async")]
 #[test]
 fn test_async_receive_protocol_faults_are_sanitized_and_retryable() {
@@ -276,6 +429,90 @@ fn test_async_receive_protocol_faults_are_sanitized_and_retryable() {
                 fault.name
             );
             verify_receive_commands(&server.finish(), fault.name);
+        }
+    });
+}
+
+#[cfg(feature = "async")]
+#[test]
+fn test_async_read_group_rejects_unassociated_replies_without_side_effects() {
+    block_on(async {
+        for fault in association_faults() {
+            let mut failing = vec![Step::reply("XAUTOCLAIM", EMPTY_CLAIM)];
+            if !fault.pending {
+                failing.push(Step::reply("XREADGROUP", b"*0\r\n"));
+            }
+            failing.push(Step::reply("XREADGROUP", &fault.reply));
+            let server = ScriptedRedis::start(association_receive_script(failing)).expect("start RESP endpoint");
+            let bus = async_bus(&server).await;
+            let mut subscription = bus
+                .subscribe(request())
+                .await
+                .expect("scripted group creation succeeds");
+            let error = match subscription.receive(Duration::ZERO).await {
+                Err(error) => error,
+                Ok(_) => panic!("{} must be rejected", fault.name),
+            };
+            assert_failure(error, "receive", "outcome_unknown", Some(true));
+            let retry = match subscription.receive(Duration::ZERO).await {
+                Ok(outcome) => outcome,
+                Err(error) => panic!("legal retry failed: {error}"),
+            };
+            let ReceiveOutcome::Message(message) = retry else {
+                panic!("{} must permit delivery after rejection", fault.name);
+            };
+            assert_eq!(message.id().as_str(), "associated-event");
+            let commands = server.finish();
+            assert!(
+                !commands
+                    .iter()
+                    .any(|command| command[0] == "EVAL" || command[0] == "XACK")
+            );
+            let reads: Vec<_> = commands.iter().filter(|command| command[0] == "XREADGROUP").collect();
+            let failed_read = usize::from(!fault.pending);
+            assert_eq!(
+                reads[failed_read].last().map(String::as_str),
+                Some(if fault.pending { "0-0" } else { ">" })
+            );
+            assert_eq!(
+                reads[failed_read + 1].last().map(String::as_str),
+                Some("0-0"),
+                "the next recovery scan must retain the pre-error pending cursor"
+            );
+        }
+    });
+}
+
+#[cfg(feature = "async")]
+#[test]
+fn test_async_poison_quarantine_direct_denial_and_inner_err_are_classified() {
+    block_on(async {
+        for (reply, kind, retryable) in [
+            (b"-NOPERM fixture-secret\r\n".as_slice(), "authentication", Some(false)),
+            (
+                b"-ERR ACL failure in script: NOPERM fixture-secret\r\n".as_slice(),
+                "outcome_unknown",
+                Some(false),
+            ),
+        ] {
+            let server = ScriptedRedis::start(vec![
+                Step::reply("XGROUP", b"+OK\r\n"),
+                Step::reply("XAUTOCLAIM", &claimed_malformed_record()),
+                Step::reply("EVAL", reply),
+            ])
+            .expect("start RESP endpoint");
+            let bus = async_bus(&server).await;
+            let mut subscription = bus
+                .subscribe(request())
+                .await
+                .expect("scripted group creation succeeds");
+            let error = match subscription.receive(Duration::ZERO).await {
+                Err(error) => error,
+                Ok(_) => panic!("quarantine EVAL failure must be returned"),
+            };
+            assert_failure(error, "receive", kind, retryable);
+            let commands = server.finish();
+            assert_eq!(commands.iter().filter(|command| command[0] == "EVAL").count(), 1);
         }
     });
 }
@@ -582,6 +819,34 @@ fn claimed_record(with_deleted_entry: bool) -> Vec<u8> {
         parts.push(resp_array(&[resp_bulk(b"2-0")]));
     }
     resp_array(&parts)
+}
+
+fn claimed_malformed_record() -> Vec<u8> {
+    let entry = resp_array(&[
+        resp_bulk(b"1-0"),
+        resp_array(&[resp_bulk(b"wire"), resp_bulk(b"not-json")]),
+    ]);
+    resp_array(&[resp_bulk(b"0-0"), resp_array(&[entry])])
+}
+
+fn read_group_record() -> Vec<u8> {
+    let wire = to_string(&WireFields {
+        version: 1,
+        event_id: "associated-event".into(),
+        timestamp_ms: 0,
+        headers_json: "{}".into(),
+        ordering_key: None,
+        content_type: "application/octet-stream".into(),
+        schema_id: None,
+        payload: vec![1, 2, 3],
+    })
+    .expect("valid wire serializes");
+    let entry = resp_array(&[
+        resp_bulk(b"1-0"),
+        resp_array(&[resp_bulk(b"wire"), resp_bulk(wire.as_bytes())]),
+    ]);
+    let key = qubit_event_bus_redis::naming::stream_key("fault-tests", "events");
+    resp_array(&[resp_array(&[resp_bulk(key.as_bytes()), resp_array(&[entry])])])
 }
 
 /// Encodes a RESP2 array of preencoded values for the scripted endpoint.

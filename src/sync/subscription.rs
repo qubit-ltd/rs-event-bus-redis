@@ -65,7 +65,7 @@ use crate::internal::settlement_command;
 use crate::poison::quarantine;
 use crate::stream_protocol::parse_auto_claim;
 use crate::stream_protocol::parse_pending_entries;
-use crate::stream_protocol::parse_read_group;
+use crate::stream_protocol::parse_single_read_group;
 use crate::stream_protocol::trusted_attempt;
 
 /// One blocking consumer owned by a facade subscription.
@@ -307,16 +307,13 @@ impl EventSubscriptionSpi for Subscription {
                             read_group_command(&self.group, &self.consumer, &self.key, &cursor, None)
                                 .query_receive(&mut connection)
                                 .map_err(|error| spi_error("receive", Some(&self.topic), error))?;
-                        let pending = parse_read_group(raw_pending).map_err(|_| {
+                        let entry = parse_single_read_group(raw_pending, &self.key).map_err(|_| {
                             spi_error(
                                 "receive",
                                 Some(&self.topic),
                                 RedisProviderError::OutcomeUnknown { operation: "receive" },
                             )
                         })?;
-                        let entry = pending
-                            .and_then(|reply| reply.keys.into_iter().next())
-                            .and_then(|stream| stream.ids.into_iter().next());
                         let Some(entry) = entry else {
                             driver.reply(ReceiveReply::PendingEmpty);
                             let next = driver.complete_recovery_round(Instant::now());
@@ -362,16 +359,13 @@ impl EventSubscriptionSpi for Subscription {
                             read_group_command(&self.group, &self.consumer, &self.key, ">", block_ms)
                                 .query_receive(&mut connection)
                                 .map_err(|error| spi_error("receive", Some(&self.topic), error))?;
-                        let reply = parse_read_group(raw_reply).map_err(|_| {
+                        let entry = parse_single_read_group(raw_reply, &self.key).map_err(|_| {
                             spi_error(
                                 "receive",
                                 Some(&self.topic),
                                 RedisProviderError::OutcomeUnknown { operation: "receive" },
                             )
                         })?;
-                        let entry = reply
-                            .and_then(|reply| reply.keys.into_iter().next())
-                            .and_then(|stream| stream.ids.into_iter().next());
                         driver.reply(if entry.is_some() {
                             ReceiveReply::NewEntry
                         } else {
@@ -560,9 +554,11 @@ impl EventSubscriptionSpi for Subscription {
 ///
 /// # Errors
 ///
-/// Returns a deterministic poison category for malformed fields, invalid
-/// metadata, or byte-budget rejection; unknown numeric versions remain
-/// unsupported without ACK.
+/// Returns `LimitExceeded` when configured wire, payload, or header capacity
+/// is exceeded, `UnsupportedVersion` for a valid unknown wire version, or
+/// `Poison` for deterministic malformed fields or metadata. Limit and
+/// unsupported-version failures leave the entry pending; the caller handles
+/// poison through its quarantine policy.
 fn decode_entry(subscription: &Subscription, entry: StreamId) -> Result<InboundMessage, DecodeFailure> {
     decode_wire_entry(
         subscription.subscription_id,
@@ -687,15 +683,7 @@ fn read_entry(
                 &id,
                 reason,
             )
-            .map_err(|_error| {
-                spi_error(
-                    "receive",
-                    Some(&subscription.topic),
-                    RedisProviderError::OutcomeUnknown {
-                        operation: "quarantine",
-                    },
-                )
-            })?;
+            .map_err(|error| spi_error("receive", Some(&subscription.topic), error))?;
             if outcome == PoisonOutcome::Quarantined
                 && let Some(diagnostics) = subscription.client.diagnostics()
             {

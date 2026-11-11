@@ -39,7 +39,7 @@ struct AclPermissions {
 pub fn run_workflow(image: &str, case: &str, helper: &str) -> Result<(), Box<dyn Error>> {
     let external_url = std::env::var("RER_ACL_URL").ok();
     let server = if external_url.is_none() {
-        Some(RedisServer::start()?)
+        Some(RedisServer::start_version(image)?)
     } else {
         None
     };
@@ -100,6 +100,13 @@ pub fn run_workflow(image: &str, case: &str, helper: &str) -> Result<(), Box<dyn
             .arg("-eval")
             .query::<()>(&mut admin)?;
     }
+    if case == "quarantine_missing_xack" {
+        cmd("ACL")
+            .arg("SETUSER")
+            .arg(USER)
+            .arg("-xack")
+            .query::<()>(&mut admin)?;
+    }
     if case.starts_with("settlement_") {
         assert_source_state(&mut admin, &source, &group, case, "")?;
         fs::write(&proceed, b"continue")?;
@@ -133,7 +140,7 @@ pub fn run_workflow(image: &str, case: &str, helper: &str) -> Result<(), Box<dyn
         .into());
     }
     assert_source_state(&mut admin, &source, &group, case, &source_id)?;
-    if case == "workflow" {
+    if case == "workflow" || case == "quarantine_missing_xack" {
         assert_quarantine(&mut admin, &quarantine, &source_id)?;
     }
     Ok(())
@@ -242,7 +249,7 @@ fn assert_source_state(
         assert_eq!(
             pending.len(),
             1,
-            "denied EVAL must not be reported as successful quarantine"
+            "unconfirmed quarantine must retain the source PEL entry"
         );
         let row: Vec<redis::Value> = redis::from_redis_value(pending.first().ok_or("missing PEL record")?.clone())?;
         let id: String = redis::from_redis_value(row.first().ok_or("missing PEL ID")?.clone())?;
@@ -262,6 +269,10 @@ fn assert_quarantine(admin: &mut Connection, quarantine: &str, source_id: &str) 
     assert_eq!(
         values.get("reason"),
         Some(&redis::Value::BulkString(b"invalid_json".to_vec()))
+    );
+    assert_eq!(
+        values.get("wire"),
+        Some(&redis::Value::BulkString(b"not-json".to_vec()))
     );
     assert!(values.contains_key("group"));
     Ok(())

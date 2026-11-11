@@ -85,6 +85,7 @@ adapter 按实际操作阶段分类失败，不额外定义两状态 outcome enu
 | 发布未知 | `outcome_unknown` | `Some(false)`，应用主动重发可能重复 |
 | 接收未知 | `outcome_unknown` | `Some(true)`，通过 PEL/claim 恢复 |
 | 结算未知 | `outcome_unknown` | `Some(true)`，相同 token 和原终结意图 |
+| 隔离 EVAL 的顶层权限拒绝（`NOPERM`、`NOAUTH`、`WRONGPASS`） | `authentication` | `Some(false)`，Redis 在脚本执行前拒绝了 EVAL |
 | 隔离未知/可能部分执行 | `outcome_unknown` | `Some(false)`，先检查源记录/PEL/owner |
 | 准入拒绝 | `resource_limit` | `Some(true)`，该操作没有发出命令 |
 | 发布字节超限 | `payload_too_large` / `wire_too_large` | `Some(false)`，不发送 XADD |
@@ -100,7 +101,7 @@ wire 保持为 stream 的 `wire` 字段中的版本 1 JSON，保存 byte-array �
 
 wire 限额内且完整有效的未知 `u64` 整数版本会报错并保留 PEL；即使声明未知版本，无效或嵌套过深的 JSON 仍会隔离。wire、payload 或 headers 配置容量超限时返回 `receive_limit_exceeded`，源记录保留在 PEL 中，不确认也不隔离；其余确定性格式错误仍会隔离、ACK 并返回 Gap。此外，专用 receiver 连接会在构造 Redis 响应值前，把完整 RESP 响应帧限制为 `redis.max_wire_bytes + 65,536` 字节；普通连接沿用现有 parser 策略。这只是响应帧上限，不是进程 RSS 上限。receiver 响应帧超限时，provider 会关闭连接、释放 receiver 准入，以 `receive_response_too_large` 停止订阅，并保留可能产生的 PEL 记录。操作人员应先检查 `XPENDING`；由于 provider 未能可靠读取完整记录 ID 和 wire 数据，是否删除或隔离须人工决策。
 
-隔离 Lua 在检查源/目标类型及当前 PEL owner 后，于 Redis 内读取 wire、复制隔离记录，再执行 XACK。重复 `wire` 字段按最后一个值生效，与 Redis owned parser 一致。脚本执行中不能插入其他命令，但后续失败不会回滚已复制记录。回复丢失或部分失败可能产生重复隔离副本，须通过 `source_stream`、`group`、`source_id` 关联。OwnershipChanged 不确认其他 owner 的记录，源记录缺失不伪造 payload；tombstone 清除及隔离成功返回 Gap。隔离流保留由运维负责。
+隔离 Lua 在检查源/目标类型及当前 PEL owner 后，于 Redis 内读取 wire、复制隔离记录，再执行 XACK。重复 `wire` 字段按最后一个值生效，与 Redis owned parser 一致。顶层 EVAL 收到权限错误码（`NOPERM`、`NOAUTH` 或 `WRONGPASS`）表示 Redis 在脚本运行前拒绝命令，分类为不可重试的 `authentication`。脚本启动后的错误（包括内部命令或 key 的 ACL 拒绝）、无效状态回复、超时、断线和回复丢失均分类为 `outcome_unknown`；脚本执行中不能插入其他命令，但后续失败不会回滚已复制记录。未知结果可能已经写入副本，应同时检查源 PEL 和隔离流。回复丢失或部分失败可能产生重复隔离副本，须通过 `source_stream`、`group`、`source_id` 关联。OwnershipChanged 不确认其他 owner 的记录，源记录缺失不伪造 payload；tombstone 清除及隔离成功返回 Gap。隔离流保留由运维负责。
 
 ## 持久化、下游集成与迁移
 

@@ -123,6 +123,39 @@ pub(crate) fn parse_read_group(value: Value) -> Result<Option<StreamReadReply>, 
     Ok(Some(reply))
 }
 
+/// Parses one XREADGROUP reply and verifies that it belongs to the requested
+/// stream.
+///
+/// # Parameters
+///
+/// - `value`: The owned RESP2 array or RESP3 map returned by XREADGROUP.
+/// - `expected_key`: The stream key used by the request.
+///
+/// # Returns
+///
+/// The sole entry, or `None` for Redis nil or a valid empty reply.
+///
+/// # Errors
+///
+/// Returns an error when the reply contains an unexpected key, multiple
+/// streams, multiple entries, or malformed stream data.
+pub(crate) fn parse_single_read_group(value: Value, expected_key: &str) -> Result<Option<StreamId>, RedisError> {
+    let Some(mut reply) = parse_read_group(value)? else {
+        return Ok(None);
+    };
+    if reply.keys.is_empty() {
+        return Ok(None);
+    }
+    if reply.keys.len() != 1 {
+        return Err(invalid_reply());
+    }
+    let mut stream = reply.keys.pop().ok_or_else(invalid_reply)?;
+    if stream.key != expected_key || stream.ids.len() > 1 {
+        return Err(invalid_reply());
+    }
+    Ok(stream.ids.pop())
+}
+
 /// Normalizes an owned XRANGE reply while retaining each field value
 /// allocation.
 ///

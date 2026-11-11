@@ -156,7 +156,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 此入门练习先安装账单 handler，再发布 `order-42`，等待 handler 发出通知，打印 `consumed order event: order-42`，最后取消订阅并关闭总线。生产 handler 应完成并提交应用自己的账单变更后才返回 `Ok(())`；打印和 channel 通知只是练习的验收信号。总线和订阅应由服务的启动、关闭模块持有。第一次运行会从 `Earliest` 创建消费组；再次运行时，订阅通过 `redis.existing_group_start=resume` 显式选择沿用 Redis 保存的游标。Redis 只在首次创建 group 时应用起始位置；恢复时不会执行 `XGROUP SETID`，也不会重放已确认的历史记录。更换 namespace 可隔离演示数据；已有 pending 记录仍可能先于本次发布的事件交付。新建的 `Earliest` 消费组也能读取已保留的记录。生产服务若使用 `New`，应先注册 consumer，再依赖后续发布的事件。Redis Streams 只接受 `Durable` 订阅；`Ephemeral` 会在执行 Redis I/O 前被拒绝。服务断连或关闭订阅时，group 会保留，未结算记录仍在 pending entries list 中。
 
-限额内格式错误的版本 1 wire 记录由单条 Lua 脚本串行处理：先用 `XADD` 写入按 group 隔离的记录（`qubit:poison:*`），再用 `XACK` 确认源记录。隔离记录包含 `source_stream`、`source_id`、`group`、稳定的 `reason`、原始 `wire` 字节和 `wire_missing`。确认失败时脚本不会回滚已成功写入的隔离记录；如果回复丢失，仅凭回复无法判断哪些步骤已完成。应检查源 ID、group、pending owner 和隔离记录，再决定如何处理。确认隔离成功后返回 `Gap`，不会把 payload 放进错误信息。可用 `XRANGE <quarantine-key> - + COUNT 100` 读取一页记录，并用 `XLEN`、`XPENDING` 监控隔离流、源 stream 和 pending 数量；完整检查须继续翻页。provider 不会自动裁剪这些 stream；运维应按保留策略归档或清理隔离数据。
+限额内格式错误的版本 1 wire 记录由单条 Lua 脚本串行处理：先用 `XADD` 写入按 group 隔离的记录（`qubit:poison:*`），再用 `XACK` 确认源记录。隔离记录包含 `source_stream`、`source_id`、`group`、稳定的 `reason`、原始 `wire` 字节和 `wire_missing`。顶层 EVAL 权限错误码（`NOPERM`、`NOAUTH` 或 `WRONGPASS`）证明 Redis 在脚本执行前拒绝命令，返回不可重试的 `authentication`。脚本内部命令或 key 的 ACL 拒绝、其他脚本错误、无效状态回复、超时、断线或回复丢失均返回 `outcome_unknown`；后续步骤失败时脚本不会回滚已成功写入的隔离记录。未知结果可能已经写入副本，但源记录仍在 PEL。处理前应同时检查源 PEL 与隔离流，并核对源 ID、group、pending owner、`source_stream` 和 `source_id`。确认隔离成功后返回 `Gap`，不会把 payload 放进错误信息。可用 `XRANGE <quarantine-key> - + COUNT 100` 读取一页记录，并用 `XLEN`、`XPENDING` 监控隔离流、源 stream 和 pending 数量；完整检查须继续翻页。provider 不会自动裁剪这些 stream；运维应按保留策略归档或清理隔离数据。
 
 仍可恢复的 pending 记录可能再次投递。如果 handler 运行时间超过 `redis.claim_min_idle_ms`，其他 consumer 可能接管该记录。若 `XADD` 回复丢失，发布结果未知，facade 默认安全门阻止自动重发；人工或明确允许的重试仍可能重复。`redis.max_unsettled_per_subscription` 限制本地活跃投递数，默认值为 100。
 
@@ -392,7 +392,7 @@ ACL SETUSER event-worker reset on >replace-with-managed-secret \\
 
 正常终态结算和隔离均需要 `+eval`；终态结算还需要脚本内 `XPENDING` 与 `XACK` 权限。`+type` 用于隔离路径；省略它会使该路径不可用，但不能因此省略 `+eval`。缺少隔离权限会使畸形记录无法完成处理，必须按运维流程处置。若 URL 指向非零数据库，还要按 Redis ACL 策略允许客户端初始化时的 `SELECT`。如果 Redis 支持 `CLIENT SETINFO` 且希望记录客户端元数据，可以授予对应的 `setinfo` 子命令；拒绝该命令不会阻止 provider 完成连接初始化。不要用 `+@all` 代替逐项授权。Sentinel 需要单独配置发现权限；master 账号配置应用命令和 `ROLE`；运维观察则使用另一身份。
 
-遇到 `NOPERM` 时，先从 Redis 错误或服务端审计日志确认被拒的命令和 key，再按上表检查对应路径。尤其确认 stream 和隔离 key pattern 都已授权、EVAL 及脚本实际调用的命令均可执行，并核对非零数据库 URL 是否触发了 `SELECT`。Sentinel 模式还要分别验证发现命令，以及使用正确凭据的 master `ROLE` 和 stream 权限。provider 会将 Redis `NOPERM` 归为不可重试的 `authentication` 错误；仅更换密码不能补上缺失的命令或 key 权限。隔离被拒后，用管理员或 observer 账号检查 `XPENDING` 和隔离 stream；脚本失败不能算作隔离成功。Redis Lua 不会在后续 `XACK` 失败时回滚已执行的隔离 `XADD`。
+遇到 `NOPERM` 时，先从 Redis 错误或服务端审计日志确认被拒的命令和 key，再按上表检查对应路径。尤其确认 stream 和隔离 key pattern 都已授权、EVAL 及脚本实际调用的命令均可执行，并核对非零数据库 URL 是否触发了 `SELECT`。Sentinel 模式还要分别验证发现命令，以及使用正确凭据的 master `ROLE` 和 stream 权限。只有顶层 EVAL 的 `NOPERM`、`NOAUTH` 或 `WRONGPASS` 才归为不可重试的 `authentication`；脚本内部 ACL 拒绝归为 `outcome_unknown`，因为此前的写入可能已成功。仅更换密码不能补上缺失的命令或 key 权限。隔离结果未知时，用管理员或 observer 账号同时检查 `XPENDING` 和隔离 stream；Redis Lua 不会在后续 `XACK` 失败时回滚已执行的隔离 `XADD`。
 
 ## 6. 理解投递、重试和清理
 

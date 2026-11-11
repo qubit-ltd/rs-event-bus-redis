@@ -13,6 +13,7 @@ use crate::stream_protocol::parse_auto_claim;
 use crate::stream_protocol::parse_pending_entries;
 use crate::stream_protocol::parse_range;
 use crate::stream_protocol::parse_read_group;
+use crate::stream_protocol::parse_single_read_group;
 use crate::stream_protocol::trusted_attempt;
 
 #[test]
@@ -72,6 +73,67 @@ fn test_parse_read_group_moves_resp2_and_resp3_wire_buffers() {
         };
         assert_eq!(wire.as_ptr(), allocation);
         assert_eq!(wire.capacity(), capacity);
+    }
+}
+
+#[test]
+fn test_parse_single_read_group_validates_request_association() {
+    let empty = Value::Array(Vec::new());
+    let one_empty = Value::Array(vec![Value::Array(vec![
+        Value::BulkString(b"events".to_vec()),
+        Value::Array(Vec::new()),
+    ])]);
+    assert!(parse_single_read_group(Value::Nil, "events").unwrap().is_none());
+    assert!(parse_single_read_group(empty, "events").unwrap().is_none());
+    assert!(parse_single_read_group(one_empty, "events").unwrap().is_none());
+
+    let entry = Value::Array(vec![Value::Array(vec![
+        Value::BulkString(b"1-0".to_vec()),
+        Value::Array(vec![
+            Value::BulkString(b"payload".to_vec()),
+            Value::BulkString(b"x".to_vec()),
+        ]),
+    ])]);
+    let valid = Value::Array(vec![Value::Array(vec![
+        Value::BulkString(b"events".to_vec()),
+        entry.clone(),
+    ])]);
+    assert_eq!(parse_single_read_group(valid, "events").unwrap().unwrap().id, "1-0");
+
+    let wrong_key_empty = Value::Array(vec![Value::Array(vec![
+        Value::BulkString(b"other".to_vec()),
+        Value::Array(Vec::new()),
+    ])]);
+    let two_streams = Value::Array(vec![
+        Value::Array(vec![Value::BulkString(b"events".to_vec()), Value::Array(Vec::new())]),
+        Value::Array(vec![Value::BulkString(b"other".to_vec()), Value::Array(Vec::new())]),
+    ]);
+    let two_entries = Value::Array(vec![Value::Array(vec![
+        Value::BulkString(b"events".to_vec()),
+        Value::Array(vec![
+            Value::Array(vec![Value::BulkString(b"1-0".to_vec()), Value::Array(Vec::new())]),
+            Value::Array(vec![Value::BulkString(b"2-0".to_vec()), Value::Array(Vec::new())]),
+        ]),
+    ])]);
+    for invalid in [wrong_key_empty, two_streams, two_entries] {
+        assert!(parse_single_read_group(invalid, "events").is_err());
+    }
+}
+
+#[test]
+fn test_parse_single_read_group_rejects_unassociated_resp3_maps() {
+    let wrong_key = Value::Map(vec![(Value::BulkString(b"other".to_vec()), Value::Array(Vec::new()))]);
+    let multiple_streams = Value::Map(vec![
+        (Value::BulkString(b"events".to_vec()), Value::Array(Vec::new())),
+        (Value::BulkString(b"other".to_vec()), Value::Array(Vec::new())),
+    ]);
+    let row = Value::Array(vec![Value::BulkString(b"1-0".to_vec()), Value::Map(Vec::new())]);
+    let multiple_entries = Value::Map(vec![(
+        Value::BulkString(b"events".to_vec()),
+        Value::Array(vec![row.clone(), row]),
+    )]);
+    for invalid in [wrong_key, multiple_streams, multiple_entries] {
+        assert!(parse_single_read_group(invalid, "events").is_err());
     }
 }
 
