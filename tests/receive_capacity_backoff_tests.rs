@@ -91,6 +91,33 @@ fn test_sync_full_capacity_returns_within_bounded_time_and_can_settle() -> Resul
             if started.elapsed() >= Duration::from_millis(250) {
                 return Err("full-capacity receive exceeded watchdog".into());
             }
+            let short_started = Instant::now();
+            if !matches!(
+                receiver
+                    .receive(Duration::from_millis(2))
+                    .map_err(|error| error.to_string())?,
+                ReceiveOutcome::TimedOut
+            ) {
+                return Err("short full-capacity receive did not return TimedOut".into());
+            }
+            let short_elapsed = short_started.elapsed();
+            if short_elapsed < Duration::from_millis(1)
+                || short_elapsed >= Duration::from_millis(250)
+            {
+                return Err("short full-capacity receive did not honor its bounded delay".into());
+            }
+            let finite_started = Instant::now();
+            if !matches!(
+                receiver
+                    .receive(Duration::from_secs(1))
+                    .map_err(|error| error.to_string())?,
+                ReceiveOutcome::TimedOut
+            ) {
+                return Err("finite full-capacity receive did not return TimedOut".into());
+            }
+            if finite_started.elapsed() >= Duration::from_millis(250) {
+                return Err("full-capacity receive waited for the full finite timeout".into());
+            }
             receiver
                 .settle(&token, DeliveryDisposition::Accept)
                 .map_err(|error| error.to_string())?;
@@ -223,6 +250,26 @@ fn test_async_full_capacity_receive_is_pending_before_short_timeout() -> Result<
                 "async-full-capacity",
                 "async-worker"
             )?
+        );
+        use std::time::Instant;
+        let short_started = Instant::now();
+        assert!(matches!(
+            receiver.receive(Duration::from_millis(2)).await?,
+            ReceiveOutcome::TimedOut
+        ));
+        let short_elapsed = short_started.elapsed();
+        assert!(
+            (Duration::from_millis(1)..Duration::from_millis(250)).contains(&short_elapsed),
+            "short full-capacity receive did not honor its bounded delay: {short_elapsed:?}"
+        );
+        let finite_started = Instant::now();
+        assert!(matches!(
+            receiver.receive(Duration::from_secs(1)).await?,
+            ReceiveOutcome::TimedOut
+        ));
+        assert!(
+            finite_started.elapsed() < Duration::from_millis(250),
+            "full-capacity receive waited for the full finite timeout"
         );
         assert!(matches!(
             receiver.receive(Duration::ZERO).await?,
