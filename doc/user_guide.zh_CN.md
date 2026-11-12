@@ -382,11 +382,11 @@ redis.sentinel.tls_client_key_path=/etc/redis/sentinel-client-key.pem
 
 请在已认证且有 ACL 管理权限的 `redis-cli` 交互会话中，将下面内容作为一条命令执行。这是 Redis 控制台命令，不是 shell 命令。生产密钥应通过受保护的 ACL 管理渠道替换示例占位符；不要把真实密钥直接粘贴到 shell history：
 
-```text
 <!-- acl-example: event-worker -->
+```text
 ACL SETUSER event-worker reset on >replace-with-managed-secret ~qubit:stream:9:guide-acl:6:events ~qubit:poison:9:guide-acl:6:events:42:qubit:group:9:guide-acl:6:events:7:billing +ping +xadd +xgroup|create +xreadgroup +xautoclaim +xpending +xrange +xack +eval +type
-<!-- end-acl-example -->
 ```
+<!-- end-acl-example -->
 
 正常终态结算和隔离均需要 `+eval`；终态结算还需要脚本内 `XPENDING` 与 `XACK` 权限。`+type` 用于隔离路径；省略它会使该路径不可用，但不能因此省略 `+eval`。缺少隔离权限会使畸形记录无法完成处理，必须按运维流程处置。若 URL 指向非零数据库，还要按 Redis ACL 策略允许客户端初始化时的 `SELECT`。如果 Redis 支持 `CLIENT SETINFO` 且希望记录客户端元数据，可以授予对应的 `setinfo` 子命令；拒绝该命令不会阻止 provider 完成连接初始化。不要用 `+@all` 代替逐项授权。Sentinel 需要单独配置发现权限；master 账号配置应用命令和 `ROLE`；运维观察则使用另一身份。
 

@@ -384,11 +384,11 @@ The provider's stable names can be derived with the public `naming` helpers. For
 
 For that one topic/group, run the following as one command in an authenticated `redis-cli` interactive session with ACL administration rights. This is a Redis console command, not a shell command. Replace the example secret through your protected ACL provisioning channel; do not paste a production secret into shell history.
 
-```text
 <!-- acl-example: event-worker -->
+```text
 ACL SETUSER event-worker reset on >replace-with-managed-secret ~qubit:stream:9:guide-acl:6:events ~qubit:poison:9:guide-acl:6:events:42:qubit:group:9:guide-acl:6:events:7:billing +ping +xadd +xgroup|create +xreadgroup +xautoclaim +xpending +xrange +xack +eval +type
-<!-- end-acl-example -->
 ```
+<!-- end-acl-example -->
 
 `+eval` is required for normal terminal settlement as well as quarantine. Terminal settlement also requires the script's `XPENDING` and `XACK` permissions. `+type` is used by quarantine; omitting it disables that path, but does not make `+eval` optional. Missing quarantine permissions leave malformed records unresolved and must be handled operationally. An installation that uses a nonzero database must also authorize the client's setup-time `SELECT` according to its Redis ACL policy. If the Redis server supports `CLIENT SETINFO` and you want client metadata to be recorded, you may grant its `setinfo` subcommand; denial does not block provider setup. Do not replace this list with `+@all`. A separately provisioned Sentinel account needs the Sentinel discovery permission above, while the master account needs its own application rules and `ROLE`; observer permissions belong to a separate operational identity.
 
