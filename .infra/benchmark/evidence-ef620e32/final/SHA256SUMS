@@ -1,0 +1,7 @@
+3c4b86f78dec1bd2b664716da56b32db78c5ac9048840e6294dcaa7bfbd37060  .infra/benchmark/evidence-ef620e32/final/formal-command.txt
+9bd69272fcb379659147b8fdca1b4cb77a04428f10efb2199081ecadab0c072d  .infra/benchmark/evidence-ef620e32/final/manifest.json
+671b081adff5637b9cf5f5ba5f5a22974013097b06a6f378e2544a34e6513119  .infra/benchmark/evidence-ef620e32/final/matrix.log
+a6d4ebb501ba5e9dee7ea8501801f3891811abff1feedb55a15a63b6d376c3f2  .infra/benchmark/evidence-ef620e32/final/project-input-hashes.txt
+d2f8f430331059aa1161e36113fb57e850a516ab028911154f29f7d8fb706da9  .infra/benchmark/evidence-ef620e32/final/sentinel-cost-samples.csv
+4734e0aa3184893157d8b62c8bd46dee9458bcf1b5ccefd37960892994d38916  .infra/benchmark/evidence-ef620e32/final/sentinel-cost-summary.csv
+bfe505a01b65e509cf1a4af0dadb9773238d5fea0a5e26e74cdac34703413c92  .infra/benchmark/evidence-ef620e32/final/sentinel-cost-warmup.csv

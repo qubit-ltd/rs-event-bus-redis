@@ -1,0 +1,4 @@
+765a05c9bd3f2ef828de9d77de77a72a9b87f0367028382ed8a4a979801fa947  .infra/benchmark/evidence-ef620e32/partial-prewarm-before-fix/attempt.txt
+720d268c99bdb05e3f62c52c7ea8ff7d849dc24b626c57d3299890d58659a75f  .infra/benchmark/evidence-ef620e32/partial-prewarm-before-fix/matrix.log
+d6c63429d13fb3da588363b3088139ccfc5591a4192535dd52641f958a6f75d2  .infra/benchmark/evidence-ef620e32/partial-prewarm-before-fix/sentinel-cost-samples.csv
+ab7064899436c12b87a2da492764f9335b1b91a1b13851e9b373211360bd39e0  .infra/benchmark/evidence-ef620e32/partial-prewarm-before-fix/sentinel-cost-summary.csv

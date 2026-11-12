@@ -1,0 +1,6 @@
+mode,transport,concurrency,scenario,round,attempts,successes,errors,unknown,p50_ns,p95_ns,p99_ns,aggregate_success_per_wall_second,provider_connection_attempts,provider_connection_failures,provider_role_probes_estimate,sentinel_connections,redis_server_role_calls_mixed,handshake_ns
+sync,plaintext,1,publish_only,1,1000,1000,0,0,715185,895927,1032185,1386.409721,1000,0,1000,0,1000,not_separately_measured
+sync,plaintext,1,publish_only,2,1000,1000,0,0,712099,981643,1094765,1329.830712,1000,0,1000,0,1000,not_separately_measured
+sync,plaintext,1,publish_only,3,1000,1000,0,0,880893,1018731,1181260,1166.725330,1000,0,1000,0,1000,not_separately_measured
+sync,plaintext,1,publish_only,4,1000,1000,0,0,668443,804995,904628,1480.260304,1000,0,1000,0,1000,not_separately_measured
+sync,plaintext,1,publish_only,5,1000,1000,0,0,829720,1016803,1244105,1178.520826,1000,0,1000,0,1000,not_separately_measured

@@ -1,0 +1,7 @@
+Partial matrix attempt before the warmup-evidence regression was fixed.
+
+Command:
+RER_COST_SAMPLES=1000 RER_COST_ROUNDS=5 RER_COST_OUTPUT=.infra/benchmark/evidence-ef620e32/final cargo test --locked --all-features --test sentinel_cost_tests -- --ignored --exact test_sentinel_cost_matrix --nocapture --test-threads=1
+
+Exit status: 130 (operator interruption after review found that failed warmup evidence was not yet flushed).
+Completed before interruption: 5 cells, each 1000/1000 successful outcomes and zero unknowns. This directory is partial evidence only and is not included in the final 120-cell matrix. No Redis or workload failure was observed in these cells.

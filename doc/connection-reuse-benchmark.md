@@ -2,9 +2,9 @@
 
 ## 2026-11-11 staged Sentinel connection-cost check
 
-The ignored test matrix measured public SPI operations on a fresh fixture/provider for each round: sync and async, plaintext and a TLS Redis master (Sentinel transport remained plaintext), concurrency 1 and 8, 64-byte payloads, 100 warmups and 1,000 measured attempts per cell, five rounds. `publish_only` times only publish; `settle_only` prepares each delivery outside the timed accept batches (up to 32 unsettled tokens per worker); `round_trip` times publish, receive and accept. Each worker had its own receiver. All 120 cells completed with 1,000/1,000 successful outcomes, zero errors/unknowns, matching event IDs, and empty PELs after cleanup.
+The ignored test matrix measured public SPI operations on a fresh fixture/provider for each round: sync and async, plaintext and a TLS Redis master (Sentinel transport remained plaintext), concurrency 1 and 8, 64-byte payloads, 100 warmups and 1,000 measured attempts per cell, five rounds. `publish_only` times only publish; `settle_only` prepares each delivery outside the timed accept batches (up to 32 unsettled tokens per worker); `round_trip` times publish, receive and accept. Each worker had its own receiver. All 120 cells completed with 1,000/1,000 successful outcomes and zero errors/unknowns. The old harness did not read published stream contents in `publish_only`; its empty PEL after cleanup did not prove that those events or payloads were present. It checked event IDs on the receive paths in `settle_only` and `round_trip`. The old `publish_only` and `round_trip` throughput denominators also included the post-worker diagnostic capture, while `settle_only` timed release-to-finished batches and excluded capture. Treat the throughput values below as historical measurements with these boundaries.
 
-The table shows the median of the five per-round p50/p95/p99 values and median successful operations per second. These are measurements from one shared host, not production SLO results.
+The table shows the median of the five per-round p50/p95/p99 values and median successful operations per second. These are measurements from one shared host, not production SLO results. Their throughput values use the historical timing boundaries described above and are not directly comparable with the corrected matrix below.
 
 | Mode | Transport | c | Scenario | p50 / p95 / p99 (ms) | Successes/s |
 | --- | --- | ---: | --- | ---: | ---: |
@@ -34,6 +34,41 @@ The table shows the median of the five per-round p50/p95/p99 values and median s
 | async | tls | 8 | round_trip | 34.175 / 50.194 / 59.785 | 221.5 |
 
 Provider diagnostics counted logical connection open attempts and failures in the measured interval. The median was 1,000 provider attempts for publish_only and settle_only and 2,000 for round_trip. On zero-failure rows, `provider_role_probes_estimate` uses the resolver's one validated ROLE probe per successful logical provider open. When failures occur, that estimate is blank. The separate `redis_server_role_calls_mixed` column comes from Redis INFO commandstats and can include Sentinel/background ROLE calls, so it is not used as a provider-specific count. Sentinel sockets were counted at the provider-facing transparent TCP proxy; observer and Sentinel peer/background sockets bypass it. Sentinel socket opens were zero at concurrency 1 after warmup; at concurrency 8 they varied by mode/transport and remain visible per row in the CSV. TLS handshake duration was not measured separately, and end-to-end operation latency is not used as a handshake estimate.
+
+## 2026-11-12 corrected Sentinel cost matrix (`ef620e32`)
+
+The corrected run used the same 120-cell matrix, five rounds, 100 warmups and 1,000 measured samples per cell. All 120,000 measured operations succeeded; errors and unknown outcomes were zero. `publish_only` stream contents were independently read after the elapsed time and provider counter capture had been frozen. The bounded XRANGE observer checked each worker stream for the exact event count, unique expected business IDs, 64-byte `x` payloads and valid wire fields. It used 128-row pages with an exclusive cursor over both plaintext and certificate-verified TLS connections. The empty PEL check remains a settlement check and is not treated as proof of published content. `settle_only` continues to time only release-to-finished accept batches; `publish_only` and `round_trip` freeze wall time after workers join and before the post-workload capture. The observer and counter capture are outside those timed windows.
+
+The table shows the median of the five per-round successful-sample p50/p95/p99 values and median successful operations per second. The p50/p95/p99 units are milliseconds.
+
+| Mode | Transport | c | Scenario | p50 / p95 / p99 (ms) | Successes/s |
+| --- | --- | ---: | --- | ---: | ---: |
+| sync | plaintext | 1 | publish_only | 0.703 / 1.012 / 1.242 | 1339.5 |
+| sync | plaintext | 1 | settle_only | 0.642 / 0.894 / 1.005 | 1492.1 |
+| sync | plaintext | 1 | round_trip | 1.784 / 2.329 / 2.600 | 555.6 |
+| sync | plaintext | 8 | publish_only | 1.468 / 3.396 / 6.415 | 4428.4 |
+| sync | plaintext | 8 | settle_only | 1.609 / 2.895 / 3.371 | 4288.2 |
+| sync | plaintext | 8 | round_trip | 3.076 / 4.699 / 5.235 | 2385.4 |
+| sync | tls | 1 | publish_only | 4.683 / 6.566 / 7.290 | 208.6 |
+| sync | tls | 1 | settle_only | 4.694 / 6.444 / 7.159 | 206.0 |
+| sync | tls | 1 | round_trip | 10.549 / 14.722 / 16.290 | 92.6 |
+| sync | tls | 8 | publish_only | 12.645 / 20.099 / 22.964 | 598.8 |
+| sync | tls | 8 | settle_only | 13.467 / 21.968 / 23.704 | 539.4 |
+| sync | tls | 8 | round_trip | 27.061 / 40.691 / 43.856 | 275.2 |
+| async | plaintext | 1 | publish_only | 1.228 / 1.683 / 1.774 | 743.3 |
+| async | plaintext | 1 | settle_only | 1.185 / 1.669 / 1.877 | 824.8 |
+| async | plaintext | 1 | round_trip | 2.921 / 4.374 / 4.659 | 326.9 |
+| async | plaintext | 8 | publish_only | 2.931 / 4.114 / 6.314 | 2312.6 |
+| async | plaintext | 8 | settle_only | 2.907 / 3.986 / 4.667 | 1816.2 |
+| async | plaintext | 8 | round_trip | 6.992 / 8.699 / 9.265 | 1040.8 |
+| async | tls | 1 | publish_only | 7.156 / 9.549 / 10.766 | 137.4 |
+| async | tls | 1 | settle_only | 6.533 / 9.260 / 10.027 | 146.4 |
+| async | tls | 1 | round_trip | 13.629 / 19.513 / 26.443 | 68.5 |
+| async | tls | 8 | publish_only | 16.318 / 28.988 / 32.842 | 431.2 |
+| async | tls | 8 | settle_only | 17.446 / 28.671 / 34.916 | 406.7 |
+| async | tls | 8 | round_trip | 35.071 / 52.788 / 63.286 | 208.6 |
+
+The run used Redis 7.0.15, Rust/Cargo 1.94.0, and an x86_64 Intel Xeon E5-2680 v4 host. Docker socket access was unavailable, so the existing fixture fallback used local Redis processes. The command ran for 26m21s and exited 0. Exact inputs and the source commit/content hash are in the [manifest](../.infra/benchmark/evidence-ef620e32/final/manifest.json); separate [Cargo.toml and Cargo.lock hashes](../.infra/benchmark/evidence-ef620e32/final/project-input-hashes.txt) are retained. The [warmup records](../.infra/benchmark/evidence-ef620e32/final/sentinel-cost-warmup.csv), [per-attempt samples](../.infra/benchmark/evidence-ef620e32/final/sentinel-cost-samples.csv), [per-round summary](../.infra/benchmark/evidence-ef620e32/final/sentinel-cost-summary.csv), [command and exit status](../.infra/benchmark/evidence-ef620e32/final/formal-command.txt), and [full test log](../.infra/benchmark/evidence-ef620e32/final/matrix.log) are retained with SHA-256 values in [SHA256SUMS](../.infra/benchmark/evidence-ef620e32/final/SHA256SUMS). The interrupted pre-fix attempt is preserved separately under [`partial-prewarm-before-fix`](../.infra/benchmark/evidence-ef620e32/partial-prewarm-before-fix/); it is not part of the final matrix.
 
 The repeated TLS cells show materially higher operation latency on this host: median round-trip p50 was 10.668–14.522 ms at c=1 and 27.650–34.175 ms at c=8; plaintext round-trip p50 was 1.646–2.933 ms at c=1 and 2.916–7.191 ms at c=8. This justifies **limited prototype research** to test connection reuse under a representative workload, not a production cache or a claimed reuse percentage. No application SLO was supplied, and there is no same-condition A/B implementation, so these measurements do not establish an SLO violation or quantify reuse benefit.
 

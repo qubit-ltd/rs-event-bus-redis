@@ -1,0 +1,9 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.12s
+     Running tests/sentinel_cost_tests.rs (target/debug/deps/sentinel_cost_tests-84e1e10e1dc4c880)
+
+running 1 test
+test test_sentinel_cost_matrix ... sync/plaintext/c1/publish_only/r1: 1000/1000 successes, 0 unknown
+sync/plaintext/c1/publish_only/r2: 1000/1000 successes, 0 unknown
+sync/plaintext/c1/publish_only/r3: 1000/1000 successes, 0 unknown
+sync/plaintext/c1/publish_only/r4: 1000/1000 successes, 0 unknown
+sync/plaintext/c1/publish_only/r5: 1000/1000 successes, 0 unknown

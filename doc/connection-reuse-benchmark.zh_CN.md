@@ -2,9 +2,9 @@
 
 ## 2026-11-11 Sentinel 分阶段连接成本核查
 
-忽略执行的测试矩阵对每轮全新 fixture/provider 测量 public SPI：sync/async、明文/TLS Redis master（Sentinel 连接仍为明文）、并发 1/8、64 字节 payload；每格预热 100 次、测量 1,000 次，重复五轮。`publish_only` 只计 publish；`settle_only` 在 accept 计时批次外准备 delivery（每个 worker 每批最多 32 个未结算 token）；`round_trip` 计时 publish、receive、accept 全流程。每个 worker 使用独立 receiver。120 格全部完成，每格 1,000/1,000 成功，error/unknown 为 0；事件 ID 匹配，清理后 PEL 为空。
+忽略执行的测试矩阵对每轮全新 fixture/provider 测量 public SPI：sync/async、明文/TLS Redis master（Sentinel 连接仍为明文）、并发 1/8、64 字节 payload；每格预热 100 次、测量 1,000 次，重复五轮。`publish_only` 只计 publish；`settle_only` 在 accept 计时批次外准备 delivery（每个 worker 每批最多 32 个未结算 token）；`round_trip` 计时 publish、receive、accept 全流程。每个 worker 使用独立 receiver。旧矩阵 120 格全部完成，每格 1,000/1,000 成功，error/unknown 为 0。旧 harness 没有读取 `publish_only` 的 stream 内容；清理后 PEL 为空不能证明纯发布消息或 payload 存在。旧 `settle_only` 和 `round_trip` 的 receive 路径检查了事件 ID。旧 `publish_only` 和 `round_trip` 的吞吐分母包含 worker 结束后的诊断 capture；`settle_only` 按 release 至 finished 批次计时，不包含 capture。下方吞吐量是使用这些历史边界的测量值。
 
-下表是五轮各自 p50/p95/p99 的中位数，以及每秒成功操作数中位数。结果来自一台共享主机，不是生产 SLO 测量。
+下表是五轮各自 p50/p95/p99 的中位数，以及每秒成功操作数中位数。结果来自一台共享主机，不是生产 SLO 测量。其吞吐量使用上文所述的历史计时边界，不能直接与下方修正后的矩阵比较。
 
 | 模式 | 传输 | 并发 | 场景 | p50 / p95 / p99（毫秒） | 成功次数/秒 |
 | --- | --- | ---: | --- | ---: | ---: |
@@ -34,6 +34,41 @@
 | async | TLS | 8 | 完整往返 | 34.175 / 50.194 / 59.785 | 221.5 |
 
 Provider 诊断统计测量区间内的逻辑连接打开尝试和失败。`publish_only` 与 `settle_only` 的 provider 尝试中位数为 1,000，`round_trip` 为 2,000。零失败行的 `provider_role_probes_estimate` 根据 resolver 每次成功的逻辑 provider open 会执行一次经过验证的 ROLE 探测推算；有失败时该估算留空。单独保留的 `redis_server_role_calls_mixed` 来自 Redis INFO commandstats，可能包含 Sentinel/后台 ROLE 调用，不作为 provider 专属计数。Sentinel socket 在 provider 入口的透明 TCP 代理统计；observer 和 Sentinel peer/后台连接绕过代理。预热后并发 1 的 Sentinel socket 新建数为 0；并发 8 的计数随模式/传输变化，逐行保留在 CSV。TLS 握手耗时未单独测量，不从端到端操作时延推算握手时长。
+
+## 2026-11-12 修正后的 Sentinel 成本矩阵（`ef620e32`）
+
+修正后的运行仍为 120 格、五轮、每格预热 100 次且正式测量 1,000 次。120,000 次正式操作全部成功，error 和 unknown 均为 0。`publish_only` 在 elapsed 冻结且 provider 计数 capture 完成后，独立读取每个 worker 的 stream 内容。明文与证书校验 TLS 连接均使用每页最多 128 行、排他的 XRANGE 游标，检查精确行数、预期业务 ID 的唯一性、64 字节 `x` payload 和合法 wire 字段。空 PEL 检查仍表示结算状态，不作为已发布内容的证明。`settle_only` 仍只统计 release 至 finished 的 accept 批次；`publish_only` 与 `round_trip` 在 worker join 后、后置 capture 前冻结墙钟时长。observer 和计数 capture 均在这两个场景的计时窗口之外。
+
+下表为五轮每轮成功样本 p50/p95/p99 的中位数，以及每秒成功操作数中位数。p50/p95/p99 单位为毫秒。
+
+| 模式 | 传输 | 并发 | 场景 | p50 / p95 / p99（毫秒） | 成功次数/秒 |
+| --- | --- | ---: | --- | ---: | ---: |
+| sync | 明文 | 1 | publish_only | 0.703 / 1.012 / 1.242 | 1339.5 |
+| sync | 明文 | 1 | settle_only | 0.642 / 0.894 / 1.005 | 1492.1 |
+| sync | 明文 | 1 | round_trip | 1.784 / 2.329 / 2.600 | 555.6 |
+| sync | 明文 | 8 | publish_only | 1.468 / 3.396 / 6.415 | 4428.4 |
+| sync | 明文 | 8 | settle_only | 1.609 / 2.895 / 3.371 | 4288.2 |
+| sync | 明文 | 8 | round_trip | 3.076 / 4.699 / 5.235 | 2385.4 |
+| sync | TLS | 1 | publish_only | 4.683 / 6.566 / 7.290 | 208.6 |
+| sync | TLS | 1 | settle_only | 4.694 / 6.444 / 7.159 | 206.0 |
+| sync | TLS | 1 | round_trip | 10.549 / 14.722 / 16.290 | 92.6 |
+| sync | TLS | 8 | publish_only | 12.645 / 20.099 / 22.964 | 598.8 |
+| sync | TLS | 8 | settle_only | 13.467 / 21.968 / 23.704 | 539.4 |
+| sync | TLS | 8 | round_trip | 27.061 / 40.691 / 43.856 | 275.2 |
+| async | 明文 | 1 | publish_only | 1.228 / 1.683 / 1.774 | 743.3 |
+| async | 明文 | 1 | settle_only | 1.185 / 1.669 / 1.877 | 824.8 |
+| async | 明文 | 1 | round_trip | 2.921 / 4.374 / 4.659 | 326.9 |
+| async | 明文 | 8 | publish_only | 2.931 / 4.114 / 6.314 | 2312.6 |
+| async | 明文 | 8 | settle_only | 2.907 / 3.986 / 4.667 | 1816.2 |
+| async | 明文 | 8 | round_trip | 6.992 / 8.699 / 9.265 | 1040.8 |
+| async | TLS | 1 | publish_only | 7.156 / 9.549 / 10.766 | 137.4 |
+| async | TLS | 1 | settle_only | 6.533 / 9.260 / 10.027 | 146.4 |
+| async | TLS | 1 | round_trip | 13.629 / 19.513 / 26.443 | 68.5 |
+| async | TLS | 8 | publish_only | 16.318 / 28.988 / 32.842 | 431.2 |
+| async | TLS | 8 | settle_only | 17.446 / 28.671 / 34.916 | 406.7 |
+| async | TLS | 8 | round_trip | 35.071 / 52.788 / 63.286 | 208.6 |
+
+本次使用 Redis 7.0.15、Rust/Cargo 1.94.0，以及 x86_64 Intel Xeon E5-2680 v4 主机。Docker socket 不可用，fixture 按现有逻辑回退至本地 Redis 进程。命令耗时 26 分 21 秒，退出码为 0。精确输入及源码提交/内容哈希见[运行清单](../.infra/benchmark/evidence-ef620e32/final/manifest.json)；[Cargo.toml 和 Cargo.lock 哈希](../.infra/benchmark/evidence-ef620e32/final/project-input-hashes.txt)另行保留。[预热记录](../.infra/benchmark/evidence-ef620e32/final/sentinel-cost-warmup.csv)、[逐次样本](../.infra/benchmark/evidence-ef620e32/final/sentinel-cost-samples.csv)、[逐轮汇总](../.infra/benchmark/evidence-ef620e32/final/sentinel-cost-summary.csv)、[命令与退出码](../.infra/benchmark/evidence-ef620e32/final/formal-command.txt)和[完整测试日志](../.infra/benchmark/evidence-ef620e32/final/matrix.log)均已保留，其 SHA-256 见[哈希清单](../.infra/benchmark/evidence-ef620e32/final/SHA256SUMS)。修前中断的尝试单独保存在[`partial-prewarm-before-fix`](../.infra/benchmark/evidence-ef620e32/partial-prewarm-before-fix/)，不属于最终矩阵。
 
 本机重复 TLS 测量显示操作时延明显较高：c=1 的 round-trip p50 中位数为 10.668–14.522 ms，c=8 为 27.650–34.175 ms；明文对应为 c=1 的 1.646–2.933 ms、c=8 的 2.916–7.191 ms。这足以支持**继续有限原型研究**，在有代表性的负载下验证连接复用；不等于授权实施生产缓存，也不能据此声称复用收益百分比。没有提供应用 SLO，也没有相同条件的 A/B 实现，因此不能据此认定 SLO 违约或量化复用收益。
 

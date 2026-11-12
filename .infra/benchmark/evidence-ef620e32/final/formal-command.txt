@@ -1,0 +1,2 @@
+RER_COST_SAMPLES=1000 RER_COST_ROUNDS=5 RER_COST_OUTPUT=.infra/benchmark/evidence-ef620e32/final cargo test --locked --all-features --test sentinel_cost_tests -- --ignored --exact test_sentinel_cost_matrix --nocapture --test-threads=1
+Exit status: 0
