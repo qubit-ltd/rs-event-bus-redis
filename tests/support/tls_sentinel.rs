@@ -342,6 +342,38 @@ impl TlsSentinel {
         Ok((sentinel_counts, roles))
     }
 
+    /// Reads a bounded XRANGE page on a certificate verified TLS connection.
+    pub fn cost_stream_range_page(
+        &self,
+        port: u16,
+        stream: &str,
+        start: &str,
+    ) -> Result<redis::streams::StreamRangeReply, Box<dyn Error>> {
+        let mut connection = self.tls_connection(port)?;
+        Ok(cmd("XRANGE")
+            .arg(stream)
+            .arg(start)
+            .arg("+")
+            .arg("COUNT")
+            .arg(128)
+            .query(&mut connection)?)
+    }
+
+    /// Seeds fixture records through a certificate verified TLS connection for
+    /// observer tests.
+    pub fn cost_seed_wire_rows(&self, port: u16, stream: &str, wires: &[String]) -> Result<(), Box<dyn Error>> {
+        let mut connection = self.tls_connection(port)?;
+        for wire in wires {
+            let _: String = cmd("XADD")
+                .arg(stream)
+                .arg("*")
+                .arg("wire")
+                .arg(wire)
+                .query(&mut connection)?;
+        }
+        Ok(())
+    }
+
     /// Returns the TLS replica port allocated for this fixture.
     #[must_use]
     pub fn replica_port(&self) -> u16 {

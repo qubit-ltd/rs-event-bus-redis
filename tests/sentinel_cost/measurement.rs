@@ -7,6 +7,7 @@
 // =============================================================================
 //! Samples, configuration and summaries for the Sentinel cost matrix.
 
+use std::io::Write;
 use std::path::PathBuf;
 
 #[derive(Clone, Debug)]
@@ -39,6 +40,70 @@ pub struct Summary {
     pub p50_ns: Option<u128>,
     pub p95_ns: Option<u128>,
     pub p99_ns: Option<u128>,
+}
+
+#[derive(Clone, Copy)]
+pub struct WarmupDimension<'a> {
+    pub mode: &'a str,
+    pub transport: &'a str,
+    pub concurrency: usize,
+    pub scenario: &'a str,
+    pub round: usize,
+}
+
+/// Rejects a summary unless every expected operation succeeded exactly once.
+pub fn assert_complete(summary: &Summary, expected: usize) -> Result<(), String> {
+    if summary.attempts != expected || summary.successes != expected || summary.errors != 0 || summary.unknown != 0 {
+        return Err(format!(
+            "expected={expected}, attempts={}, successes={}, errors={}, unknown={}",
+            summary.attempts, summary.successes, summary.errors, summary.unknown
+        ));
+    }
+    Ok(())
+}
+
+/// Freezes elapsed time before running an observation outside the measured
+/// window.
+pub fn freeze_before_observation<T>(
+    elapsed: impl FnOnce() -> std::time::Duration,
+    observe: impl FnOnce() -> T,
+) -> (std::time::Duration, T) {
+    let frozen = elapsed();
+    (frozen, observe())
+}
+
+/// Writes and flushes warmup samples and their summary before applying the
+/// gate.
+pub fn persist_and_validate_warmup(
+    writer: &mut impl Write,
+    dimension: WarmupDimension<'_>,
+    samples: &[Sample],
+    summary: &Summary,
+    expected: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let WarmupDimension {
+        mode,
+        transport,
+        concurrency,
+        scenario,
+        round,
+    } = dimension;
+    for (index, sample) in samples.iter().enumerate() {
+        writeln!(
+            writer,
+            "{mode},{transport},{concurrency},{scenario},{round},sample,{index},,,,,{},{}",
+            sample.nanos, sample.outcome
+        )?;
+    }
+    writeln!(
+        writer,
+        "{mode},{transport},{concurrency},{scenario},{round},summary,,{},{},{},{},,",
+        summary.attempts, summary.successes, summary.errors, summary.unknown
+    )?;
+    writer.flush()?;
+    assert_complete(summary, expected)
+        .map_err(|error| format!("{mode}/{transport}/c{concurrency}/{scenario}/r{round}/warm: {error}"))?;
+    Ok(())
 }
 
 pub fn summarize(samples: &[Sample]) -> Summary {

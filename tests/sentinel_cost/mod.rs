@@ -8,4 +8,5 @@
 //! Sentinel cost matrix modules.
 
 pub mod measurement;
+pub mod validation;
 pub mod workload;

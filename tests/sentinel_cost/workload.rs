@@ -23,7 +23,12 @@ use qubit_event_bus_redis::diagnostics::RedisProviderDiagnostics;
 
 use super::measurement::Config;
 use super::measurement::Sample;
+use super::measurement::WarmupDimension;
+use super::measurement::assert_complete;
+use super::measurement::freeze_before_observation;
+use super::measurement::persist_and_validate_warmup;
 use super::measurement::summarize;
+use super::validation::validate_rows;
 
 static IDS: AtomicU64 = AtomicU64::new(1);
 
@@ -38,6 +43,10 @@ pub fn run_matrix() -> Result<(), Box<dyn Error>> {
         .write(true)
         .create_new(true)
         .open(config.output.join("sentinel-cost-summary.csv"))?;
+    let mut warmup = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(config.output.join("sentinel-cost-warmup.csv"))?;
     writeln!(
         raw,
         "mode,transport,concurrency,scenario,round,sample,latency_ns,outcome"
@@ -46,6 +55,11 @@ pub fn run_matrix() -> Result<(), Box<dyn Error>> {
         summary,
         "mode,transport,concurrency,scenario,round,attempts,successes,errors,unknown,p50_ns,p95_ns,p99_ns,aggregate_success_per_wall_second,provider_connection_attempts,provider_connection_failures,provider_role_probes_estimate,sentinel_connections,redis_server_role_calls_mixed,handshake_ns"
     )?;
+    writeln!(
+        warmup,
+        "mode,transport,concurrency,scenario,round,record_type,sample,attempts,successes,errors,unknown,latency_ns,outcome"
+    )?;
+    warmup.flush()?;
     for mode in ["sync", "async"] {
         for transport in ["plaintext", "tls"] {
             for concurrency in [1, 8] {
@@ -55,6 +69,7 @@ pub fn run_matrix() -> Result<(), Box<dyn Error>> {
                             &config,
                             &mut raw,
                             &mut summary,
+                            &mut warmup,
                             MatrixDimension {
                                 mode,
                                 transport,
@@ -70,6 +85,7 @@ pub fn run_matrix() -> Result<(), Box<dyn Error>> {
     }
     raw.flush()?;
     summary.flush()?;
+    warmup.flush()?;
     let mut manifest = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -320,6 +336,7 @@ fn run_round(
     config: &Config,
     raw: &mut File,
     summary: &mut File,
+    warmup_evidence: &mut File,
     dimension: MatrixDimension<'_>,
 ) -> Result<(), Box<dyn Error>> {
     use super::super::bench_support::backend::Backend;
@@ -362,6 +379,29 @@ fn run_round(
     let bus = Backend::new(mode, options)?;
     let capture = || capture_counts(&namespace, plain_fixture.as_ref(), tls_fixture.as_ref());
     let (warm, _) = scenario_run(&bus, &format!("{namespace}-warm"), concurrency, 100, scenario, &capture)?;
+    let warm_samples: Vec<_> = warm
+        .groups
+        .iter()
+        .flatten()
+        .map(|sample| Sample {
+            nanos: sample.nanos,
+            outcome: sample.outcome.clone(),
+        })
+        .collect();
+    let warm_summary = summarize(&warm_samples);
+    persist_and_validate_warmup(
+        warmup_evidence,
+        WarmupDimension {
+            mode,
+            transport,
+            concurrency,
+            scenario,
+            round,
+        },
+        &warm_samples,
+        &warm_summary,
+        100,
+    )?;
     for mut receiver in warm.receivers {
         receiver.close()?;
     }
@@ -406,16 +446,6 @@ fn run_round(
             samples.push(record);
         }
     }
-    assert_measurement_pel_empty(
-        &namespace,
-        &format!("{namespace}-measure"),
-        concurrency,
-        plain_fixture.as_ref(),
-        tls_fixture.as_ref(),
-    )?;
-    for mut receiver in workload.receivers {
-        receiver.close()?;
-    }
     let result = summarize(&samples);
     let sentinel_delta = stage_counts.as_ref().map_or_else(
         || {
@@ -453,10 +483,38 @@ fn run_round(
         sentinel_delta,
         role_delta
     )?;
+    raw.flush()?;
+    summary.flush()?;
     println!(
         "{mode}/{transport}/c{concurrency}/{scenario}/r{round}: {}/{} successes, {} unknown",
         result.successes, result.attempts, result.unknown
     );
+    if scenario == "publish_only" {
+        validate_publish_contents(
+            &namespace,
+            &format!("{namespace}-measure"),
+            concurrency,
+            config.samples,
+            plain_fixture.as_ref(),
+            tls_fixture.as_ref(),
+        )
+        .map_err(|error| {
+            format!("{mode}/{transport}/c{concurrency}/{scenario}/r{round}: content validation: {error}")
+        })?;
+    }
+    assert_complete(&result, config.samples)
+        .map_err(|error| format!("{mode}/{transport}/c{concurrency}/{scenario}/r{round}: {error}"))?;
+    assert_measurement_pel_empty(
+        &namespace,
+        &format!("{namespace}-measure"),
+        concurrency,
+        plain_fixture.as_ref(),
+        tls_fixture.as_ref(),
+    )
+    .map_err(|error| format!("{mode}/{transport}/c{concurrency}/{scenario}/r{round}: PEL validation: {error}"))?;
+    for mut receiver in workload.receivers {
+        receiver.close()?;
+    }
     Ok(())
 }
 
@@ -505,6 +563,57 @@ fn assert_measurement_pel_empty(
                 &group,
             )?;
         }
+    }
+    Ok(())
+}
+
+pub fn validate_publish_contents(
+    namespace: &str,
+    prefix: &str,
+    concurrency: usize,
+    samples: usize,
+    plain: Option<&super::super::bench_support::redis_fixture::SentinelFixture>,
+    tls: Option<&super::super::tls_sentinel::TlsSentinel>,
+) -> Result<(), Box<dyn Error>> {
+    use std::collections::HashSet;
+
+    use qubit_event_bus_redis::naming::stream_key;
+    for worker in 0..concurrency {
+        let topic = format!("{prefix}-worker-{worker}");
+        let expected: HashSet<_> = (0..samples / concurrency + usize::from(worker < samples % concurrency))
+            .map(|sequence| format!("event-{worker}-{sequence}"))
+            .collect();
+        let stream = stream_key(namespace, &topic);
+        let mut rows = Vec::with_capacity(expected.len());
+        let mut cursor = "-".to_owned();
+        loop {
+            let page: redis::streams::StreamRangeReply = if let Some(fixture) = plain {
+                let mut connection = redis::Client::open(fixture.master.url())?.get_connection()?;
+                redis::cmd("XRANGE")
+                    .arg(&stream)
+                    .arg(&cursor)
+                    .arg("+")
+                    .arg("COUNT")
+                    .arg(128)
+                    .query(&mut connection)?
+            } else {
+                tls.ok_or("missing TLS fixture")?.cost_stream_range_page(
+                    tls.ok_or("missing TLS fixture")?.original_master_port(),
+                    &stream,
+                    &cursor,
+                )?
+            };
+            if page.ids.is_empty() {
+                break;
+            }
+            let last = page.ids.last().ok_or("empty XRANGE page")?.id.clone();
+            rows.extend(page.ids);
+            if rows.len() > expected.len() {
+                break;
+            }
+            cursor = format!("({last}");
+        }
+        validate_rows(&rows, &expected, &topic)?;
     }
     Ok(())
 }
@@ -584,10 +693,11 @@ fn scenario_run(
             receivers.push(receiver);
         }
     }
-    let after = capture()?;
+    let (elapsed, after) = freeze_before_observation(|| started.elapsed(), capture);
+    let after = after?;
     Ok((
         super::super::bench_support::workload_result::WorkloadResult {
-            elapsed: started.elapsed(),
+            elapsed,
             groups,
             receivers,
         },
