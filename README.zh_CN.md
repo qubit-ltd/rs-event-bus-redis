@@ -167,7 +167,7 @@ event-bus SPI 允许应用更换传输实现，而不改业务 handler。Redis S
 - 提供有界的命令与 receiver 准入、payload/wire 容量限制、恢复调度，以及进程内 `RedisProviderDiagnostics::snapshots()` 诊断。Redis 订阅必须显式使用 `Durable`。
 - 测试会通过 Docker 启动隔离的 Redis 6.2、Redis 7 和 Sentinel 服务。
 
-Redis 至少一次投递，业务 handler 应能处理重复事件。`XADD` 被接纳只表示 Redis 接受了命令，不代表已 fsync、已送达消费者或业务处理完成；若发布回复丢失，结果未知，不应盲目重试。stream 默认不裁剪，超过接收容量的记录会留在 pending。终态结算需要 Redis ACL 允许 `EVAL`、`XPENDING` 和 `XACK`。恢复、RESP/wire 限制、结果未知、重试和权限细节见[投递与重试指南](doc/user_guide.zh_CN.md#6-理解投递重试和清理)、[资源与消息大小限制](doc/user_guide.zh_CN.md#10-怎样限制资源和消息尺寸)、[Redis ACL 指南](doc/user_guide.zh_CN.md#按职责配置-redis-acl)及[结算迁移说明](doc/migration.zh_CN.md#结算-owner-校验)。
+仍保留且可恢复的 Redis Stream 记录可能重复投递，业务 handler 应保证幂等。发布被接纳不保证消费者端到端至少收到一次。`XADD` 被接纳只表示 Redis 接受了命令，不代表已 fsync、已送达消费者或业务处理完成；若发布回复丢失，结果未知，不应盲目重试。stream 默认不裁剪，超过接收容量的记录会留在 pending。终态结算需要 Redis ACL 允许 `EVAL`、`XPENDING` 和 `XACK`。恢复、RESP/wire 限制、结果未知、重试和权限细节见[投递与重试指南](doc/user_guide.zh_CN.md#6-理解投递重试和清理)、[资源与消息大小限制](doc/user_guide.zh_CN.md#10-怎样限制资源和消息尺寸)、[Redis ACL 指南](doc/user_guide.zh_CN.md#按职责配置-redis-acl)及[结算迁移说明](doc/migration.zh_CN.md#结算-owner-校验)。
 
 已有消费组会按明确规则处理订阅起始位置，详见[消费组迁移说明](doc/migration.zh_CN.md#已有消费组起始位置变更)。单实例和 Sentinel 连接均可按需启用 TLS。当前不支持 Cluster、native/delayed delivery 或死信路由；stream 和消费组由运维人员负责清理。
 

@@ -417,7 +417,7 @@ Terminal settlement uses one single-key `EVAL` that checks the exact PEL entry's
 
 If the first EVAL receives a complete explicit Redis rejection, the intent remains open and can be attempted again; once an ACK outcome is uncertain, the original intent is fixed. The owner check protects Redis acknowledgement state only: it is not business fencing and cannot stop an old handler's external side effects.
 
-Redis Streams provide at-least-once delivery, so make handlers idempotent. A slow handler can exceed `redis.claim_min_idle_ms`; another consumer may claim the same pending event while the first handler is still running. Choose an idle threshold that fits handler latency and retain business-level deduplication where duplicates are costly.
+Retained, recoverable Redis Stream entries can be redelivered, so handlers must tolerate duplicates. An accepted publication does not guarantee end-to-end consumer receipt at least once. A slow handler can exceed `redis.claim_min_idle_ms`; another consumer may claim the same pending event while the first handler is still running. Choose an idle threshold that fits handler latency and retain business-level deduplication where duplicates are costly.
 
 Still-resident Redis stream entries can be delivered again, so handlers must be idempotent. For `qubit-task` notifications, use a durable consumer checkpoint, retain the highest `state_version`, and query authoritative task state when a version gap appears.
 

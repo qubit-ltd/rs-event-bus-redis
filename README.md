@@ -169,11 +169,13 @@ The event-bus SPI lets an application choose a transport without changing busine
 - Bounded command and receiver admission, payload and wire limits, recovery scheduling, and process-local `RedisProviderDiagnostics::snapshots()`. Redis subscriptions must explicitly use `Durable`.
 - Test fixtures that start isolated Redis 6.2, Redis 7, and Sentinel services in Docker.
 
-Redis delivery is at least once, so handlers should tolerate duplicates. An accepted
-`XADD` confirms Redis accepted the command; it does not prove fsync, consumer
-delivery, or application work completed. A lost publish reply has an unknown
-effect and must not be blindly retried. Streams are not trimmed by default, and
-records over configured receive capacity remain pending. Terminal settlement
+Retained, recoverable Redis Stream entries can be redelivered, so handlers must
+tolerate duplicates. An accepted publication does not guarantee end-to-end
+consumer receipt at least once. An accepted `XADD` confirms Redis accepted the
+command; it does not prove fsync, consumer delivery, or application work
+completed. A lost publish reply has an unknown effect and must not be blindly
+retried. Streams are not trimmed by default, and records over configured receive
+capacity remain pending. Terminal settlement
 requires Redis ACL permission for `EVAL`, `XPENDING`, and `XACK`. See the
 [delivery and retry guide](doc/user_guide.md#6-understand-delivery-retry-and-cleanup),
 [resource limits](doc/user_guide.md#10-bound-resources-and-message-sizes),

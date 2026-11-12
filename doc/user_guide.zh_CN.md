@@ -415,7 +415,7 @@ provider 将一条 JSON wire record 写入 Redis Stream 的 `wire` 字段。内�
 
 首次 EVAL 收到完整、明确的 Redis 拒绝时，意图仍保持开放，可以再次尝试；ACK 结果一旦不确定，原意图就固定。owner 检查只保护 Redis 确认状态，不是业务 fencing，也不能阻止旧 handler 产生外部副作用。
 
-Redis 提供至少一次投递，因此 handler 应具备幂等性。新消息经 `XREADGROUP >` 读取时，`delivery.context().provider_attempt()` 为 `Some(1)`。每条 pending 或 `XAUTOCLAIM` 恢复消息交付前，provider 会针对该 ID 查询 Redis `XPENDING` 明细；只有恰好一条明细的 ID 和当前 consumer owner 都匹配，且非零次数可由 SPI 的 `u32` 表示时，才报告 Redis 投递次数。查询失败、无结果、格式错误、次数为零或不可表示、以及校验不匹配时均为 `None`。每条恢复消息因此多一次 Redis 命令，新消息不增加查询。facade 本地重试次数请读取 `retry_attempt`。如果 handler 运行时间超过 `redis.claim_min_idle_ms`，另一个 consumer 可能在原 handler 仍执行时认领同一事件。idle threshold 应覆盖常见和最慢的处理时间；重复代价高时，应用还应按业务 ID 去重。
+仍保留且可恢复的 Redis Stream 记录可能重复投递，因此 handler 应能处理重复事件。发布被接纳不保证消费者端到端至少收到一次。新消息经 `XREADGROUP >` 读取时，`delivery.context().provider_attempt()` 为 `Some(1)`。每条 pending 或 `XAUTOCLAIM` 恢复消息交付前，provider 会针对该 ID 查询 Redis `XPENDING` 明细；只有恰好一条明细的 ID 和当前 consumer owner 都匹配，且非零次数可由 SPI 的 `u32` 表示时，才报告 Redis 投递次数。查询失败、无结果、格式错误、次数为零或不可表示、以及校验不匹配时均为 `None`。每条恢复消息因此多一次 Redis 命令，新消息不增加查询。facade 本地重试次数请读取 `retry_attempt`。如果 handler 运行时间超过 `redis.claim_min_idle_ms`，另一个 consumer 可能在原 handler 仍执行时认领同一事件。idle threshold 应覆盖常见和最慢的处理时间；重复代价高时，应用还应按业务 ID 去重。
 
 仍保留在 Redis 中的 stream entry 可能再次投递，因此 handler 必须具备幂等性。处理 `qubit-task` 通知时，应使用持久 consumer checkpoint、保留最高 `state_version`，并在发现版本缺口时查询任务服务的权威状态。
 
