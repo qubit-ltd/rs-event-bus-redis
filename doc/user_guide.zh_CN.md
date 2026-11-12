@@ -378,16 +378,14 @@ redis.sentinel.tls_client_key_path=/etc/redis/sentinel-client-key.pem
 | Sentinel 返回的 master 账号 | 按应用需要授予发布/订阅命令，另加 master 校验所用的 `ROLE` | 与 standalone 相同的应用 stream 和隔离 key。master 使用 `redis.username_env`、`redis.password_env`，不读取 Sentinel 的凭据变量。 |
 | 运维/观察账号 | 按运维任务授予 `XINFO`、`XLEN`、`XPENDING`、`XRANGE`、`INFO` 等 | 只读检查指定的源 key 和隔离 key。请与应用账号分开管理。 |
 
-可以使用公开 `naming` helper 核对实际 key。下面固定采用 namespace `guide-acl`、topic `events`、subscriber `billing-worker` 和显式 group `billing`：stream key 是 `qubit:stream:9:guide-acl:6:events`，group 名称是 `qubit:group:9:guide-acl:6:events:7:billing`，隔离 key 是 `qubit:poison:9:guide-acl:6:events:43:qubit:group:9:guide-acl:6:events:7:billing`。group 名称只是 stream 命令的参数，本身不是 Redis key。Redis ACL 的 key pattern 使用 glob 匹配，不是逐字匹配；`*`、`?`、方括号表达式和转义符都有模式含义。示例组件不含 glob 元字符。如果 namespace/topic/group 中含有这些字符，ACL pattern 可能匹配额外 key；应限制这类配置值，或仔细审查最终 pattern。添加其他 topic/group 时，可以逐项授权对应 stream 与隔离 key，也可以制定范围明确、经过实际验证的 pattern。
+可以使用公开 `naming` helper 核对实际 key。下面固定采用 namespace `guide-acl`、topic `events`、subscriber `billing-worker` 和显式 group `billing`：stream key 是 `qubit:stream:9:guide-acl:6:events`，group 名称是 `qubit:group:9:guide-acl:6:events:7:billing`，隔离 key 是 `qubit:poison:9:guide-acl:6:events:42:qubit:group:9:guide-acl:6:events:7:billing`。group 名称只是 stream 命令的参数，本身不是 Redis key。Redis ACL 的 key pattern 使用 glob 匹配，不是逐字匹配；`*`、`?`、方括号表达式和转义符都有模式含义。示例组件不含 glob 元字符。如果 namespace/topic/group 中含有这些字符，ACL pattern 可能匹配额外 key；应限制这类配置值，或仔细审查最终 pattern。添加其他 topic/group 时，可以逐项授权对应 stream 与隔离 key，也可以制定范围明确、经过实际验证的 pattern。
 
-管理员可以按下面的结构为单一 topic/group 创建应用用户。生产密钥应通过受保护的 ACL 管理渠道替换示例占位符；不要把真实密钥直接粘贴到 shell history：
+请在已认证且有 ACL 管理权限的 `redis-cli` 交互会话中，将下面内容作为一条命令执行。这是 Redis 控制台命令，不是 shell 命令。生产密钥应通过受保护的 ACL 管理渠道替换示例占位符；不要把真实密钥直接粘贴到 shell history：
 
 ```text
-ACL SETUSER event-worker reset on >replace-with-managed-secret \\
-  ~qubit:stream:9:guide-acl:6:events \\
-  ~qubit:poison:9:guide-acl:6:events:43:qubit:group:9:guide-acl:6:events:7:billing \\
-  +ping +xadd +xgroup|create +xreadgroup +xautoclaim +xpending +xrange +xack \\
-  +eval +type
+<!-- acl-example: event-worker -->
+ACL SETUSER event-worker reset on >replace-with-managed-secret ~qubit:stream:9:guide-acl:6:events ~qubit:poison:9:guide-acl:6:events:42:qubit:group:9:guide-acl:6:events:7:billing +ping +xadd +xgroup|create +xreadgroup +xautoclaim +xpending +xrange +xack +eval +type
+<!-- end-acl-example -->
 ```
 
 正常终态结算和隔离均需要 `+eval`；终态结算还需要脚本内 `XPENDING` 与 `XACK` 权限。`+type` 用于隔离路径；省略它会使该路径不可用，但不能因此省略 `+eval`。缺少隔离权限会使畸形记录无法完成处理，必须按运维流程处置。若 URL 指向非零数据库，还要按 Redis ACL 策略允许客户端初始化时的 `SELECT`。如果 Redis 支持 `CLIENT SETINFO` 且希望记录客户端元数据，可以授予对应的 `setinfo` 子命令；拒绝该命令不会阻止 provider 完成连接初始化。不要用 `+@all` 代替逐项授权。Sentinel 需要单独配置发现权限；master 账号配置应用命令和 `ROLE`；运维观察则使用另一身份。

@@ -11,6 +11,70 @@
 
 mod acl_support;
 mod support;
+mod documentation;
+
+#[test]
+fn test_documented_acl_parameters_match_both_guides() {
+    let english = documentation::documented_arguments(documentation::GUIDES[0]);
+    let chinese = documentation::documented_arguments(documentation::GUIDES[1]);
+    assert_eq!(english, chinese, "bilingual ACL commands drifted");
+    let namespace = "guide-acl";
+    let topic = "events";
+    let group = qubit_event_bus_redis::naming::group_name(namespace, topic, "billing-worker", Some("billing"));
+    let stream = qubit_event_bus_redis::naming::stream_key(namespace, topic);
+    let quarantine = qubit_event_bus_redis::naming::poison_key(namespace, topic, &group);
+    for guide in documentation::GUIDES {
+        let contents = std::fs::read_to_string(guide).unwrap();
+        for expected_key in [&stream, &group, &quarantine] {
+            assert!(contents.contains(expected_key), "{guide} is missing documented key {expected_key}");
+        }
+    }
+    let expected = [
+        "ACL".to_owned(), "SETUSER".to_owned(), "event-worker".to_owned(), "reset".to_owned(),
+        "on".to_owned(), ">replace-with-managed-secret".to_owned(),
+        format!("~{stream}"),
+        format!("~{quarantine}"),
+        "+ping".into(), "+xadd".into(), "+xgroup|create".into(), "+xreadgroup".into(),
+        "+xautoclaim".into(), "+xpending".into(), "+xrange".into(), "+xack".into(),
+        "+eval".into(), "+type".into(),
+    ];
+    assert_eq!(english, expected);
+}
+
+#[cfg(feature = "sync")]
+#[test]
+fn test_documented_acl_command_runs_in_isolated_redis() {
+    use redis::cmd;
+    use std::process::Command;
+
+    let mut args = documentation::documented_arguments(documentation::GUIDES[0]);
+    let server = support::redis_server::RedisServer::start().unwrap();
+    let url = server.url();
+    let mut admin = redis::Client::open(url).unwrap().get_connection().unwrap();
+    args[2] = "acl_docs_fixture".into();
+    args[5] = ">one-time-fixture-secret".into();
+    let mut acl = cmd("ACL");
+    for argument in args.iter().skip(1) {
+        acl.arg(argument);
+    }
+    let _: () = acl.query(&mut admin).unwrap();
+
+    let authenticated_url = format!("redis://acl_docs_fixture:one-time-fixture-secret@{}", url.trim_start_matches("redis://"));
+    let authenticated = redis::Client::open(authenticated_url.as_str()).unwrap();
+    let mut connection = authenticated.get_connection().unwrap();
+    let _: String = cmd("PING").query(&mut connection).unwrap();
+
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args(["--ignored", "--exact", "test_sync_acl_child", "--nocapture"])
+        .env("RER_ACL_URL", url)
+        .env("RER_ACL_NAMESPACE", "guide-acl")
+        .env("RER_ACL_CASE", "documented")
+        .env("RER_ACL_USER", "acl_docs_fixture")
+        .env("RER_ACL_PASSWORD", "one-time-fixture-secret")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "documented ACL provider workflow failed: {}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+}
 
 use std::any::TypeId;
 use std::error::Error;
@@ -239,6 +303,10 @@ fn sync_child() -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
     settle?;
+    if case == "documented" {
+        subscription.close()?;
+        return Ok(());
+    }
     assert_outside_namespace_denied_sync(&namespace)?;
     signal_ready_and_wait()?;
     let outcome = subscription.receive(Duration::from_secs(3));
