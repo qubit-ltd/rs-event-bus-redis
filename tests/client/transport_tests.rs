@@ -642,6 +642,7 @@ fn test_sync_block_adds_command_margin_and_next_poll_restores_short_wait() {
     let proxy = ControlledRedis::start(server.url()).expect("proxy");
     let mut settings = options(&proxy.url(), 64);
     settings.insert("redis.command_timeout_ms".into(), "1000".into());
+    settings.insert("redis.recovery_interval_ms".into(), "50".into());
     let bus = RedisEventBusProvider
         .create_configured(&EventBusConfig::default().with_provider_options(settings))
         .expect("provider");
@@ -652,6 +653,7 @@ fn test_sync_block_adds_command_margin_and_next_poll_restores_short_wait() {
             .expect("BLOCK plus command margin must allow server wait"),
         ReceiveOutcome::TimedOut
     ));
+    std::thread::sleep(Duration::from_millis(100));
     let gate = proxy.pause_after_reply("XAUTOCLAIM");
     let (sender, receiver) = channel();
     let worker = spawn(move || {
@@ -679,6 +681,7 @@ fn test_async_block_adds_command_margin_and_next_poll_restores_short_wait() {
     let proxy = ControlledRedis::start(server.url()).expect("proxy");
     let mut settings = options(&proxy.url(), 64);
     settings.insert("redis.command_timeout_ms".into(), "1000".into());
+    settings.insert("redis.recovery_interval_ms".into(), "50".into());
     let mut subscription = block_on(async {
         let bus = AsyncRedisEventBusProvider
             .create_configured(&EventBusConfig::default().with_provider_options(settings))
@@ -694,6 +697,7 @@ fn test_async_block_adds_command_margin_and_next_poll_restores_short_wait() {
         ));
         receiver
     });
+    std::thread::sleep(Duration::from_millis(100));
     let gate = proxy.pause_after_reply("XAUTOCLAIM");
     let (sender, receiver) = channel();
     let worker = spawn(move || {

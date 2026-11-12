@@ -7,6 +7,8 @@
 // =============================================================================
 //! Restricted-ACL subprocess helpers for Redis integration tests.
 
+pub(crate) mod documentation;
+
 use std::error::Error;
 use std::fs;
 use std::io::Read;

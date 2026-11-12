@@ -11,7 +11,8 @@
 
 mod acl_support;
 mod support;
-mod documentation;
+
+use acl_support::documentation;
 
 #[test]
 fn test_documented_acl_parameters_match_both_guides() {
@@ -26,17 +27,31 @@ fn test_documented_acl_parameters_match_both_guides() {
     for guide in documentation::GUIDES {
         let contents = std::fs::read_to_string(guide).unwrap();
         for expected_key in [&stream, &group, &quarantine] {
-            assert!(contents.contains(expected_key), "{guide} is missing documented key {expected_key}");
+            assert!(
+                contents.contains(expected_key),
+                "{guide} is missing documented key {expected_key}"
+            );
         }
     }
     let expected = [
-        "ACL".to_owned(), "SETUSER".to_owned(), "event-worker".to_owned(), "reset".to_owned(),
-        "on".to_owned(), ">replace-with-managed-secret".to_owned(),
+        "ACL".to_owned(),
+        "SETUSER".to_owned(),
+        "event-worker".to_owned(),
+        "reset".to_owned(),
+        "on".to_owned(),
+        ">replace-with-managed-secret".to_owned(),
         format!("~{stream}"),
         format!("~{quarantine}"),
-        "+ping".into(), "+xadd".into(), "+xgroup|create".into(), "+xreadgroup".into(),
-        "+xautoclaim".into(), "+xpending".into(), "+xrange".into(), "+xack".into(),
-        "+eval".into(), "+type".into(),
+        "+ping".into(),
+        "+xadd".into(),
+        "+xgroup|create".into(),
+        "+xreadgroup".into(),
+        "+xautoclaim".into(),
+        "+xpending".into(),
+        "+xrange".into(),
+        "+xack".into(),
+        "+eval".into(),
+        "+type".into(),
     ];
     assert_eq!(english, expected);
 }
@@ -44,8 +59,9 @@ fn test_documented_acl_parameters_match_both_guides() {
 #[cfg(feature = "sync")]
 #[test]
 fn test_documented_acl_command_runs_in_isolated_redis() {
-    use redis::cmd;
     use std::process::Command;
+
+    use redis::cmd;
 
     let mut args = documentation::documented_arguments(documentation::GUIDES[0]);
     let server = support::redis_server::RedisServer::start().unwrap();
@@ -59,7 +75,10 @@ fn test_documented_acl_command_runs_in_isolated_redis() {
     }
     let _: () = acl.query(&mut admin).unwrap();
 
-    let authenticated_url = format!("redis://acl_docs_fixture:one-time-fixture-secret@{}", url.trim_start_matches("redis://"));
+    let authenticated_url = format!(
+        "redis://acl_docs_fixture:one-time-fixture-secret@{}",
+        url.trim_start_matches("redis://")
+    );
     let authenticated = redis::Client::open(authenticated_url.as_str()).unwrap();
     let mut connection = authenticated.get_connection().unwrap();
     let _: String = cmd("PING").query(&mut connection).unwrap();
@@ -73,7 +92,12 @@ fn test_documented_acl_command_runs_in_isolated_redis() {
         .env("RER_ACL_PASSWORD", "one-time-fixture-secret")
         .output()
         .unwrap();
-    assert!(output.status.success(), "documented ACL provider workflow failed: {}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "documented ACL provider workflow failed: {}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 use std::any::TypeId;
