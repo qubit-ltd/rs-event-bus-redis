@@ -12,19 +12,19 @@
 mod acl_support;
 mod support;
 
-use acl_support::documentation;
+use acl_support::documentation_tests;
 
 #[test]
 fn test_documented_acl_parameters_match_both_guides() {
-    let english = documentation::documented_arguments(documentation::GUIDES[0]);
-    let chinese = documentation::documented_arguments(documentation::GUIDES[1]);
+    let english = documentation_tests::documented_arguments(documentation_tests::GUIDES[0]);
+    let chinese = documentation_tests::documented_arguments(documentation_tests::GUIDES[1]);
     assert_eq!(english, chinese, "bilingual ACL commands drifted");
     let namespace = "guide-acl";
     let topic = "events";
     let group = qubit_event_bus_redis::naming::group_name(namespace, topic, "billing-worker", Some("billing"));
     let stream = qubit_event_bus_redis::naming::stream_key(namespace, topic);
     let quarantine = qubit_event_bus_redis::naming::poison_key(namespace, topic, &group);
-    for guide in documentation::GUIDES {
+    for guide in documentation_tests::GUIDES {
         let contents = std::fs::read_to_string(guide).unwrap();
         for expected_key in [&stream, &group, &quarantine] {
             assert!(
@@ -63,7 +63,7 @@ fn test_documented_acl_command_runs_in_isolated_redis() {
 
     use redis::cmd;
 
-    let mut args = documentation::documented_arguments(documentation::GUIDES[0]);
+    let mut args = documentation_tests::documented_arguments(documentation_tests::GUIDES[0]);
     let server = support::redis_server::RedisServer::start().unwrap();
     let url = server.url();
     let mut admin = redis::Client::open(url).unwrap().get_connection().unwrap();
