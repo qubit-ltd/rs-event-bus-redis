@@ -9,19 +9,19 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "ci/check-registry-consumer.sh"
-VERSIONS = ("0.7.0", "0.21.0", "0.14.0")
+VERSIONS = ("0.7.3", "0.21.0", "0.14.0")
 
 
 def metadata():
     core = "qubit-event-bus 0.21.0 (registry+https://github.com/rust-lang/crates.io-index)"
-    provider = "qubit-event-bus-redis 0.7.0 (registry+https://github.com/rust-lang/crates.io-index)"
+    provider = f"qubit-event-bus-redis {VERSIONS[0]} (registry+https://github.com/rust-lang/crates.io-index)"
     spi = "qubit-spi 0.14.0 (registry+https://github.com/rust-lang/crates.io-index)"
     root = "registry-consumer 0.1.0 (path+file:///tmp/consumer)"
     return {
         "packages": [
             {"id": root, "name": "registry-consumer", "version": "0.1.0", "source": None},
             {"id": core, "name": "qubit-event-bus", "version": "0.21.0", "source": "registry+https://github.com/rust-lang/crates.io-index"},
-            {"id": provider, "name": "qubit-event-bus-redis", "version": "0.7.0", "source": "registry+https://github.com/rust-lang/crates.io-index"},
+            {"id": provider, "name": "qubit-event-bus-redis", "version": VERSIONS[0], "source": "registry+https://github.com/rust-lang/crates.io-index"},
             {"id": spi, "name": "qubit-spi", "version": "0.14.0", "source": "registry+https://github.com/rust-lang/crates.io-index"},
         ],
         "resolve": {

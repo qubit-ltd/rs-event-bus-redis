@@ -1,6 +1,6 @@
 # Redis Streams User Guide
 
-**For:** Rust service developers using the current sibling-source checkout, whose manifest versions are provider 0.7.0, core 0.21, and SPI 0.14. See the [installation and validation status](design.md#installation-and-validation-status) for the current release-installation evidence.
+**For:** Rust service developers using the current sibling-source checkout, whose manifest versions are provider 0.7.3, core 0.21, and SPI 0.14. See the [installation and validation status](design.md#installation-and-validation-status) for the current release-installation evidence.
 
 [简体中文](user_guide.zh_CN.md) · [README](../README.md) · [API docs](https://docs.rs/qubit-event-bus-redis)
 
@@ -12,7 +12,7 @@ For a consumer in the Qubit source workspace, add both sibling checkouts as dire
 ```toml
 [dependencies]
 qubit-event-bus = { version = "^0.21", path = "../rs-event-bus", features = ["discovery"] }
-qubit-event-bus-redis = { version = "0.7.0", path = "../rs-event-bus-redis" }
+qubit-event-bus-redis = { version = "0.7.3", path = "../rs-event-bus-redis" }
 qubit-spi = "^0.14"
 
 [patch.crates-io]
@@ -600,7 +600,7 @@ A lost tail notification may have no later event to reveal the gap. Applications
 
 ## 12. Upgrade from provider 0.6
 
-The current source manifest is provider 0.7.0 with core 0.21. The 2026-11-04 registry query is a historical observation and does not establish current registry availability; current release-installation evidence is summarized in the [installation and validation status](design.md#installation-and-validation-status). `RedisSubscriptionProfile` builds durable subscription options from an explicit `StartPosition`; use it for new subscriptions and preserve the intended consumer group. Core codec registration now rejects duplicate payload types and returns `Result`; handle it with `?` or use `replace` deliberately. `InboundMessage` carries optional provider-attempt metadata without changing its existing `into_parts` tuple. Keep stored wire version 1 data and consumer groups; test retained pending entries before rollout. Start collecting provider snapshots and Redis PEL/memory separately as described above. The [migration guide](migration.md) covers the complete version-specific changes.
+The current source manifest is provider 0.7.3 with core 0.21. The 2026-11-04 registry query is a historical observation and does not establish current registry availability; current release-installation evidence is summarized in the [installation and validation status](design.md#installation-and-validation-status). `RedisSubscriptionProfile` builds durable subscription options from an explicit `StartPosition`; use it for new subscriptions and preserve the intended consumer group. Core codec registration now rejects duplicate payload types and returns `Result`; handle it with `?` or use `replace` deliberately. `InboundMessage` carries optional provider-attempt metadata without changing its existing `into_parts` tuple. Keep stored wire version 1 data and consumer groups; test retained pending entries before rollout. Start collecting provider snapshots and Redis PEL/memory separately as described above. The [migration guide](migration.md) covers the complete version-specific changes.
 
 
 See [design](design.md), [coverage evidence](coverage-review.md), and [workload benchmark](connection-reuse-benchmark.md). Performance/coverage results require their own measured evidence; this guide makes no new throughput or final coverage claim.

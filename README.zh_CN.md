@@ -18,7 +18,7 @@
 ```toml
 [dependencies]
 qubit-event-bus = { version = "^0.21", path = "../rs-event-bus", features = ["discovery"] }
-qubit-event-bus-redis = { version = "0.7.0", path = "../rs-event-bus-redis" }
+qubit-event-bus-redis = { version = "0.7.3", path = "../rs-event-bus-redis" }
 qubit-spi = "^0.14"
 
 [patch.crates-io]

@@ -7,6 +7,12 @@
 // =============================================================================
 //! Test support for isolated Redis services.
 
+use std::sync::Mutex;
+
+/// Serializes Sentinel fixture startup because free ports are released before
+/// Redis binds them.
+pub static SENTINEL_FIXTURE_START_LOCK: Mutex<()> = Mutex::new(());
+
 #[cfg(all(feature = "sync", feature = "async"))]
 #[allow(dead_code)]
 pub mod bench_support;

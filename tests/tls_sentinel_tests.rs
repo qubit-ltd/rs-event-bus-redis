@@ -41,6 +41,36 @@ use support::tls_sentinel::TlsSentinel;
 
 static IDS: AtomicU64 = AtomicU64::new(1);
 
+#[test]
+fn test_concurrent_tls_sentinel_fixture_starts_use_distinct_ports() {
+    let start = || std::thread::spawn(|| TlsSentinel::start(false).map_err(|error| error.to_string()));
+    let first_thread = start();
+    let second_thread = start();
+    let first = first_thread
+        .join()
+        .expect("first fixture thread")
+        .expect("first TLS Sentinel fixture");
+    let second = second_thread
+        .join()
+        .expect("second fixture thread")
+        .expect("second TLS Sentinel fixture");
+    let first_ports: Vec<_> = first
+        .endpoints()
+        .split(',')
+        .map(|endpoint| endpoint.rsplit(':').next().expect("endpoint port").to_owned())
+        .collect();
+    let second_ports: Vec<_> = second
+        .endpoints()
+        .split(',')
+        .map(|endpoint| endpoint.rsplit(':').next().expect("endpoint port").to_owned())
+        .collect();
+
+    assert!(
+        first_ports.iter().all(|port| !second_ports.contains(port)),
+        "concurrent TLS Sentinel fixtures must own disjoint ports"
+    );
+}
+
 #[cfg(feature = "sync")]
 #[test]
 fn test_sync_plain_sentinel_discovers_tls_master() -> Result<(), Box<dyn Error>> {

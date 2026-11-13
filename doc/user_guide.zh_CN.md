@@ -1,6 +1,6 @@
 # Redis Streams 用户指南
 
-**读者：** 使用当前 sibling source checkout 的 Rust 服务开发者；manifest 版本为 provider 0.7.0、core 0.21 和 SPI 0.14。当前发布安装证据见[安装与验证状态](design.zh_CN.md#安装与验证状态)。
+**读者：** 使用当前 sibling source checkout 的 Rust 服务开发者；manifest 版本为 provider 0.7.3、core 0.21 和 SPI 0.14。当前发布安装证据见[安装与验证状态](design.zh_CN.md#安装与验证状态)。
 
 [English](user_guide.md) · [README](../README.zh_CN.md) · [API 文档](https://docs.rs/qubit-event-bus-redis)
 
@@ -12,7 +12,7 @@
 ```toml
 [dependencies]
 qubit-event-bus = { version = "^0.21", path = "../rs-event-bus", features = ["discovery"] }
-qubit-event-bus-redis = { version = "0.7.0", path = "../rs-event-bus-redis" }
+qubit-event-bus-redis = { version = "0.7.3", path = "../rs-event-bus-redis" }
 qubit-spi = "^0.14"
 
 [patch.crates-io]
@@ -600,7 +600,7 @@ Redis 持久化和复制由部署负责。`Accepted` 只证明 XADD 被接受，
 
 ## 12. 从 provider 0.6 升级
 
-当前源码 manifest 版本为 provider 0.7.0/core 0.21。2026-11-04 registry 查询只是历史观察，不能证明当前 registry 可用性；当前发布安装证据见[安装与验证状态](design.zh_CN.md#安装与验证状态)。`RedisSubscriptionProfile` 根据明确的 `StartPosition` 构造 durable 订阅选项；创建新订阅时使用它，并保留预期的消费组。核心 codec 注册现在会拒绝重复载荷类型并返回 `Result`；要传播错误，使用 `?`，确需替换时才调用 `replace`。`InboundMessage` 增加可选 provider attempt 元数据，但 `into_parts` tuple 保持原样。保留 wire 版本 1 数据和现有消费组；发布前应验证 pending 记录，并按上文分别采集 provider 快照与 Redis PEL/内存。[迁移指南](migration.zh_CN.md)列出完整变更。
+当前源码 manifest 版本为 provider 0.7.3/core 0.21。2026-11-04 registry 查询只是历史观察，不能证明当前 registry 可用性；当前发布安装证据见[安装与验证状态](design.zh_CN.md#安装与验证状态)。`RedisSubscriptionProfile` 根据明确的 `StartPosition` 构造 durable 订阅选项；创建新订阅时使用它，并保留预期的消费组。核心 codec 注册现在会拒绝重复载荷类型并返回 `Result`；要传播错误，使用 `?`，确需替换时才调用 `replace`。`InboundMessage` 增加可选 provider attempt 元数据，但 `into_parts` tuple 保持原样。保留 wire 版本 1 数据和现有消费组；发布前应验证 pending 记录，并按上文分别采集 provider 快照与 Redis PEL/内存。[迁移指南](migration.zh_CN.md)列出完整变更。
 
 
 参阅[设计说明](design.zh_CN.md)、[覆盖率证据](coverage-review.zh_CN.md)和[工作负载基准](connection-reuse-benchmark.zh_CN.md)。性能、覆盖率须以各自测量为证；本指南没有宣称新的吞吐量或最终覆盖率结果。

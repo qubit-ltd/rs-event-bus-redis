@@ -18,6 +18,7 @@ use std::process::Child;
 use std::process::Command;
 use std::process::Stdio;
 use std::sync::Arc;
+use std::sync::MutexGuard;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
@@ -51,7 +52,17 @@ impl TlsSentinel {
     /// Starts a Redis 7 TLS master/replica and three TLS or plaintext
     /// Sentinels.
     pub fn start(sentinel_tls: bool) -> Result<Self, Box<dyn Error>> {
-        let mut fixture = Self::start_docker(sentinel_tls).or_else(|_| Self::start_local(sentinel_tls))?;
+        // free_port closes its listener before Redis binds; share the lock with
+        // the plaintext Sentinel fixture to prevent concurrent port collisions.
+        let _guard: MutexGuard<'_, ()> = super::SENTINEL_FIXTURE_START_LOCK
+            .lock()
+            .map_err(|_| "Sentinel fixture start lock is poisoned")?;
+        let mut fixture = match Self::start_docker(sentinel_tls) {
+            Ok(fixture) => fixture,
+            Err(docker_error) => Self::start_local(sentinel_tls).map_err(|local_error| {
+                format!("Docker TLS Sentinel fixture failed: {docker_error}; local fallback failed: {local_error}")
+            })?,
+        };
         fixture.sentinel_proxies = fixture
             .sentinel_ports
             .iter()
@@ -143,7 +154,7 @@ impl TlsSentinel {
                 "--tls-replication",
                 "yes",
                 "--replicaof",
-                "localhost",
+                "127.0.0.1",
                 &master_port.to_string(),
             ]),
             "start TLS replica container",
@@ -154,7 +165,7 @@ impl TlsSentinel {
             let directory = context(TempDir::new(), "create Sentinel configuration directory")?;
             let (plain_port, tls_port) = if sentinel_tls { (0, port) } else { (port, 0) };
             let config = format!(
-                "port {plain_port}\ntls-port {tls_port}\nbind 127.0.0.1\ndir /data\ntls-cert-file /tls/server.crt\ntls-key-file /tls/server.key\ntls-ca-cert-file /tls/ca.crt\ntls-auth-clients no\ntls-replication yes\nsentinel resolve-hostnames yes\nsentinel announce-hostnames yes\nsentinel monitor qeventbus localhost {master_port} 2\nsentinel down-after-milliseconds qeventbus 1500\nsentinel failover-timeout qeventbus 10000\nsentinel parallel-syncs qeventbus 1\nsentinel announce-ip localhost\n"
+                "port {plain_port}\ntls-port {tls_port}\nbind 127.0.0.1\ndir /data\ntls-cert-file /tls/server.crt\ntls-key-file /tls/server.key\ntls-ca-cert-file /tls/ca.crt\ntls-auth-clients no\ntls-replication yes\nsentinel resolve-hostnames yes\nsentinel announce-hostnames yes\nsentinel monitor qeventbus 127.0.0.1 {master_port} 2\nsentinel down-after-milliseconds qeventbus 1500\nsentinel failover-timeout qeventbus 10000\nsentinel parallel-syncs qeventbus 1\nsentinel announce-ip 127.0.0.1\n"
             );
             context(
                 fs::write(directory.path().join("sentinel.conf"), config),
@@ -256,7 +267,7 @@ impl TlsSentinel {
             "--tls-port".into(),
             replica_port.to_string(),
             "--replicaof".into(),
-            "localhost".into(),
+            "127.0.0.1".into(),
             master_port.to_string(),
         ]);
         let replica_data = context(TempDir::new(), "create local TLS replica data directory")?;
@@ -269,7 +280,7 @@ impl TlsSentinel {
             let directory = context(TempDir::new(), "create Sentinel configuration directory")?;
             let (plain_port, tls_port) = if sentinel_tls { (0, port) } else { (port, 0) };
             let config = format!(
-                "port {plain_port}\ntls-port {tls_port}\nbind 127.0.0.1\ndir {}\ntls-cert-file {cert_path}/server.crt\ntls-key-file {cert_path}/server.key\ntls-ca-cert-file {cert_path}/ca.crt\ntls-auth-clients no\ntls-replication yes\nsentinel resolve-hostnames yes\nsentinel announce-hostnames yes\nsentinel monitor qeventbus localhost {master_port} 2\nsentinel down-after-milliseconds qeventbus 1500\nsentinel failover-timeout qeventbus 10000\nsentinel parallel-syncs qeventbus 1\nsentinel announce-ip localhost\n",
+                "port {plain_port}\ntls-port {tls_port}\nbind 127.0.0.1\ndir {}\ntls-cert-file {cert_path}/server.crt\ntls-key-file {cert_path}/server.key\ntls-ca-cert-file {cert_path}/ca.crt\ntls-auth-clients no\ntls-replication yes\nsentinel resolve-hostnames yes\nsentinel announce-hostnames yes\nsentinel monitor qeventbus 127.0.0.1 {master_port} 2\nsentinel down-after-milliseconds qeventbus 1500\nsentinel failover-timeout qeventbus 10000\nsentinel parallel-syncs qeventbus 1\nsentinel announce-ip 127.0.0.1\n",
                 directory.path().display(),
             );
             context(
@@ -562,10 +573,33 @@ impl TlsSentinel {
                 return Ok(());
             }
             if Instant::now() >= deadline {
-                return Err("Sentinel did not discover the TLS master before the deadline".into());
+                return Err(format!(
+                    "Sentinel did not discover the TLS master before the deadline; container logs: {}",
+                    self.container_logs()
+                )
+                .into());
             }
             sleep(Duration::from_millis(100));
         }
+    }
+
+    fn container_logs(&self) -> String {
+        self.containers
+            .iter()
+            .enumerate()
+            .map(|(index, id)| {
+                let output = Command::new("docker").args(["logs", "--tail", "30", id]).output();
+                match output {
+                    Ok(output) => format!(
+                        "container {index} stdout:\n{}\nstderr:\n{}",
+                        String::from_utf8_lossy(&output.stdout),
+                        String::from_utf8_lossy(&output.stderr)
+                    ),
+                    Err(error) => format!("container {index} logs unavailable: {error}"),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 }
 
@@ -775,77 +809,7 @@ fn start_container<const N: usize>(args: [&str; N]) -> Result<String, Box<dyn Er
 }
 
 fn generate_certificates(directory: &std::path::Path) -> Result<(), Box<dyn Error>> {
-    openssl(
-        directory,
-        [
-            "req",
-            "-x509",
-            "-newkey",
-            "rsa:2048",
-            "-nodes",
-            "-keyout",
-            "ca.key",
-            "-out",
-            "ca.crt",
-            "-days",
-            "1",
-            "-subj",
-            "/CN=Redis-Sentinel-Test-CA",
-        ],
-    )?;
-    openssl(
-        directory,
-        [
-            "req",
-            "-newkey",
-            "rsa:2048",
-            "-nodes",
-            "-keyout",
-            "server.key",
-            "-out",
-            "server.csr",
-            "-subj",
-            "/CN=localhost",
-        ],
-    )?;
-    fs::write(
-        directory.join("server.ext"),
-        "subjectAltName=DNS:localhost,IP:127.0.0.1\nextendedKeyUsage=serverAuth\n",
-    )?;
-    openssl(
-        directory,
-        [
-            "x509",
-            "-req",
-            "-in",
-            "server.csr",
-            "-CA",
-            "ca.crt",
-            "-CAkey",
-            "ca.key",
-            "-CAcreateserial",
-            "-out",
-            "server.crt",
-            "-days",
-            "1",
-            "-extfile",
-            "server.ext",
-        ],
-    )?;
-    Ok(())
-}
-
-fn openssl<const N: usize>(directory: &std::path::Path, args: [&str; N]) -> Result<(), Box<dyn Error>> {
-    let output = Command::new("openssl")
-        .current_dir(directory)
-        .args(args)
-        .output()
-        .map_err(|error| format!("spawn openssl command: {error}"))?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(format!("openssl failed: {}", String::from_utf8_lossy(&output.stderr)).into())
-    }
+    super::tls_redis_server::generate_certificates(directory, true)
 }
 
 fn make_readable(directory: &std::path::Path) -> Result<(), Box<dyn Error>> {
