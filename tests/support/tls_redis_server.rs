@@ -21,7 +21,6 @@ use rcgen::CertificateParams;
 use rcgen::DnType;
 use rcgen::ExtendedKeyUsagePurpose;
 use rcgen::IsCa;
-use rcgen::Issuer;
 use rcgen::KeyPair;
 use redis::Client;
 use tempfile::TempDir;
@@ -63,7 +62,7 @@ impl TlsRedisServer {
     /// Starts the fixture with the requested client authentication policy.
     fn start_with_client_auth(require_client_auth: bool) -> Result<Self, Box<dyn Error>> {
         let directory = tempfile::tempdir()?;
-        generate_certificates(directory.path())?;
+        generate_certificates(directory.path(), false)?;
         make_fixture_files_readable(directory.path())?;
         let wrong_ca_path = directory.path().join("wrong-ca.crt");
         write_self_signed_ca(&wrong_ca_path, &directory.path().join("wrong-ca.key"), "Wrong-Test-CA")?;
@@ -237,7 +236,10 @@ fn start_local_tls(directory: &std::path::Path, port: u16, require_client_auth: 
 /// # Errors
 ///
 /// Returns certificate-generation or filesystem failures.
-pub(super) fn generate_certificates(directory: &std::path::Path) -> Result<(), Box<dyn Error>> {
+pub(super) fn generate_certificates(
+    directory: &std::path::Path,
+    include_loopback_ip: bool,
+) -> Result<(), Box<dyn Error>> {
     let ca_key = KeyPair::generate()?;
     let mut ca_params = CertificateParams::default();
     ca_params.distinguished_name.push(DnType::CommonName, "Redis-Test-CA");
@@ -245,15 +247,18 @@ pub(super) fn generate_certificates(directory: &std::path::Path) -> Result<(), B
     let ca_certificate = ca_params.self_signed(&ca_key)?;
     fs::write(directory.join("ca.crt"), ca_certificate.pem())?;
     fs::write(directory.join("ca.key"), ca_key.serialize_pem())?;
-    let issuer = Issuer::new(ca_params, ca_key);
 
     let server_key = KeyPair::generate()?;
-    let mut server_params = CertificateParams::new(vec!["localhost".to_owned(), "127.0.0.1".to_owned()])?;
+    let mut names = vec!["localhost".to_owned()];
+    if include_loopback_ip {
+        names.push("127.0.0.1".to_owned());
+    }
+    let mut server_params = CertificateParams::new(names)?;
     server_params.distinguished_name.push(DnType::CommonName, "localhost");
     server_params
         .extended_key_usages
         .push(ExtendedKeyUsagePurpose::ServerAuth);
-    let server_certificate = server_params.signed_by(&server_key, &issuer)?;
+    let server_certificate = server_params.signed_by(&server_key, &ca_certificate, &ca_key)?;
     fs::write(directory.join("server.crt"), server_certificate.pem())?;
     fs::write(directory.join("server.key"), server_key.serialize_pem())?;
 
@@ -265,7 +270,7 @@ pub(super) fn generate_certificates(directory: &std::path::Path) -> Result<(), B
     client_params
         .extended_key_usages
         .push(ExtendedKeyUsagePurpose::ClientAuth);
-    let client_certificate = client_params.signed_by(&client_key, &issuer)?;
+    let client_certificate = client_params.signed_by(&client_key, &ca_certificate, &ca_key)?;
     fs::write(directory.join("client.crt"), client_certificate.pem())?;
     fs::write(directory.join("client.key"), client_key.serialize_pem())?;
     Ok(())

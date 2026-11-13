@@ -786,7 +786,7 @@ fn start_container<const N: usize>(args: [&str; N]) -> Result<String, Box<dyn Er
 }
 
 fn generate_certificates(directory: &std::path::Path) -> Result<(), Box<dyn Error>> {
-    super::tls_redis_server::generate_certificates(directory)
+    super::tls_redis_server::generate_certificates(directory, true)
 }
 
 fn make_readable(directory: &std::path::Path) -> Result<(), Box<dyn Error>> {
