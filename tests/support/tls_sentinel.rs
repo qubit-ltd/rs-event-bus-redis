@@ -18,6 +18,7 @@ use std::process::Child;
 use std::process::Command;
 use std::process::Stdio;
 use std::sync::Arc;
+use std::sync::MutexGuard;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
@@ -51,6 +52,11 @@ impl TlsSentinel {
     /// Starts a Redis 7 TLS master/replica and three TLS or plaintext
     /// Sentinels.
     pub fn start(sentinel_tls: bool) -> Result<Self, Box<dyn Error>> {
+        // free_port closes its listener before Redis binds; share the lock with
+        // the plaintext Sentinel fixture to prevent concurrent port collisions.
+        let _guard: MutexGuard<'_, ()> = super::SENTINEL_FIXTURE_START_LOCK
+            .lock()
+            .map_err(|_| "Sentinel fixture start lock is poisoned")?;
         let mut fixture = Self::start_docker(sentinel_tls).or_else(|_| Self::start_local(sentinel_tls))?;
         fixture.sentinel_proxies = fixture
             .sentinel_ports

@@ -12,7 +12,7 @@ SPEC = importlib.util.spec_from_file_location("registry_consumer_target", SCRIPT
 TARGET = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(TARGET)
 ROOT = SCRIPT.parents[1]
-VERSIONS = {"provider": "0.7.0", "core": "0.21.0", "spi": "0.14.0"}
+VERSIONS = {"provider": "0.7.3", "core": "0.21.0", "spi": "0.14.0"}
 
 
 def args(**overrides):
@@ -24,14 +24,14 @@ def args(**overrides):
 
 def metadata(double_core=False, bad_edge=False, git_target=None):
     core_id = "qubit-event-bus 0.21.0 (registry+https://github.com/rust-lang/crates.io-index)"
-    provider_id = "qubit-event-bus-redis 0.7.0 (registry+https://github.com/rust-lang/crates.io-index)"
+    provider_id = f"qubit-event-bus-redis {VERSIONS['provider']} (registry+https://github.com/rust-lang/crates.io-index)"
     spi_id = "qubit-spi 0.14.0 (registry+https://github.com/rust-lang/crates.io-index)"
     root_id = "registry-consumer 0.1.0 (path+file:///tmp/consumer)"
     other_core_id = "qubit-event-bus 0.20.1 (registry+https://github.com/rust-lang/crates.io-index)"
     packages = [
         {"id": root_id, "name": "registry-consumer", "version": "0.1.0", "source": None},
         {"id": core_id, "name": "qubit-event-bus", "version": "0.21.0", "source": TARGET.REGISTRY},
-        {"id": provider_id, "name": "qubit-event-bus-redis", "version": "0.7.0", "source": TARGET.REGISTRY},
+        {"id": provider_id, "name": "qubit-event-bus-redis", "version": VERSIONS["provider"], "source": TARGET.REGISTRY},
         {"id": spi_id, "name": "qubit-spi", "version": "0.14.0", "source": TARGET.REGISTRY},
     ]
     if double_core:
@@ -79,7 +79,7 @@ class RegistryConsumerTargetTests(unittest.TestCase):
             TARGET.prepare(SimpleNamespace(source_manifest=str(ROOT / "Cargo.toml"), fixture=str(fixture),
                                           output=directory, **vars(historical)))
             manifest = (Path(directory) / "Cargo.toml").read_text()
-            self.assertIn('version = "=0.7.0"', manifest)
+            self.assertIn(f'version = "={VERSIONS["provider"]}"', manifest)
             self.assertIn('version = "=0.20.1"', manifest)
 
     def test_source_candidate_prepare_rejects_historical_core_combination(self):
@@ -109,7 +109,7 @@ class RegistryConsumerTargetTests(unittest.TestCase):
             TARGET.prepare(SimpleNamespace(source_manifest=str(ROOT / "Cargo.toml"), fixture=str(fixture),
                                           output=directory, **{f"{key}_version": value for key, value in versions.items()}))
             manifest = (Path(directory) / "Cargo.toml").read_text()
-            self.assertIn('version = "=0.7.0"', manifest)
+            self.assertIn(f'version = "={VERSIONS["provider"]}"', manifest)
             self.assertIn('version = "=0.21.0"', manifest)
             self.assertIn('qubit-spi = "=0.14.0"', manifest)
             self.assertEqual((Path(directory) / "src/main.rs").read_bytes(), (fixture / "src/main.rs").read_bytes())

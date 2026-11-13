@@ -683,9 +683,9 @@ dependencies = [
 
 [[package]]
 name = "qubit-event-bus"
-version = "0.21.2"
+version = "0.21.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "049104e1c6d5a46cec794fce27d1c29e066108c6e197694b71cf8c3535695a01"
+checksum = "441bb7ce499e55725a807cae727369dc756792c26ad97b34e5c564373306786e"
 dependencies = [
  "qubit-clock",
  "qubit-id",
@@ -696,7 +696,7 @@ dependencies = [
 
 [[package]]
 name = "qubit-event-bus-redis"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "async-io",
  "async-lock",
@@ -756,9 +756,9 @@ dependencies = [
 
 [[package]]
 name = "qubit-retry"
-version = "0.26.4"
+version = "0.26.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9de501a80579986a67356e2f7e48815e68d9b692a7f6c8600d5b11fe9ebcc65c"
+checksum = "8dad726beb2ede0be689b1892b777cb012ca2f657c6744f05957b4d4edbb4a84"
 dependencies = [
  "fastrand",
  "qubit-budget",

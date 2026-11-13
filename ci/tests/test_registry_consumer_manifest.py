@@ -29,7 +29,7 @@ example={version="1",path="../example"}
         fixture = Path(__file__).resolve().parents[2] / "tests/fixtures/registry_consumer"
         with tempfile.TemporaryDirectory() as output:
             TARGET.prepare(SimpleNamespace(
-                provider_version="0.7.0",
+                provider_version="0.7.3",
                 core_version="0.21.0",
                 spi_version="0.14.0",
                 mode="source-candidate",
