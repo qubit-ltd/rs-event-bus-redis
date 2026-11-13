@@ -16,15 +16,15 @@ use std::process::Stdio;
 use std::thread::sleep;
 use std::time::Duration;
 
+use rcgen::BasicConstraints;
+use rcgen::CertificateParams;
+use rcgen::DnType;
+use rcgen::ExtendedKeyUsagePurpose;
+use rcgen::IsCa;
+use rcgen::Issuer;
+use rcgen::KeyPair;
 use redis::Client;
 use tempfile::TempDir;
-
-/// Builds owned OpenSSL arguments so temporary fixture paths remain valid.
-macro_rules! openssl_args {
-    ($($argument:expr),* $(,)?) => {
-        vec![$(std::ffi::OsString::from($argument)),*]
-    };
-}
 
 /// Owns a Redis TLS container and its generated test CA and server identity.
 pub struct TlsRedisServer {
@@ -42,7 +42,7 @@ impl TlsRedisServer {
     /// Starts a Redis 7 TLS container bound to an ephemeral loopback port.
     ///
     /// Performs blocking certificate, Docker, and readiness IO. Returns
-    /// OpenSSL, Docker, port-binding, or readiness errors; a failed startup
+    /// Certificate, Docker, port-binding, or readiness errors; a failed startup
     /// removes any partially created container.
     pub fn start() -> Result<Self, Box<dyn Error>> {
         Self::start_with_client_auth(false)
@@ -55,7 +55,7 @@ impl TlsRedisServer {
     ///
     /// # Errors
     ///
-    /// Returns OpenSSL, Docker, port-binding, or readiness errors.
+    /// Returns certificate, Docker, port-binding, or readiness errors.
     pub fn start_mtls() -> Result<Self, Box<dyn Error>> {
         Self::start_with_client_auth(true)
     }
@@ -66,21 +66,7 @@ impl TlsRedisServer {
         generate_certificates(directory.path())?;
         make_fixture_files_readable(directory.path())?;
         let wrong_ca_path = directory.path().join("wrong-ca.crt");
-        run_openssl(openssl_args![
-            "req",
-            "-x509",
-            "-newkey",
-            "rsa:2048",
-            "-nodes",
-            "-keyout",
-            path_arg(&directory.path().join("wrong-ca.key")),
-            "-out",
-            path_arg(&wrong_ca_path),
-            "-days",
-            "1",
-            "-subj",
-            "/CN=Wrong-Test-CA",
-        ])?;
+        write_self_signed_ca(&wrong_ca_path, &directory.path().join("wrong-ca.key"), "Wrong-Test-CA")?;
 
         let mount = format!("{}:/tls:ro", directory.path().display());
         let client_auth = if require_client_auth { "yes" } else { "no" };
@@ -250,86 +236,54 @@ fn start_local_tls(directory: &std::path::Path, port: u16, require_client_auth: 
 ///
 /// # Errors
 ///
-/// Returns OpenSSL process failures, filesystem failures, or invalid output.
-fn generate_certificates(directory: &std::path::Path) -> Result<(), Box<dyn Error>> {
-    run_openssl(openssl_args![
-        "req",
-        "-x509",
-        "-newkey",
-        "rsa:2048",
-        "-nodes",
-        "-keyout",
-        path_arg(&directory.join("ca.key")),
-        "-out",
-        path_arg(&directory.join("ca.crt")),
-        "-days",
-        "1",
-        "-subj",
-        "/CN=Redis-Test-CA",
-    ])?;
-    run_openssl(openssl_args![
-        "req",
-        "-newkey",
-        "rsa:2048",
-        "-nodes",
-        "-keyout",
-        path_arg(&directory.join("server.key")),
-        "-out",
-        path_arg(&directory.join("server.csr")),
-        "-subj",
-        "/CN=localhost",
-    ])?;
-    fs::write(
-        directory.join("server.ext"),
-        "subjectAltName=DNS:localhost\nextendedKeyUsage=serverAuth\n",
-    )?;
-    run_openssl(openssl_args![
-        "x509",
-        "-req",
-        "-in",
-        path_arg(&directory.join("server.csr")),
-        "-CA",
-        path_arg(&directory.join("ca.crt")),
-        "-CAkey",
-        path_arg(&directory.join("ca.key")),
-        "-CAcreateserial",
-        "-out",
-        path_arg(&directory.join("server.crt")),
-        "-days",
-        "1",
-        "-extfile",
-        path_arg(&directory.join("server.ext")),
-    ])?;
-    run_openssl(openssl_args![
-        "req",
-        "-newkey",
-        "rsa:2048",
-        "-nodes",
-        "-keyout",
-        path_arg(&directory.join("client.key")),
-        "-out",
-        path_arg(&directory.join("client.csr")),
-        "-subj",
-        "/CN=Redis-Test-Client",
-    ])?;
-    fs::write(directory.join("client.ext"), "extendedKeyUsage=clientAuth\n")?;
-    run_openssl(openssl_args![
-        "x509",
-        "-req",
-        "-in",
-        path_arg(&directory.join("client.csr")),
-        "-CA",
-        path_arg(&directory.join("ca.crt")),
-        "-CAkey",
-        path_arg(&directory.join("ca.key")),
-        "-CAcreateserial",
-        "-out",
-        path_arg(&directory.join("client.crt")),
-        "-days",
-        "1",
-        "-extfile",
-        path_arg(&directory.join("client.ext")),
-    ])
+/// Returns certificate-generation or filesystem failures.
+pub(super) fn generate_certificates(directory: &std::path::Path) -> Result<(), Box<dyn Error>> {
+    let ca_key = KeyPair::generate()?;
+    let mut ca_params = CertificateParams::default();
+    ca_params.distinguished_name.push(DnType::CommonName, "Redis-Test-CA");
+    ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    let ca_certificate = ca_params.self_signed(&ca_key)?;
+    fs::write(directory.join("ca.crt"), ca_certificate.pem())?;
+    fs::write(directory.join("ca.key"), ca_key.serialize_pem())?;
+    let issuer = Issuer::new(ca_params, ca_key);
+
+    let server_key = KeyPair::generate()?;
+    let mut server_params = CertificateParams::new(vec!["localhost".to_owned(), "127.0.0.1".to_owned()])?;
+    server_params.distinguished_name.push(DnType::CommonName, "localhost");
+    server_params
+        .extended_key_usages
+        .push(ExtendedKeyUsagePurpose::ServerAuth);
+    let server_certificate = server_params.signed_by(&server_key, &issuer)?;
+    fs::write(directory.join("server.crt"), server_certificate.pem())?;
+    fs::write(directory.join("server.key"), server_key.serialize_pem())?;
+
+    let client_key = KeyPair::generate()?;
+    let mut client_params = CertificateParams::default();
+    client_params
+        .distinguished_name
+        .push(DnType::CommonName, "Redis-Test-Client");
+    client_params
+        .extended_key_usages
+        .push(ExtendedKeyUsagePurpose::ClientAuth);
+    let client_certificate = client_params.signed_by(&client_key, &issuer)?;
+    fs::write(directory.join("client.crt"), client_certificate.pem())?;
+    fs::write(directory.join("client.key"), client_key.serialize_pem())?;
+    Ok(())
+}
+
+fn write_self_signed_ca(
+    certificate_path: &std::path::Path,
+    key_path: &std::path::Path,
+    common_name: &str,
+) -> Result<(), Box<dyn Error>> {
+    let key = KeyPair::generate()?;
+    let mut params = CertificateParams::default();
+    params.distinguished_name.push(DnType::CommonName, common_name);
+    params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    let certificate = params.self_signed(&key)?;
+    fs::write(certificate_path, certificate.pem())?;
+    fs::write(key_path, key.serialize_pem())?;
+    Ok(())
 }
 
 /// Makes the isolated PEM fixture readable by the unprivileged Redis image.
@@ -368,46 +322,6 @@ fn make_fixture_files_readable(directory: &std::path::Path) -> Result<(), Box<dy
         }
     }
     Ok(())
-}
-
-/// Executes one OpenSSL operation and reports its sanitized process failure.
-///
-/// # Parameters
-///
-/// - `arguments`: OpenSSL arguments containing only temporary fixture paths.
-///
-/// # Returns
-///
-/// Success when OpenSSL exits successfully.
-///
-/// # Errors
-///
-/// Returns an error when OpenSSL cannot start or exits unsuccessfully.
-fn run_openssl(arguments: Vec<std::ffi::OsString>) -> Result<(), Box<dyn Error>> {
-    let output = Command::new("openssl").args(arguments).output()?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "openssl fixture generation failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        )
-        .into())
-    }
-}
-
-/// Owns a UTF-8 path argument for OpenSSL.
-///
-/// # Parameters
-///
-/// - `path`: Temporary fixture path expected to be valid UTF-8.
-///
-/// # Returns
-///
-/// An owned UTF-8 path, with an empty fallback that causes OpenSSL to fail
-/// clearly.
-fn path_arg(path: &std::path::Path) -> String {
-    path.to_string_lossy().into_owned()
 }
 
 /// Checks Redis readiness using the fixture CA without exposing errors.

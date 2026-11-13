@@ -786,77 +786,7 @@ fn start_container<const N: usize>(args: [&str; N]) -> Result<String, Box<dyn Er
 }
 
 fn generate_certificates(directory: &std::path::Path) -> Result<(), Box<dyn Error>> {
-    openssl(
-        directory,
-        [
-            "req",
-            "-x509",
-            "-newkey",
-            "rsa:2048",
-            "-nodes",
-            "-keyout",
-            "ca.key",
-            "-out",
-            "ca.crt",
-            "-days",
-            "1",
-            "-subj",
-            "/CN=Redis-Sentinel-Test-CA",
-        ],
-    )?;
-    openssl(
-        directory,
-        [
-            "req",
-            "-newkey",
-            "rsa:2048",
-            "-nodes",
-            "-keyout",
-            "server.key",
-            "-out",
-            "server.csr",
-            "-subj",
-            "/CN=localhost",
-        ],
-    )?;
-    fs::write(
-        directory.join("server.ext"),
-        "subjectAltName=DNS:localhost,IP:127.0.0.1\nextendedKeyUsage=serverAuth\n",
-    )?;
-    openssl(
-        directory,
-        [
-            "x509",
-            "-req",
-            "-in",
-            "server.csr",
-            "-CA",
-            "ca.crt",
-            "-CAkey",
-            "ca.key",
-            "-CAcreateserial",
-            "-out",
-            "server.crt",
-            "-days",
-            "1",
-            "-extfile",
-            "server.ext",
-        ],
-    )?;
-    Ok(())
-}
-
-fn openssl<const N: usize>(directory: &std::path::Path, args: [&str; N]) -> Result<(), Box<dyn Error>> {
-    let output = Command::new("openssl")
-        .current_dir(directory)
-        .args(args)
-        .output()
-        .map_err(|error| format!("spawn openssl command: {error}"))?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(format!("openssl failed: {}", String::from_utf8_lossy(&output.stderr)).into())
-    }
+    super::tls_redis_server::generate_certificates(directory)
 }
 
 fn make_readable(directory: &std::path::Path) -> Result<(), Box<dyn Error>> {
