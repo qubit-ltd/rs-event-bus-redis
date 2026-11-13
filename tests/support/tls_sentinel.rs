@@ -154,7 +154,7 @@ impl TlsSentinel {
                 "--tls-replication",
                 "yes",
                 "--replicaof",
-                "localhost",
+                "127.0.0.1",
                 &master_port.to_string(),
             ]),
             "start TLS replica container",
@@ -165,7 +165,7 @@ impl TlsSentinel {
             let directory = context(TempDir::new(), "create Sentinel configuration directory")?;
             let (plain_port, tls_port) = if sentinel_tls { (0, port) } else { (port, 0) };
             let config = format!(
-                "port {plain_port}\ntls-port {tls_port}\nbind 127.0.0.1\ndir /data\ntls-cert-file /tls/server.crt\ntls-key-file /tls/server.key\ntls-ca-cert-file /tls/ca.crt\ntls-auth-clients no\ntls-replication yes\nsentinel resolve-hostnames yes\nsentinel announce-hostnames yes\nsentinel monitor qeventbus localhost {master_port} 2\nsentinel down-after-milliseconds qeventbus 1500\nsentinel failover-timeout qeventbus 10000\nsentinel parallel-syncs qeventbus 1\nsentinel announce-ip localhost\n"
+                "port {plain_port}\ntls-port {tls_port}\nbind 127.0.0.1\ndir /data\ntls-cert-file /tls/server.crt\ntls-key-file /tls/server.key\ntls-ca-cert-file /tls/ca.crt\ntls-auth-clients no\ntls-replication yes\nsentinel resolve-hostnames yes\nsentinel announce-hostnames yes\nsentinel monitor qeventbus 127.0.0.1 {master_port} 2\nsentinel down-after-milliseconds qeventbus 1500\nsentinel failover-timeout qeventbus 10000\nsentinel parallel-syncs qeventbus 1\nsentinel announce-ip 127.0.0.1\n"
             );
             context(
                 fs::write(directory.path().join("sentinel.conf"), config),
@@ -267,7 +267,7 @@ impl TlsSentinel {
             "--tls-port".into(),
             replica_port.to_string(),
             "--replicaof".into(),
-            "localhost".into(),
+            "127.0.0.1".into(),
             master_port.to_string(),
         ]);
         let replica_data = context(TempDir::new(), "create local TLS replica data directory")?;
@@ -280,7 +280,7 @@ impl TlsSentinel {
             let directory = context(TempDir::new(), "create Sentinel configuration directory")?;
             let (plain_port, tls_port) = if sentinel_tls { (0, port) } else { (port, 0) };
             let config = format!(
-                "port {plain_port}\ntls-port {tls_port}\nbind 127.0.0.1\ndir {}\ntls-cert-file {cert_path}/server.crt\ntls-key-file {cert_path}/server.key\ntls-ca-cert-file {cert_path}/ca.crt\ntls-auth-clients no\ntls-replication yes\nsentinel resolve-hostnames yes\nsentinel announce-hostnames yes\nsentinel monitor qeventbus localhost {master_port} 2\nsentinel down-after-milliseconds qeventbus 1500\nsentinel failover-timeout qeventbus 10000\nsentinel parallel-syncs qeventbus 1\nsentinel announce-ip localhost\n",
+                "port {plain_port}\ntls-port {tls_port}\nbind 127.0.0.1\ndir {}\ntls-cert-file {cert_path}/server.crt\ntls-key-file {cert_path}/server.key\ntls-ca-cert-file {cert_path}/ca.crt\ntls-auth-clients no\ntls-replication yes\nsentinel resolve-hostnames yes\nsentinel announce-hostnames yes\nsentinel monitor qeventbus 127.0.0.1 {master_port} 2\nsentinel down-after-milliseconds qeventbus 1500\nsentinel failover-timeout qeventbus 10000\nsentinel parallel-syncs qeventbus 1\nsentinel announce-ip 127.0.0.1\n",
                 directory.path().display(),
             );
             context(
