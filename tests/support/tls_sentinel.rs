@@ -573,10 +573,33 @@ impl TlsSentinel {
                 return Ok(());
             }
             if Instant::now() >= deadline {
-                return Err("Sentinel did not discover the TLS master before the deadline".into());
+                return Err(format!(
+                    "Sentinel did not discover the TLS master before the deadline; container logs: {}",
+                    self.container_logs()
+                )
+                .into());
             }
             sleep(Duration::from_millis(100));
         }
+    }
+
+    fn container_logs(&self) -> String {
+        self.containers
+            .iter()
+            .enumerate()
+            .map(|(index, id)| {
+                let output = Command::new("docker").args(["logs", "--tail", "30", id]).output();
+                match output {
+                    Ok(output) => format!(
+                        "container {index} stdout:\n{}\nstderr:\n{}",
+                        String::from_utf8_lossy(&output.stdout),
+                        String::from_utf8_lossy(&output.stderr)
+                    ),
+                    Err(error) => format!("container {index} logs unavailable: {error}"),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 }
 
