@@ -57,7 +57,12 @@ impl TlsSentinel {
         let _guard: MutexGuard<'_, ()> = super::SENTINEL_FIXTURE_START_LOCK
             .lock()
             .map_err(|_| "Sentinel fixture start lock is poisoned")?;
-        let mut fixture = Self::start_docker(sentinel_tls).or_else(|_| Self::start_local(sentinel_tls))?;
+        let mut fixture = match Self::start_docker(sentinel_tls) {
+            Ok(fixture) => fixture,
+            Err(docker_error) => Self::start_local(sentinel_tls).map_err(|local_error| {
+                format!("Docker TLS Sentinel fixture failed: {docker_error}; local fallback failed: {local_error}")
+            })?,
+        };
         fixture.sentinel_proxies = fixture
             .sentinel_ports
             .iter()
