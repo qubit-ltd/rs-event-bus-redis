@@ -1,2 +1,0 @@
-[patch.crates-io]
-redis = { git = "https://github.com/qubit-ltd/redis-rs.git", branch = "qubit/redis-2-0-0-rc1-response-limit" }
