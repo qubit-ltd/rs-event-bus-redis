@@ -276,9 +276,8 @@ fn manifest(root: &Path, tag: &str) -> String {
     // JSON quoted strings also encode TOML basic strings without shell
     // interpolation.
     let provider_path = to_string(&root.to_string_lossy()).expect("path string serializes");
-    let facade_dependency = format!(
-        "qubit-event-bus = {{ version = \"^0.21\", default-features = false, features = {facade_features} }}"
-    );
+    let facade_dependency =
+        format!("qubit-event-bus = {{ version = \"^0.21\", default-features = false, features = {facade_features} }}");
     format!(
         "[package]\nname = \"markdown-consumer\"\nversion = \"0.0.0\"\nedition = \"2024\"\npublish = false\n\n[workspace]\n\n[dependencies]\nqubit-event-bus-redis = {{ path = {provider_path}, default-features = false, features = {provider_features} }}\n{facade_dependency}\nqubit-spi = \"0.14\"\nfutures-lite = \"2\"\nfutures-channel = \"0.3\""
     )
