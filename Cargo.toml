@@ -54,6 +54,7 @@ qubit-id = { version = "^0.7", default-features = false, features = ["uuid"] }
 futures-lite = "^2.6"
 futures-channel = "^0.3"
 tempfile = "^3.27"
+testcontainers = { version = "=0.28.0", features = ["blocking"] }
 rcgen = "^0.13"
 tokio = { version = "^1.54", features = ["rt", "macros"] }
 redis = {

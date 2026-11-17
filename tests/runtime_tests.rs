@@ -23,6 +23,22 @@ use support::fixture_consumer::run as run_fixture_consumer;
 use support::redis_server::RedisServer;
 
 #[test]
+fn test_redis_fixture_starts_with_testcontainers() -> Result<(), Box<dyn Error>> {
+    let container = crate::support::testcontainers_support::start_redis_container(
+        "7-alpine",
+        ["redis-server", "--appendonly", "no"],
+        &[],
+        None,
+    )?;
+    let port = container.get_host_port_ipv4(6379)?;
+    let client = Client::open(format!("redis://127.0.0.1:{port}/"))?;
+    let mut connection = client.get_connection()?;
+    let response: String = cmd("PING").query(&mut connection)?;
+    assert_eq!(response, "PONG");
+    Ok(())
+}
+
+#[test]
 fn test_smol_consumer_uses_isolated_production_features() -> Result<(), Box<dyn Error>> {
     let server = RedisServer::start()?;
     run_fixture_consumer("async_smol_consumer", server.url(), true)

@@ -36,6 +36,8 @@ pub mod sentinel_cost;
 #[allow(dead_code)]
 pub mod settlement_fault;
 #[allow(dead_code)]
+pub mod testcontainers_support;
+#[allow(dead_code)]
 pub mod tls_redis_server;
 #[allow(dead_code)]
 pub mod tls_sentinel;
