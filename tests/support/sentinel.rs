@@ -5,7 +5,7 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-//! Docker-backed isolated Redis master, replica, and three Sentinel nodes.
+//! Isolated Redis master, replica, and three Sentinel nodes with owned containers.
 
 use std::error::Error;
 use std::fs;
@@ -22,10 +22,15 @@ use redis::cmd;
 use redis::streams::StreamInfoGroupsReply;
 use redis::streams::StreamPendingCountReply;
 use tempfile::TempDir;
+use testcontainers::core::Mount;
+
+use super::testcontainers_support::ContainerStartError;
+use super::testcontainers_support::RedisContainer;
+use super::testcontainers_support::start_redis_container;
 
 /// Owns the Redis and Sentinel containers used by a failover test.
 pub struct SentinelServer {
-    container_ids: Vec<String>,
+    containers: Vec<RedisContainer>,
     children: Vec<Child>,
     directories: Vec<TempDir>,
     sentinel_ports: Vec<u16>,
@@ -47,12 +52,25 @@ impl SentinelServer {
         let _guard = super::SENTINEL_FIXTURE_START_LOCK
             .lock()
             .map_err(|_| "Sentinel fixture start lock is poisoned")?;
-        Self::start_docker().or_else(|_| Self::start_local())
+        match Self::start_docker() {
+            Ok(server) => Ok(server),
+            Err(error)
+                if matches!(
+                    error.downcast_ref::<ContainerStartError>(),
+                    Some(ContainerStartError::Unavailable { .. })
+                ) =>
+            {
+                Self::start_local().map_err(|local_error| {
+                    format!("{error}; local Redis Sentinel fallback failed: {local_error}").into()
+                })
+            }
+            Err(error) => Err(error),
+        }
     }
 
     fn start_docker() -> Result<Self, Box<dyn Error>> {
         let mut server = Self {
-            container_ids: Vec::new(),
+            containers: Vec::new(),
             children: Vec::new(),
             directories: Vec::new(),
             sentinel_ports: Vec::new(),
@@ -61,75 +79,63 @@ impl SentinelServer {
         };
         let replica_port = server.replica_port;
         let data_dir = TempDir::new()?;
-        let master_id = start_container([
-            "run",
-            "--rm",
-            "-d",
-            "--network",
-            "host",
-            "-v",
-            &format!("{}:/data", data_dir.path().display()),
-            "redis:7-alpine",
-            "redis-server",
-            "--port",
-            &server.master_port.to_string(),
-            "--bind",
-            "127.0.0.1",
-            "--dir",
-            "/data",
-            "--appendonly",
-            "yes",
-        ])?;
-        server.container_ids.push(master_id);
+        server.start_container(
+            [
+                "redis-server",
+                "--port",
+                &server.master_port.to_string(),
+                "--bind",
+                "127.0.0.1",
+                "--dir",
+                "/data",
+                "--appendonly",
+                "yes",
+            ],
+            &[Mount::bind_mount(
+                data_dir.path().display().to_string(),
+                "/data",
+            )],
+        )?;
         server.directories.push(data_dir);
 
         let replica_dir = TempDir::new()?;
-        let replica_id = start_container([
-            "run",
-            "--rm",
-            "-d",
-            "--network",
-            "host",
-            "-v",
-            &format!("{}:/data", replica_dir.path().display()),
-            "redis:7-alpine",
-            "redis-server",
-            "--port",
-            &replica_port.to_string(),
-            "--bind",
-            "127.0.0.1",
-            "--dir",
-            "/data",
-            "--replicaof",
-            "127.0.0.1",
-            &server.master_port.to_string(),
-        ])?;
-        server.container_ids.push(replica_id);
+        server.start_container(
+            [
+                "redis-server",
+                "--port",
+                &replica_port.to_string(),
+                "--bind",
+                "127.0.0.1",
+                "--dir",
+                "/data",
+                "--replicaof",
+                "127.0.0.1",
+                &server.master_port.to_string(),
+            ],
+            &[Mount::bind_mount(
+                replica_dir.path().display().to_string(),
+                "/data",
+            )],
+        )?;
         server.directories.push(replica_dir);
 
         for _ in 0..3 {
             let port = free_port()?;
             let directory = TempDir::new()?;
+            // Every peer shares the host network, so loopback names the same
+            // host rather than a container-private network interface.
             let config = format!(
                 "port {port}\nbind 127.0.0.1\ndir /data\nsentinel monitor qeventbus 127.0.0.1 {} 2\nsentinel down-after-milliseconds qeventbus 2000\nsentinel failover-timeout qeventbus 10000\nsentinel parallel-syncs qeventbus 1\n",
                 server.master_port,
             );
             fs::write(directory.path().join("sentinel.conf"), config)?;
-            let mount = format!("{}:/data", directory.path().display());
-            let id = start_container([
-                "run",
-                "--rm",
-                "-d",
-                "--network",
-                "host",
-                "-v",
-                mount.as_str(),
-                "redis:7-alpine",
-                "redis-server",
-                "/data/sentinel.conf",
-                "--sentinel",
-            ])?;
-            server.container_ids.push(id);
+            server.start_container(
+                ["redis-server", "/data/sentinel.conf", "--sentinel"],
+                &[Mount::bind_mount(
+                    directory.path().display().to_string(),
+                    "/data",
+                )],
+            )?;
             server.directories.push(directory);
             server.sentinel_ports.push(port);
         }
@@ -137,9 +143,50 @@ impl SentinelServer {
         Ok(server)
     }
 
+    /// Starts one host-network peer, allowing fallback only before any peer
+    /// has been created successfully.
+    fn start_container<const N: usize>(
+        &mut self,
+        command: [&str; N],
+        mounts: &[Mount],
+    ) -> Result<(), Box<dyn Error>> {
+        let container =
+            start_redis_container("7-alpine", command, mounts, Some("host")).map_err(|error| {
+                match error {
+                    ContainerStartError::Unavailable { image_tag, source }
+                        if !self.containers.is_empty() =>
+                    {
+                        ContainerStartError::Fixture { image_tag, source }
+                    }
+                    error => error,
+                }
+            })?;
+        self.containers.push(container);
+        Ok(())
+    }
+
+    /// Collects diagnostics from owned containers or local Redis log files.
+    fn logs(&self) -> String {
+        if self.containers.is_empty() {
+            return self
+                .directories
+                .iter()
+                .filter_map(|directory| fs::read_to_string(directory.path().join("redis.log")).ok())
+                .collect::<Vec<_>>()
+                .join("\n");
+        }
+        self.containers
+            .iter()
+            .flat_map(|container| [container.stdout_to_vec(), container.stderr_to_vec()])
+            .filter_map(Result::ok)
+            .map(|log| String::from_utf8_lossy(&log).into_owned())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     fn start_local() -> Result<Self, Box<dyn Error>> {
         let mut server = Self {
-            container_ids: Vec::new(),
+            containers: Vec::new(),
             children: Vec::new(),
             directories: Vec::new(),
             sentinel_ports: Vec::new(),
@@ -345,18 +392,13 @@ impl SentinelServer {
     /// after blocking Docker/Redis IO, or process/stop/promotion-deadline
     /// failure errors.
     pub fn stop_original_master(&mut self) -> Result<(), Box<dyn Error>> {
-        if !self.container_ids.is_empty() {
-            let master = self.container_ids.remove(0);
-            let status = Command::new("docker")
-                .args(["stop", &master])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()?;
-            if !status.success() {
-                return Err("could not stop the isolated Redis master".into());
-            }
+        if let Some(master) = self.containers.first() {
+            master.stop()?;
         } else {
-            let master = self.children.first_mut().ok_or("missing local Redis master")?;
+            let master = self
+                .children
+                .first_mut()
+                .ok_or("missing local Redis master")?;
             let kill_result = master.kill();
             let wait_result = master.wait();
             kill_result?;
@@ -369,27 +411,7 @@ impl SentinelServer {
             }
             sleep(Duration::from_millis(200));
         }
-        let logs = self
-            .container_ids
-            .iter()
-            .filter_map(|id| {
-                Command::new("docker")
-                    .args(["logs", "--tail", "20", id])
-                    .output()
-                    .ok()
-                    .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        let logs = if self.container_ids.is_empty() {
-            self.directories
-                .iter()
-                .filter_map(|directory| fs::read_to_string(directory.path().join("redis.log")).ok())
-                .collect::<Vec<_>>()
-                .join("\n")
-        } else {
-            logs
-        };
+        let logs = self.logs();
         Err(format!("Sentinel did not promote the isolated replica; logs:\n{logs}").into())
     }
 
@@ -423,8 +445,14 @@ impl SentinelServer {
             let sentinel_quorum = self.sentinel_ports.len() / 2 + 1;
             let replica_ready = Client::open(format!("redis://127.0.0.1:{}/", self.master_port))
                 .and_then(|client| client.get_connection())
-                .and_then(|mut connection| cmd("INFO").arg("replication").query::<String>(&mut connection))
-                .is_ok_and(|info| info.contains("connected_slaves:1") && info.contains("state=online"));
+                .and_then(|mut connection| {
+                    cmd("INFO")
+                        .arg("replication")
+                        .query::<String>(&mut connection)
+                })
+                .is_ok_and(|info| {
+                    info.contains("connected_slaves:1") && info.contains("state=online")
+                });
             if all_sentinels_ready && healthy_sentinel_count >= sentinel_quorum && replica_ready {
                 return Ok(());
             }
@@ -438,14 +466,13 @@ impl SentinelServer {
             .join("; ");
         let master_state = Client::open(format!("redis://127.0.0.1:{}/", self.master_port))
             .and_then(|client| client.get_connection())
-            .and_then(|mut connection| cmd("INFO").arg("replication").query::<String>(&mut connection))
+            .and_then(|mut connection| {
+                cmd("INFO")
+                    .arg("replication")
+                    .query::<String>(&mut connection)
+            })
             .unwrap_or_else(|error| error.to_string());
-        let logs = self
-            .directories
-            .iter()
-            .filter_map(|directory| fs::read_to_string(directory.path().join("redis.log")).ok())
-            .collect::<Vec<_>>()
-            .join("\n");
+        let logs = self.logs();
         Err(format!(
             "Redis Sentinel quorum did not become ready; replicas={replica_states}; master={master_state}; logs={logs}"
         )
@@ -508,16 +535,11 @@ fn sentinel_replica_state(port: u16) -> String {
 impl Drop for SentinelServer {
     /// Removes only containers and temporary state owned by this fixture.
     ///
-    /// Blocks on Docker process IO; container cleanup errors are deliberately
-    /// ignored.
+    /// Blocks on Testcontainers cleanup and local process IO; cleanup errors
+    /// are deliberately ignored.
     fn drop(&mut self) {
-        for id in &self.container_ids {
-            let _ = Command::new("docker")
-                .args(["rm", "-f", id])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
-        }
+        // Remove peers before their mounted temporary directories disappear.
+        self.containers.clear();
         for child in &mut self.children {
             let _ = child.kill();
             let _ = child.wait();
@@ -534,23 +556,6 @@ fn start_local_redis<const N: usize>(args: [&str; N]) -> Result<Child, Box<dyn E
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()?)
-}
-
-/// Starts Docker with the `N` supplied process arguments `args`.
-///
-/// Returns the trimmed container ID. Performs blocking process IO; returns
-/// spawn, unsuccessful-exit, or invalid stdout UTF-8 errors, including Docker
-/// stderr context.
-fn start_container<const N: usize>(args: [&str; N]) -> Result<String, Box<dyn Error>> {
-    let output = Command::new("docker").args(args).output()?;
-    if !output.status.success() {
-        return Err(format!(
-            "could not start Redis test container: {}",
-            String::from_utf8_lossy(&output.stderr)
-        )
-        .into());
-    }
-    Ok(String::from_utf8(output.stdout)?.trim().to_owned())
 }
 
 /// Returns a currently available loopback TCP port using a temporary listener.
