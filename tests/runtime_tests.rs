@@ -19,21 +19,21 @@ use redis::RedisError;
 use redis::cmd;
 use redis::streams::StreamAutoClaimReply;
 use redis::streams::StreamReadReply;
-use support::fixture_consumer::run as run_fixture_consumer;
-use support::redis_server::RedisServer;
+use testcontainers::TestcontainersError;
+use testcontainers::bollard::errors::Error as DockerError;
+use testcontainers::core::client::docker_client_instance;
+use testcontainers::core::error::ClientError;
+
+use crate::support::fixture_consumer::run as run_fixture_consumer;
+use crate::support::redis_server::RedisServer;
+use crate::support::testcontainers_support::ContainerStartError;
+use crate::support::testcontainers_support::RedisContainer;
+use crate::support::testcontainers_support::start_redis_container;
+use crate::support::testcontainers_support::start_redis_container_with_host_port;
 
 #[test]
 fn test_redis_fixture_starts_with_testcontainers() -> Result<(), Box<dyn Error>> {
-    use crate::support::testcontainers_support::{
-        start_redis_container, start_redis_container_with_host_port,
-    };
-
-    let container = start_redis_container(
-        "7-alpine",
-        ["redis-server", "--appendonly", "no"],
-        &[],
-        None,
-    )?;
+    let container = start_redis_container("7-alpine", ["redis-server", "--appendonly", "no"], &[], None)?;
     assert_redis_port_is_loopback_only(&container)?;
     let port = container.get_host_port_ipv4(6379)?;
     let client = Client::open(format!("redis://127.0.0.1:{port}/"))?;
@@ -55,14 +55,8 @@ fn test_redis_fixture_starts_with_testcontainers() -> Result<(), Box<dyn Error>>
     Ok(())
 }
 
-fn assert_redis_port_is_loopback_only(
-    container: &crate::support::testcontainers_support::RedisContainer,
-) -> Result<(), Box<dyn Error>> {
-    use testcontainers::core::client::docker_client_instance;
-
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
+fn assert_redis_port_is_loopback_only(container: &RedisContainer) -> Result<(), Box<dyn Error>> {
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     let docker = runtime.block_on(docker_client_instance())?;
     let inspection = runtime.block_on(docker.inspect_container(container.id(), None))?;
     let bindings = inspection
@@ -82,27 +76,16 @@ fn assert_redis_port_is_loopback_only(
 
 #[test]
 fn test_failed_container_start_cleans_owned_attempt() -> Result<(), Box<dyn Error>> {
-    use support::testcontainers_support::ContainerStartError;
-    use support::testcontainers_support::start_redis_container_with_host_port;
-    use testcontainers::TestcontainersError;
-    use testcontainers::bollard::errors::Error as DockerError;
-    use testcontainers::core::client::docker_client_instance;
-    use testcontainers::core::error::ClientError;
-
     let occupied = std::net::TcpListener::bind(("0.0.0.0", 0))?;
     let port = occupied.local_addr()?.port();
-    let error = match start_redis_container_with_host_port(
-        "7-alpine",
-        ["redis-server", "--appendonly", "no"],
-        &[],
-        None,
-        port,
-    ) {
-        Ok(_) => return Err("container unexpectedly claimed the occupied host port".into()),
-        Err(error) => error,
-    };
+    let error =
+        match start_redis_container_with_host_port("7-alpine", ["redis-server", "--appendonly", "no"], &[], None, port)
+        {
+            Ok(_) => return Err("container unexpectedly claimed the occupied host port".into()),
+            Err(error) => error,
+        };
     let ContainerStartError::Fixture {
-        source: TestcontainersError::Client(ClientError::StartContainer(_)),
+        source,
         container_name: Some(name),
         cleanup_error,
         ..
@@ -110,11 +93,18 @@ fn test_failed_container_start_cleans_owned_attempt() -> Result<(), Box<dyn Erro
     else {
         return Err(format!("expected a post-creation port conflict, got: {error}").into());
     };
+    assert!(matches!(
+        source.as_ref(),
+        TestcontainersError::Client(ClientError::StartContainer(_))
+    ));
     assert!(cleanup_error.is_none(), "{error}");
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     let inspection = runtime.block_on(async {
         let docker = docker_client_instance().await?;
-        docker.inspect_container(name, None).await.map_err(ClientError::InspectContainer)
+        docker
+            .inspect_container(name, None)
+            .await
+            .map_err(ClientError::InspectContainer)
     });
     assert!(
         matches!(

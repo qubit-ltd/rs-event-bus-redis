@@ -37,13 +37,13 @@ pub(crate) type RedisContainer = Container<GenericImage>;
 pub(crate) enum ContainerStartError {
     Unavailable {
         image_tag: String,
-        source: TestcontainersError,
+        source: Box<TestcontainersError>,
         container_name: Option<String>,
         cleanup_error: Option<String>,
     },
     Fixture {
         image_tag: String,
-        source: TestcontainersError,
+        source: Box<TestcontainersError>,
         container_name: Option<String>,
         cleanup_error: Option<String>,
     },
@@ -66,8 +66,16 @@ impl fmt::Display for ContainerStartError {
             }
         }
         let (container_name, cleanup_error) = match self {
-            Self::Unavailable { container_name, cleanup_error, .. }
-            | Self::Fixture { container_name, cleanup_error, .. } => (container_name, cleanup_error),
+            Self::Unavailable {
+                container_name,
+                cleanup_error,
+                ..
+            }
+            | Self::Fixture {
+                container_name,
+                cleanup_error,
+                ..
+            } => (container_name, cleanup_error),
         };
         if let Some(name) = container_name {
             write!(formatter, "; attempted container={name}")?;
@@ -82,7 +90,7 @@ impl fmt::Display for ContainerStartError {
 impl Error for ContainerStartError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::Unavailable { source, .. } | Self::Fixture { source, .. } => Some(source),
+            Self::Unavailable { source, .. } | Self::Fixture { source, .. } => Some(source.as_ref()),
         }
     }
 }
@@ -95,7 +103,8 @@ pub(crate) fn redis_container_request(
     container_request(image_tag, command, false)
 }
 
-/// Builds Redis or Sentinel readiness, exposing a port only outside host networking.
+/// Builds Redis or Sentinel readiness, exposing a port only outside host
+/// networking.
 fn container_request(
     image_tag: &str,
     command: impl IntoIterator<Item = impl Into<String>>,
@@ -107,8 +116,7 @@ fn container_request(
     } else {
         "Ready to accept connections"
     };
-    let mut image = GenericImage::new("redis", image_tag)
-        .with_wait_for(WaitFor::message_on_stdout(ready_message));
+    let mut image = GenericImage::new("redis", image_tag).with_wait_for(WaitFor::message_on_stdout(ready_message));
     if !host_network {
         image = image.with_exposed_port(6379.tcp());
     }
@@ -184,8 +192,16 @@ fn start_container(
         let cleanup = cleanup_failed_container(&container_name).err();
         let mut error = classify_start_error(image_tag, source);
         match &mut error {
-            ContainerStartError::Unavailable { container_name: name, cleanup_error, .. }
-            | ContainerStartError::Fixture { container_name: name, cleanup_error, .. } => {
+            ContainerStartError::Unavailable {
+                container_name: name,
+                cleanup_error,
+                ..
+            }
+            | ContainerStartError::Fixture {
+                container_name: name,
+                cleanup_error,
+                ..
+            } => {
                 *name = Some(container_name);
                 *cleanup_error = cleanup;
             }
@@ -196,8 +212,15 @@ fn start_container(
 
 fn unique_container_name() -> String {
     static ATTEMPT: AtomicU64 = AtomicU64::new(0);
-    let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
-    format!("rer-redis-{}-{timestamp}-{}", std::process::id(), ATTEMPT.fetch_add(1, Ordering::Relaxed))
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!(
+        "rer-redis-{}-{timestamp}-{}",
+        std::process::id(),
+        ATTEMPT.fetch_add(1, Ordering::Relaxed)
+    )
 }
 
 fn cleanup_failed_container(container_name: &str) -> Result<(), String> {
@@ -235,13 +258,13 @@ fn classify_start_error(image_tag: &str, source: TestcontainersError) -> Contain
             | ClientError::CreateContainer(_),
         ) => ContainerStartError::Unavailable {
             image_tag: image_tag.to_owned(),
-            source,
+            source: Box::new(source),
             container_name: None,
             cleanup_error: None,
         },
         _ => ContainerStartError::Fixture {
             image_tag: image_tag.to_owned(),
-            source,
+            source: Box::new(source),
             container_name: None,
             cleanup_error: None,
         },
@@ -250,11 +273,16 @@ fn classify_start_error(image_tag: &str, source: TestcontainersError) -> Contain
 
 #[cfg(test)]
 mod tests {
+    use std::error::Error;
+
     use testcontainers::core::error::ConfigurationError;
     use testcontainers::core::error::WaitContainerError;
     use testcontainers::core::ports::PortMappingError;
 
-    use super::*;
+    use super::ClientError;
+    use super::ContainerStartError;
+    use super::TestcontainersError;
+    use super::classify_start_error;
 
     #[test]
     fn test_pre_creation_errors_allow_local_fallback() {
@@ -274,10 +302,7 @@ mod tests {
         ];
         for source in errors {
             let error = classify_start_error("7-alpine", source.into());
-            assert!(
-                matches!(error, ContainerStartError::Unavailable { .. }),
-                "{error}"
-            );
+            assert!(matches!(error, ContainerStartError::Unavailable { .. }), "{error}");
             assert!(error.to_string().contains("redis:7-alpine"));
             assert!(error.source().is_some());
         }
@@ -296,10 +321,7 @@ mod tests {
         ];
         for source in errors {
             let error = classify_start_error("7-alpine", source);
-            assert!(
-                matches!(error, ContainerStartError::Fixture { .. }),
-                "{error}"
-            );
+            assert!(matches!(error, ContainerStartError::Fixture { .. }), "{error}");
             assert!(error.to_string().contains("redis:7-alpine"));
             assert!(error.source().is_some());
         }
@@ -309,7 +331,9 @@ mod tests {
     fn test_cleanup_failure_preserves_original_start_error() {
         let error = ContainerStartError::Fixture {
             image_tag: "7-alpine".into(),
-            source: ClientError::StartContainer(std::io::Error::other("original start failure").into()).into(),
+            source: Box::new(
+                ClientError::StartContainer(std::io::Error::other("original start failure").into()).into(),
+            ),
             container_name: Some("rer-redis-attempt".into()),
             cleanup_error: Some("cleanup denied".into()),
         };
@@ -318,7 +342,9 @@ mod tests {
         assert!(display.contains("rer-redis-attempt"));
         assert!(display.contains("cleanup denied"));
         assert!(matches!(
-            error.source().and_then(|source| source.downcast_ref::<TestcontainersError>()),
+            error
+                .source()
+                .and_then(|source| source.downcast_ref::<TestcontainersError>()),
             Some(TestcontainersError::Client(ClientError::StartContainer(_)))
         ));
     }

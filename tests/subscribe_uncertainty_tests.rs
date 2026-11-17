@@ -500,7 +500,7 @@ const WAIT: Duration = Duration::from_secs(5);
 
 /// Starts a disposable local Redis server and removes its process on drop.
 enum RedisBackend {
-    Docker(RedisServer),
+    Docker(Box<RedisServer>),
     Local {
         child: Child,
         _directory: tempfile::TempDir,
@@ -516,7 +516,7 @@ impl RedisHarness {
     fn start() -> Result<Self, Box<dyn Error>> {
         if let Ok(server) = RedisServer::start() {
             return Ok(Self {
-                backend: RedisBackend::Docker(server),
+                backend: RedisBackend::Docker(Box::new(server)),
             });
         }
         let port = TcpListener::bind(("127.0.0.1", 0))?.local_addr()?.port();

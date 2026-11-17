@@ -283,7 +283,7 @@ pub struct RedisServer {
 
 enum RedisBackend {
     Testcontainers {
-        container: Option<RedisContainer>,
+        container: Option<Box<RedisContainer>>,
         url: String,
         requirement: VersionRequirement,
         image_tag: String,
@@ -417,14 +417,15 @@ impl RedisServer {
                             None,
                             host_port,
                         )?;
-                        let port = container.get_host_port_ipv4(6379).map_err(|source| {
-                            ContainerStartError::Fixture {
-                                image_tag: image_tag.to_owned(),
-                                source,
-                                container_name: None,
-                                cleanup_error: None,
-                            }
-                        })?;
+                        let port =
+                            container
+                                .get_host_port_ipv4(6379)
+                                .map_err(|source| ContainerStartError::Fixture {
+                                    image_tag: image_tag.to_owned(),
+                                    source: Box::new(source),
+                                    container_name: None,
+                                    cleanup_error: None,
+                                })?;
                         Ok::<_, ContainerStartError>((container, port))
                     })
                     .join()
@@ -436,8 +437,13 @@ impl RedisServer {
                     if is_port_allocation_conflict(&error.to_string())
                         && matches!(
                             error,
-                            ContainerStartError::Unavailable { cleanup_error: None, .. }
-                                | ContainerStartError::Fixture { cleanup_error: None, .. }
+                            ContainerStartError::Unavailable {
+                                cleanup_error: None,
+                                ..
+                            } | ContainerStartError::Fixture {
+                                cleanup_error: None,
+                                ..
+                            }
                         ) =>
                 {
                     last_error = Some(error);
@@ -452,7 +458,7 @@ impl RedisServer {
             };
             let server = Self {
                 backend: RedisBackend::Testcontainers {
-                    container: Some(container),
+                    container: Some(Box::new(container)),
                     url: format!("redis://127.0.0.1:{port}/"),
                     requirement,
                     image_tag: image_tag.to_owned(),
@@ -500,9 +506,7 @@ impl RedisServer {
                 requirement,
                 image_tag,
             } => {
-                let container = container
-                    .as_ref()
-                    .ok_or("Redis container was already dropped")?;
+                let container = container.as_ref().ok_or("Redis container was already dropped")?;
                 let restarted_port = std::thread::scope(|scope| {
                     scope
                         .spawn(|| {
@@ -520,12 +524,7 @@ impl RedisServer {
                     .into());
                 }
                 wait_until_ready(url, Duration::from_secs(10))?;
-                validate_version_at(
-                    loopback_address(url)?,
-                    *requirement,
-                    "testcontainers",
-                    image_tag,
-                )?;
+                validate_version_at(loopback_address(url)?, *requirement, "testcontainers", image_tag)?;
             }
             RedisBackend::Local {
                 child,
@@ -553,7 +552,8 @@ impl RedisServer {
     }
 }
 
-/// Returns whether container startup failed because another process claimed the port.
+/// Returns whether container startup failed because another process claimed the
+/// port.
 fn is_port_allocation_conflict(error: &str) -> bool {
     error.contains("port is already allocated") || error.contains("address already in use")
 }
@@ -561,7 +561,8 @@ fn is_port_allocation_conflict(error: &str) -> bool {
 impl Drop for RedisServer {
     /// Removes the container owned by this test fixture.
     ///
-    /// Blocks on container/process cleanup; cleanup errors are deliberately ignored.
+    /// Blocks on container/process cleanup; cleanup errors are deliberately
+    /// ignored.
     fn drop(&mut self) {
         match &mut self.backend {
             RedisBackend::Testcontainers { container, .. } => {

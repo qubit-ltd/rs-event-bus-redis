@@ -5,7 +5,8 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-//! Testcontainers-backed Redis TLS fixture with short-lived test-only credentials.
+//! Testcontainers-backed Redis TLS fixture with short-lived test-only
+//! credentials.
 
 use std::error::Error;
 use std::fs;
@@ -183,7 +184,8 @@ impl TlsRedisServer {
 }
 
 impl Drop for TlsRedisServer {
-    /// Reaps the local Redis process; Testcontainers removes the owned container.
+    /// Reaps the local Redis process; Testcontainers removes the owned
+    /// container.
     fn drop(&mut self) {
         if let Some(child) = &mut self.child {
             let _ = child.kill();

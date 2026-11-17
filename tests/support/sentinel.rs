@@ -5,7 +5,8 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-//! Isolated Redis master, replica, and three Sentinel nodes with owned containers.
+//! Isolated Redis master, replica, and three Sentinel nodes with owned
+//! containers.
 
 use std::error::Error;
 use std::fs;
@@ -91,10 +92,7 @@ impl SentinelServer {
                 "--appendonly",
                 "yes",
             ],
-            &[Mount::bind_mount(
-                data_dir.path().display().to_string(),
-                "/data",
-            )],
+            &[Mount::bind_mount(data_dir.path().display().to_string(), "/data")],
         )?;
         server.directories.push(data_dir);
 
@@ -112,10 +110,7 @@ impl SentinelServer {
                 "127.0.0.1",
                 &server.master_port.to_string(),
             ],
-            &[Mount::bind_mount(
-                replica_dir.path().display().to_string(),
-                "/data",
-            )],
+            &[Mount::bind_mount(replica_dir.path().display().to_string(), "/data")],
         )?;
         server.directories.push(replica_dir);
 
@@ -131,10 +126,7 @@ impl SentinelServer {
             fs::write(directory.path().join("sentinel.conf"), config)?;
             server.start_container(
                 ["redis-server", "/data/sentinel.conf", "--sentinel"],
-                &[Mount::bind_mount(
-                    directory.path().display().to_string(),
-                    "/data",
-                )],
+                &[Mount::bind_mount(directory.path().display().to_string(), "/data")],
             )?;
             server.directories.push(directory);
             server.sentinel_ports.push(port);
@@ -145,31 +137,21 @@ impl SentinelServer {
 
     /// Starts one host-network peer, allowing fallback only before any peer
     /// has been created successfully.
-    fn start_container<const N: usize>(
-        &mut self,
-        command: [&str; N],
-        mounts: &[Mount],
-    ) -> Result<(), Box<dyn Error>> {
+    fn start_container<const N: usize>(&mut self, command: [&str; N], mounts: &[Mount]) -> Result<(), Box<dyn Error>> {
         let container =
-            start_redis_container("7-alpine", command, mounts, Some("host")).map_err(|error| {
-                match error {
-                    ContainerStartError::Unavailable {
-                        image_tag,
-                        source,
-                        container_name,
-                        cleanup_error,
-                    }
-                        if !self.containers.is_empty() =>
-                    {
-                        ContainerStartError::Fixture {
-                            image_tag,
-                            source,
-                            container_name,
-                            cleanup_error,
-                        }
-                    }
-                    error => error,
-                }
+            start_redis_container("7-alpine", command, mounts, Some("host")).map_err(|error| match error {
+                ContainerStartError::Unavailable {
+                    image_tag,
+                    source,
+                    container_name,
+                    cleanup_error,
+                } if !self.containers.is_empty() => ContainerStartError::Fixture {
+                    image_tag,
+                    source,
+                    container_name,
+                    cleanup_error,
+                },
+                error => error,
             })?;
         self.containers.push(container);
         Ok(())
@@ -405,10 +387,7 @@ impl SentinelServer {
         if let Some(master) = self.containers.first() {
             master.stop()?;
         } else {
-            let master = self
-                .children
-                .first_mut()
-                .ok_or("missing local Redis master")?;
+            let master = self.children.first_mut().ok_or("missing local Redis master")?;
             let kill_result = master.kill();
             let wait_result = master.wait();
             kill_result?;
@@ -455,14 +434,8 @@ impl SentinelServer {
             let sentinel_quorum = self.sentinel_ports.len() / 2 + 1;
             let replica_ready = Client::open(format!("redis://127.0.0.1:{}/", self.master_port))
                 .and_then(|client| client.get_connection())
-                .and_then(|mut connection| {
-                    cmd("INFO")
-                        .arg("replication")
-                        .query::<String>(&mut connection)
-                })
-                .is_ok_and(|info| {
-                    info.contains("connected_slaves:1") && info.contains("state=online")
-                });
+                .and_then(|mut connection| cmd("INFO").arg("replication").query::<String>(&mut connection))
+                .is_ok_and(|info| info.contains("connected_slaves:1") && info.contains("state=online"));
             if all_sentinels_ready && healthy_sentinel_count >= sentinel_quorum && replica_ready {
                 return Ok(());
             }
@@ -476,11 +449,7 @@ impl SentinelServer {
             .join("; ");
         let master_state = Client::open(format!("redis://127.0.0.1:{}/", self.master_port))
             .and_then(|client| client.get_connection())
-            .and_then(|mut connection| {
-                cmd("INFO")
-                    .arg("replication")
-                    .query::<String>(&mut connection)
-            })
+            .and_then(|mut connection| cmd("INFO").arg("replication").query::<String>(&mut connection))
             .unwrap_or_else(|error| error.to_string());
         let logs = self.logs();
         Err(format!(

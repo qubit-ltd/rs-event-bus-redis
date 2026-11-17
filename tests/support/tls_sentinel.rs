@@ -5,7 +5,8 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-//! Testcontainers-backed Redis 7 TLS master/replica and Sentinel discovery fixture.
+//! Testcontainers-backed Redis 7 TLS master/replica and Sentinel discovery
+//! fixture.
 
 use std::error::Error;
 use std::fs;
