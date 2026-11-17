@@ -3,13 +3,28 @@ import os
 import subprocess
 import tempfile
 import textwrap
+import tomllib
 import unittest
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "ci/check-registry-consumer.sh"
-VERSIONS = ("0.7.3", "0.21.0", "0.14.0")
+SOURCE_MANIFEST = tomllib.loads((ROOT / "Cargo.toml").read_text())
+
+
+def dependency_version(name):
+    dependency = SOURCE_MANIFEST["dependencies"][name]
+    requirement = dependency.get("version") if isinstance(dependency, dict) else dependency
+    parts = requirement.removeprefix("^").split(".")
+    return ".".join(parts + (["0"] if len(parts) == 2 else []))
+
+
+VERSIONS = (
+    SOURCE_MANIFEST["package"]["version"],
+    dependency_version("qubit-event-bus"),
+    dependency_version("qubit-spi"),
+)
 
 
 def metadata():

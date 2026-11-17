@@ -12,7 +12,20 @@ SPEC = importlib.util.spec_from_file_location("registry_consumer_target", SCRIPT
 TARGET = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(TARGET)
 ROOT = SCRIPT.parents[1]
-VERSIONS = {"provider": "0.7.3", "core": "0.21.0", "spi": "0.14.0"}
+SOURCE_MANIFEST = TARGET.load_manifest(ROOT / "Cargo.toml")
+
+
+def dependency_version(name):
+    dependency = SOURCE_MANIFEST["dependencies"][name]
+    requirement = dependency.get("version") if isinstance(dependency, dict) else dependency
+    return requirement.removeprefix("^").split(".")
+
+
+VERSIONS = {
+    "provider": SOURCE_MANIFEST["package"]["version"],
+    "core": ".".join(dependency_version("qubit-event-bus")[:2] + ["0"]),
+    "spi": ".".join(dependency_version("qubit-spi")),
+}
 
 
 def args(**overrides):
