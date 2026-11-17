@@ -18,6 +18,7 @@ use testcontainers::TestcontainersError;
 use testcontainers::core::IntoContainerPort;
 use testcontainers::core::Mount;
 use testcontainers::core::WaitFor;
+use testcontainers::core::error::ClientError;
 use testcontainers::runners::SyncRunner;
 
 pub(crate) type RedisContainer = Container<GenericImage>;
@@ -87,8 +88,21 @@ pub(crate) fn start_redis_container(
     if let Some(network) = network {
         request = request.with_network(network);
     }
-    request.start().map_err(|source| match source {
-        TestcontainersError::Client(_) => ContainerStartError::Unavailable {
+    request
+        .start()
+        .map_err(|source| classify_start_error(image_tag, source))
+}
+
+fn classify_start_error(image_tag: &str, source: TestcontainersError) -> ContainerStartError {
+    match source {
+        TestcontainersError::Client(
+            ClientError::Init(_)
+            | ClientError::Configuration(_)
+            | ClientError::InvalidDockerHost(_)
+            | ClientError::PullImage { .. }
+            | ClientError::BuildImage { .. }
+            | ClientError::CreateContainer(_),
+        ) => ContainerStartError::Unavailable {
             image_tag: image_tag.to_owned(),
             source,
         },
@@ -96,5 +110,63 @@ pub(crate) fn start_redis_container(
             image_tag: image_tag.to_owned(),
             source,
         },
-    })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use testcontainers::core::error::ConfigurationError;
+    use testcontainers::core::error::WaitContainerError;
+    use testcontainers::core::ports::PortMappingError;
+
+    use super::*;
+
+    #[test]
+    fn test_pre_creation_errors_allow_local_fallback() {
+        let errors = [
+            ClientError::Init(std::io::Error::other("init").into()),
+            ClientError::Configuration(ConfigurationError::InvalidDockerHost("bad host".into())),
+            ClientError::InvalidDockerHost("bad host".into()),
+            ClientError::PullImage {
+                descriptor: "redis:7-alpine".into(),
+                err: std::io::Error::other("pull").into(),
+            },
+            ClientError::BuildImage {
+                descriptor: "redis:7-alpine".into(),
+                err: std::io::Error::other("build").into(),
+            },
+            ClientError::CreateContainer(std::io::Error::other("create").into()),
+        ];
+        for source in errors {
+            let error = classify_start_error("7-alpine", source.into());
+            assert!(
+                matches!(error, ContainerStartError::Unavailable { .. }),
+                "{error}"
+            );
+            assert!(error.to_string().contains("redis:7-alpine"));
+            assert!(error.source().is_some());
+        }
+    }
+
+    #[test]
+    fn test_post_creation_errors_reject_local_fallback() {
+        let errors = [
+            ClientError::StartContainer(std::io::Error::other("start").into()).into(),
+            ClientError::InspectContainer(std::io::Error::other("inspect").into()).into(),
+            ClientError::PortMapping(PortMappingError::FailedToParseHostPort(
+                "invalid".parse::<u16>().unwrap_err(),
+            ))
+            .into(),
+            TestcontainersError::WaitContainer(WaitContainerError::StartupTimeout),
+        ];
+        for source in errors {
+            let error = classify_start_error("7-alpine", source);
+            assert!(
+                matches!(error, ContainerStartError::Fixture { .. }),
+                "{error}"
+            );
+            assert!(error.to_string().contains("redis:7-alpine"));
+            assert!(error.source().is_some());
+        }
+    }
 }
