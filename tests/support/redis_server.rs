@@ -553,33 +553,7 @@ impl RedisServer {
     }
 }
 
-/// Starts a Docker container on a free loopback port and retries bind races.
-pub(super) fn start_mapped_container(
-    before_mapping: &[&str],
-    after_mapping: &[&str],
-    container_port: u16,
-) -> Result<(String, u16), Box<dyn Error>> {
-    let mut last_error = String::new();
-    for _ in 0..10 {
-        let port = TcpListener::bind(("127.0.0.1", 0))?.local_addr()?.port();
-        let mapping = format!("127.0.0.1:{port}:{container_port}");
-        let output = Command::new("docker")
-            .args(before_mapping)
-            .args(["-p", mapping.as_str()])
-            .args(after_mapping)
-            .output()?;
-        if output.status.success() {
-            return Ok((String::from_utf8(output.stdout)?.trim().to_owned(), port));
-        }
-        last_error = String::from_utf8_lossy(&output.stderr).into_owned();
-        if !is_port_allocation_conflict(&last_error) {
-            return Err(format!("docker run failed: {last_error}").into());
-        }
-    }
-    Err(format!("docker could not allocate a test port after 10 attempts: {last_error}").into())
-}
-
-/// Returns whether Docker failed because another process claimed the port.
+/// Returns whether container startup failed because another process claimed the port.
 fn is_port_allocation_conflict(error: &str) -> bool {
     error.contains("port is already allocated") || error.contains("address already in use")
 }
@@ -680,7 +654,7 @@ mod tests {
     }
 
     #[test]
-    fn test_other_docker_failures_are_not_port_allocation_conflicts() {
+    fn test_other_container_failures_are_not_port_allocation_conflicts() {
         assert!(!is_port_allocation_conflict("Unable to find image redis:latest"));
     }
 

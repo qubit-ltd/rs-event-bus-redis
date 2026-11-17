@@ -5,7 +5,7 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-//! Docker-backed Redis 7 TLS master/replica and Sentinel discovery fixture.
+//! Testcontainers-backed Redis 7 TLS master/replica and Sentinel discovery fixture.
 
 use std::error::Error;
 use std::fs;
@@ -34,10 +34,16 @@ use redis::cmd;
 use redis::streams::StreamInfoGroupsReply;
 use redis::streams::StreamPendingCountReply;
 use tempfile::TempDir;
+use testcontainers::core::AccessMode;
+use testcontainers::core::Mount;
+
+use super::testcontainers_support::ContainerStartError;
+use super::testcontainers_support::RedisContainer;
+use super::testcontainers_support::start_redis_container;
 
 /// Owns a TLS Redis pair and three Sentinel nodes using one transport mode.
 pub struct TlsSentinel {
-    containers: Vec<String>,
+    containers: Vec<RedisContainer>,
     children: Vec<Child>,
     directories: Vec<TempDir>,
     sentinel_ports: Vec<u16>,
@@ -59,9 +65,17 @@ impl TlsSentinel {
             .map_err(|_| "Sentinel fixture start lock is poisoned")?;
         let mut fixture = match Self::start_docker(sentinel_tls) {
             Ok(fixture) => fixture,
-            Err(docker_error) => Self::start_local(sentinel_tls).map_err(|local_error| {
-                format!("Docker TLS Sentinel fixture failed: {docker_error}; local fallback failed: {local_error}")
-            })?,
+            Err(docker_error)
+                if matches!(
+                    docker_error.downcast_ref::<ContainerStartError>(),
+                    Some(ContainerStartError::Unavailable { .. })
+                ) =>
+            {
+                Self::start_local(sentinel_tls).map_err(|local_error| {
+                    format!("Docker TLS Sentinel fixture failed: {docker_error}; local fallback failed: {local_error}")
+                })?
+            }
+            Err(error) => return Err(error),
         };
         fixture.sentinel_proxies = fixture
             .sentinel_ports
@@ -94,16 +108,9 @@ impl TlsSentinel {
             .join("ca.crt")
             .to_string_lossy()
             .into_owned();
-        fixture.containers.push(context(
-            start_container([
-                "run",
-                "--rm",
-                "-d",
-                "--network",
-                "host",
-                "-v",
-                &format!("{cert_path}:/tls:ro"),
-                "redis:7-alpine",
+        let tls_mount = Mount::bind_mount(cert_path, "/tls").with_access_mode(AccessMode::ReadOnly);
+        fixture.start_container(
+            [
                 "redis-server",
                 "--port",
                 "0",
@@ -123,19 +130,11 @@ impl TlsSentinel {
                 "yes",
                 "--appendonly",
                 "yes",
-            ]),
-            "start TLS master container",
-        )?);
-        fixture.containers.push(context(
-            start_container([
-                "run",
-                "--rm",
-                "-d",
-                "--network",
-                "host",
-                "-v",
-                &format!("{cert_path}:/tls:ro"),
-                "redis:7-alpine",
+            ],
+            std::slice::from_ref(&tls_mount),
+        )?;
+        fixture.start_container(
+            [
                 "redis-server",
                 "--port",
                 "0",
@@ -156,9 +155,9 @@ impl TlsSentinel {
                 "--replicaof",
                 "127.0.0.1",
                 &master_port.to_string(),
-            ]),
-            "start TLS replica container",
-        )?);
+            ],
+            std::slice::from_ref(&tls_mount),
+        )?;
 
         for _ in 0..3 {
             let port = context(free_port(), "allocate Sentinel port")?;
@@ -175,26 +174,15 @@ impl TlsSentinel {
                 make_sentinel_config_writable(directory.path()),
                 "make Sentinel configuration writable",
             )?;
-            let config_mount = format!("{}:/data", directory.path().display());
-            let id = context(
-                start_container([
-                    "run",
-                    "--rm",
-                    "-d",
-                    "--network",
-                    "host",
-                    "-v",
-                    &config_mount,
-                    "-v",
-                    &format!("{cert_path}:/tls:ro"),
-                    "redis:7-alpine",
-                    "redis-server",
-                    "/data/sentinel.conf",
-                    "--sentinel",
-                ]),
-                "start Sentinel container",
+            // Sentinel rewrites its configuration; /data stays writable while
+            // the shared certificate directory remains read-only.
+            fixture.start_container(
+                ["redis-server", "/data/sentinel.conf", "--sentinel"],
+                &[
+                    Mount::bind_mount(directory.path().display().to_string(), "/data"),
+                    tls_mount.clone(),
+                ],
             )?;
-            fixture.containers.push(id);
             fixture.directories.push(directory);
             fixture.sentinel_ports.push(port);
         }
@@ -203,6 +191,23 @@ impl TlsSentinel {
             "wait for Sentinel to discover TLS master",
         )?;
         Ok(fixture)
+    }
+
+    /// Starts one host-network peer; only an unavailable first peer allows
+    /// the caller to select the local backend.
+    fn start_container<const N: usize>(&mut self, command: [&str; N], mounts: &[Mount]) -> Result<(), Box<dyn Error>> {
+        let container =
+            start_redis_container("7-alpine", command, mounts, Some("host")).map_err(|error| -> Box<dyn Error> {
+                if self.containers.is_empty() {
+                    Box::new(error)
+                } else {
+                    // Keep the source while preventing a later peer's backend
+                    // error from selecting fallback after the topology exists.
+                    Box::new(std::io::Error::other(error))
+                }
+            })?;
+        self.containers.push(container);
+        Ok(())
     }
 
     fn start_local(sentinel_tls: bool) -> Result<Self, Box<dyn Error>> {
@@ -546,14 +551,10 @@ impl TlsSentinel {
             wait_result?;
             return Ok(());
         }
-        let id = self.containers.first().ok_or("missing original master")?.clone();
-        let output = Command::new("docker").args(["stop", &id]).output()?;
-        if output.status.success() {
-            self.containers.remove(0);
-            Ok(())
-        } else {
-            Err(format!("docker stop failed: {}", String::from_utf8_lossy(&output.stderr)).into())
-        }
+        let container = self.containers.first().ok_or("missing original master")?;
+        container.stop()?;
+        self.containers.remove(0);
+        Ok(())
     }
 
     fn wait_until_discovered(&self) -> Result<(), Box<dyn Error>> {
@@ -587,16 +588,17 @@ impl TlsSentinel {
         self.containers
             .iter()
             .enumerate()
-            .map(|(index, id)| {
-                let output = Command::new("docker").args(["logs", "--tail", "30", id]).output();
-                match output {
-                    Ok(output) => format!(
-                        "container {index} stdout:\n{}\nstderr:\n{}",
-                        String::from_utf8_lossy(&output.stdout),
-                        String::from_utf8_lossy(&output.stderr)
-                    ),
-                    Err(error) => format!("container {index} logs unavailable: {error}"),
-                }
+            .map(|(index, container)| {
+                let logs = |result: Result<Vec<u8>, testcontainers::TestcontainersError>| {
+                    result
+                        .map(|output| String::from_utf8_lossy(&output).into_owned())
+                        .unwrap_or_else(|error| format!("logs unavailable: {error}"))
+                };
+                format!(
+                    "container {index} stdout:\n{}\nstderr:\n{}",
+                    logs(container.stdout_to_vec()),
+                    logs(container.stderr_to_vec()),
+                )
             })
             .collect::<Vec<_>>()
             .join("\n")
@@ -683,13 +685,8 @@ fn relay_tls(client: TcpStream, server: TcpStream) {
 
 impl Drop for TlsSentinel {
     fn drop(&mut self) {
-        for id in self.containers.iter().rev() {
-            let _ = Command::new("docker")
-                .args(["rm", "-f", id])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
-        }
+        // Release every container before its mounted directories disappear.
+        self.containers.clear();
         for child in &mut self.children {
             let _ = child.kill();
             let _ = child.wait();
@@ -794,18 +791,6 @@ fn free_port() -> Result<u16, Box<dyn Error>> {
         .local_addr()
         .map_err(|error| format!("read temporary loopback port: {error}"))?
         .port())
-}
-
-fn start_container<const N: usize>(args: [&str; N]) -> Result<String, Box<dyn Error>> {
-    let output = Command::new("docker")
-        .args(args)
-        .output()
-        .map_err(|error| format!("spawn docker command: {error}"))?;
-    if output.status.success() {
-        Ok(String::from_utf8(output.stdout)?.trim().to_owned())
-    } else {
-        Err(format!("docker run failed: {}", String::from_utf8_lossy(&output.stderr)).into())
-    }
 }
 
 fn generate_certificates(directory: &std::path::Path) -> Result<(), Box<dyn Error>> {
