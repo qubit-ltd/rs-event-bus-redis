@@ -5,7 +5,7 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-//! Docker-backed Redis TLS fixture with short-lived test-only credentials.
+//! Testcontainers-backed Redis TLS fixture with short-lived test-only credentials.
 
 use std::error::Error;
 use std::fs;
@@ -24,10 +24,16 @@ use rcgen::IsCa;
 use rcgen::KeyPair;
 use redis::Client;
 use tempfile::TempDir;
+use testcontainers::core::AccessMode;
+use testcontainers::core::Mount;
+
+use super::testcontainers_support::ContainerStartError;
+use super::testcontainers_support::RedisContainer;
+use super::testcontainers_support::start_redis_container;
 
 /// Owns a Redis TLS container and its generated test CA and server identity.
 pub struct TlsRedisServer {
-    container_id: Option<String>,
+    container: Option<RedisContainer>,
     child: Option<Child>,
     _directory: TempDir,
     url: String,
@@ -67,14 +73,12 @@ impl TlsRedisServer {
         let wrong_ca_path = directory.path().join("wrong-ca.crt");
         write_self_signed_ca(&wrong_ca_path, &directory.path().join("wrong-ca.key"), "Wrong-Test-CA")?;
 
-        let mount = format!("{}:/tls:ro", directory.path().display());
+        let tls_mount =
+            Mount::bind_mount(directory.path().to_string_lossy(), "/tls").with_access_mode(AccessMode::ReadOnly);
         let client_auth = if require_client_auth { "yes" } else { "no" };
-        let docker = super::redis_server::start_mapped_container(
-            &["run", "-d", "--rm"],
-            &[
-                "-v",
-                &mount,
-                "redis:7-alpine",
+        let container_result = start_redis_container(
+            "7-alpine",
+            [
                 "redis-server",
                 "--port",
                 "0",
@@ -91,21 +95,26 @@ impl TlsRedisServer {
                 "--appendonly",
                 "yes",
             ],
-            6379,
+            &[tls_mount],
+            None,
         );
-        let (container_id, child, port) = match docker {
-            Ok((container_id, port)) => (Some(container_id), None, port),
-            Err(_) => {
+        let (container, child, port) = match container_result {
+            Ok(container) => {
+                let port = container.get_host_port_ipv4(6379)?;
+                (Some(container), None, port)
+            }
+            Err(ContainerStartError::Unavailable { .. }) => {
                 let port = TcpListener::bind(("127.0.0.1", 0))?.local_addr()?.port();
                 let child = start_local_tls(directory.path(), port, require_client_auth)?;
                 (None, Some(child), port)
             }
+            Err(error @ ContainerStartError::Fixture { .. }) => return Err(error.into()),
         };
         let ca_path = directory.path().join("ca.crt").to_string_lossy().into_owned();
         let client_cert_path = directory.path().join("client.crt").to_string_lossy().into_owned();
         let client_key_path = directory.path().join("client.key").to_string_lossy().into_owned();
         let server = Self {
-            container_id,
+            container,
             child,
             _directory: directory,
             url: format!("rediss://localhost:{port}/"),
@@ -125,18 +134,15 @@ impl TlsRedisServer {
             }
             sleep(Duration::from_millis(100));
         }
-        let logs = server
-            .container_id
-            .as_deref()
-            .and_then(|container_id| {
-                Command::new("docker")
-                    .args(["logs", "--tail", "30", container_id])
-                    .output()
-                    .ok()
-            })
-            .map_or_else(String::new, |output| {
-                String::from_utf8_lossy(&output.stderr).into_owned()
-            });
+        let logs = server.container.as_ref().map_or_else(String::new, |container| {
+            let stdout = container.stdout_to_vec().unwrap_or_default();
+            let stderr = container.stderr_to_vec().unwrap_or_default();
+            format!(
+                "stdout: {}; stderr: {}",
+                String::from_utf8_lossy(&stdout),
+                String::from_utf8_lossy(&stderr),
+            )
+        });
         Err(format!("TLS Redis container did not become ready: {}", logs).into())
     }
 
@@ -177,15 +183,8 @@ impl TlsRedisServer {
 }
 
 impl Drop for TlsRedisServer {
-    /// Removes the owned Redis container; cleanup process errors are ignored.
+    /// Reaps the local Redis process; Testcontainers removes the owned container.
     fn drop(&mut self) {
-        if let Some(container_id) = &self.container_id {
-            let _ = Command::new("docker")
-                .args(["rm", "-f", container_id])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
-        }
         if let Some(child) = &mut self.child {
             let _ = child.kill();
             let _ = child.wait();
