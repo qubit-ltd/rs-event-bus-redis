@@ -5,7 +5,7 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-//! Docker-backed disposable Redis server for integration tests.
+//! Testcontainers-backed disposable Redis server for integration tests.
 
 use std::error::Error;
 use std::ffi::OsString;
@@ -23,6 +23,10 @@ use std::time::Instant;
 
 use redis::Client;
 use redis::cmd;
+
+use super::testcontainers_support::ContainerStartError;
+use super::testcontainers_support::RedisContainer;
+use super::testcontainers_support::start_redis_container_with_host_port;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
 const IO_TIMEOUT: Duration = Duration::from_millis(250);
@@ -278,9 +282,11 @@ pub struct RedisServer {
 }
 
 enum RedisBackend {
-    Docker {
-        container_id: String,
+    Testcontainers {
+        container: Option<RedisContainer>,
         url: String,
+        requirement: VersionRequirement,
+        image_tag: String,
     },
     Local {
         child: Child,
@@ -391,23 +397,73 @@ impl RedisServer {
     }
 
     fn start_docker(image_tag: &str, requirement: VersionRequirement) -> Result<Self, DockerStartError> {
-        let image = format!("redis:{image_tag}");
-        let (container_id, port) =
-            start_mapped_container(&["run", "-d"], &[&image, "redis-server", "--appendonly", "yes"], 6379)
-                .map_err(|error| DockerStartError::Unavailable(error.to_string()))?;
-        let server = Self {
-            backend: RedisBackend::Docker {
-                container_id,
-                url: format!("redis://127.0.0.1:{port}/"),
-            },
-        };
-        wait_until_ready(server.url(), Duration::from_secs(5)).map_err(|error| {
-            DockerStartError::Fixture(format!("Redis container did not become ready: {error}").into())
-        })?;
-        server
-            .validate_version(requirement, "docker", image_tag)
-            .map_err(DockerStartError::Fixture)?;
-        Ok(server)
+        let mut last_error = None;
+        for _ in 0..10 {
+            let host_port = TcpListener::bind(("127.0.0.1", 0))
+                .and_then(|listener| listener.local_addr())
+                .map_err(|error| DockerStartError::Fixture(Box::new(error)))?
+                .port();
+            // Explicit mapping keeps the URL stable across Docker stop/start.
+            // Retry if another process claims the selected ephemeral port.
+            // SyncRunner and synchronous container methods block on their own
+            // Tokio runtime, so keep those calls off a caller's runtime.
+            let result = std::thread::scope(|scope| {
+                scope
+                    .spawn(|| {
+                        let container = start_redis_container_with_host_port(
+                            image_tag,
+                            ["redis-server", "--appendonly", "yes"],
+                            &[],
+                            None,
+                            host_port,
+                        )?;
+                        let port = container.get_host_port_ipv4(6379).map_err(|source| {
+                            ContainerStartError::Fixture {
+                                image_tag: image_tag.to_owned(),
+                                source,
+                            }
+                        })?;
+                        Ok::<_, ContainerStartError>((container, port))
+                    })
+                    .join()
+            })
+            .map_err(|_| DockerStartError::Fixture("Redis container startup thread panicked".into()))?;
+            let (container, port) = match result {
+                Ok(started) => started,
+                Err(error) if is_port_allocation_conflict(&error.to_string()) => {
+                    last_error = Some(error);
+                    continue;
+                }
+                Err(error @ ContainerStartError::Unavailable { .. }) => {
+                    return Err(DockerStartError::Unavailable(error.to_string()));
+                }
+                Err(error @ ContainerStartError::Fixture { .. }) => {
+                    return Err(DockerStartError::Fixture(Box::new(error)));
+                }
+            };
+            let server = Self {
+                backend: RedisBackend::Testcontainers {
+                    container: Some(container),
+                    url: format!("redis://127.0.0.1:{port}/"),
+                    requirement,
+                    image_tag: image_tag.to_owned(),
+                },
+            };
+            wait_until_ready(server.url(), Duration::from_secs(5)).map_err(|error| {
+                DockerStartError::Fixture(format!("Redis container did not become ready: {error}").into())
+            })?;
+            server
+                .validate_version(requirement, "testcontainers", image_tag)
+                .map_err(DockerStartError::Fixture)?;
+            return Ok(server);
+        }
+        Err(DockerStartError::Fixture(
+            format!(
+                "Redis container could not claim a test port after 10 attempts: {}",
+                last_error.map_or_else(|| "unknown port collision".to_owned(), |error| error.to_string())
+            )
+            .into(),
+        ))
     }
 
     fn validate_version(
@@ -429,25 +485,38 @@ impl RedisServer {
     /// readiness failure errors.
     pub fn restart(&mut self) -> Result<(), Box<dyn Error>> {
         match &mut self.backend {
-            RedisBackend::Docker { container_id, url } => {
-                let output = Command::new("docker").args(["restart", container_id]).output()?;
-                if !output.status.success() {
+            RedisBackend::Testcontainers {
+                container,
+                url,
+                requirement,
+                image_tag,
+            } => {
+                let container = container
+                    .as_ref()
+                    .ok_or("Redis container was already dropped")?;
+                let restarted_port = std::thread::scope(|scope| {
+                    scope
+                        .spawn(|| {
+                            container.stop()?;
+                            container.start()?;
+                            container.get_host_port_ipv4(6379)
+                        })
+                        .join()
+                })
+                .map_err(|_| "Redis container restart thread panicked")??;
+                if restarted_port != loopback_address(url)?.port() {
                     return Err(format!(
-                        "could not restart the isolated Redis server: {}",
-                        String::from_utf8_lossy(&output.stderr)
+                        "Redis container host port changed after restart: original={url}, actual={restarted_port}"
                     )
                     .into());
                 }
-                if let Err(error) = wait_until_ready(url, Duration::from_secs(10)) {
-                    let logs = Command::new("docker")
-                        .args(["logs", "--tail", "30", container_id])
-                        .output()?;
-                    return Err(format!(
-                        "Redis container did not become ready after restart ({error}): {}",
-                        String::from_utf8_lossy(&logs.stdout)
-                    )
-                    .into());
-                }
+                wait_until_ready(url, Duration::from_secs(10))?;
+                validate_version_at(
+                    loopback_address(url)?,
+                    *requirement,
+                    "testcontainers",
+                    image_tag,
+                )?;
             }
             RedisBackend::Local {
                 child,
@@ -470,7 +539,7 @@ impl RedisServer {
     #[inline]
     pub fn url(&self) -> &str {
         match &self.backend {
-            RedisBackend::Docker { url, .. } | RedisBackend::Local { url, .. } => url,
+            RedisBackend::Testcontainers { url, .. } | RedisBackend::Local { url, .. } => url,
         }
     }
 }
@@ -509,15 +578,14 @@ fn is_port_allocation_conflict(error: &str) -> bool {
 impl Drop for RedisServer {
     /// Removes the container owned by this test fixture.
     ///
-    /// Blocks on Docker process IO; cleanup errors are deliberately ignored.
+    /// Blocks on container/process cleanup; cleanup errors are deliberately ignored.
     fn drop(&mut self) {
         match &mut self.backend {
-            RedisBackend::Docker { container_id, .. } => {
-                let _ = Command::new("docker")
-                    .args(["rm", "-f", container_id])
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status();
+            RedisBackend::Testcontainers { container, .. } => {
+                if let Some(container) = container.take() {
+                    // Container::drop also blocks on its Tokio runtime.
+                    let _ = std::thread::spawn(move || drop(container)).join();
+                }
             }
             RedisBackend::Local { child, .. } => {
                 let _ = child.kill();
