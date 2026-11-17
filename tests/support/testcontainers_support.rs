@@ -255,6 +255,8 @@ fn classify_start_error(image_tag: &str, source: TestcontainersError) -> Contain
             | ClientError::InvalidDockerHost(_)
             | ClientError::PullImage { .. }
             | ClientError::BuildImage { .. }
+            | ClientError::ListNetworks(_)
+            | ClientError::ListContainers(_)
             | ClientError::CreateContainer(_),
         ) => ContainerStartError::Unavailable {
             image_tag: image_tag.to_owned(),
