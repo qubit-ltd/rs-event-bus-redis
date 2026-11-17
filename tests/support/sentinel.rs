@@ -153,10 +153,20 @@ impl SentinelServer {
         let container =
             start_redis_container("7-alpine", command, mounts, Some("host")).map_err(|error| {
                 match error {
-                    ContainerStartError::Unavailable { image_tag, source }
+                    ContainerStartError::Unavailable {
+                        image_tag,
+                        source,
+                        container_name,
+                        cleanup_error,
+                    }
                         if !self.containers.is_empty() =>
                     {
-                        ContainerStartError::Fixture { image_tag, source }
+                        ContainerStartError::Fixture {
+                            image_tag,
+                            source,
+                            container_name,
+                            cleanup_error,
+                        }
                     }
                     error => error,
                 }
