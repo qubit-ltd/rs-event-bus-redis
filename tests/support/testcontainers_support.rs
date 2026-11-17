@@ -9,15 +9,22 @@
 
 use std::error::Error;
 use std::fmt;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 
 use testcontainers::Container;
 use testcontainers::ContainerRequest;
 use testcontainers::GenericImage;
 use testcontainers::ImageExt;
 use testcontainers::TestcontainersError;
+use testcontainers::bollard::errors::Error as DockerError;
+use testcontainers::bollard::query_parameters::RemoveContainerOptionsBuilder;
 use testcontainers::core::IntoContainerPort;
 use testcontainers::core::Mount;
 use testcontainers::core::WaitFor;
+use testcontainers::core::client::docker_client_instance;
 use testcontainers::core::error::ClientError;
 use testcontainers::runners::SyncRunner;
 
@@ -29,29 +36,44 @@ pub(crate) enum ContainerStartError {
     Unavailable {
         image_tag: String,
         source: TestcontainersError,
+        container_name: Option<String>,
+        cleanup_error: Option<String>,
     },
     Fixture {
         image_tag: String,
         source: TestcontainersError,
+        container_name: Option<String>,
+        cleanup_error: Option<String>,
     },
 }
 
 impl fmt::Display for ContainerStartError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Unavailable { image_tag, source } => {
+            Self::Unavailable { image_tag, source, .. } => {
                 write!(
                     formatter,
                     "Redis container backend unavailable for redis:{image_tag}: {source}"
-                )
+                )?;
             }
-            Self::Fixture { image_tag, source } => {
+            Self::Fixture { image_tag, source, .. } => {
                 write!(
                     formatter,
                     "Redis container fixture failed for redis:{image_tag}: {source}"
-                )
+                )?;
             }
         }
+        let (container_name, cleanup_error) = match self {
+            Self::Unavailable { container_name, cleanup_error, .. }
+            | Self::Fixture { container_name, cleanup_error, .. } => (container_name, cleanup_error),
+        };
+        if let Some(name) = container_name {
+            write!(formatter, "; attempted container={name}")?;
+        }
+        if let Some(error) = cleanup_error {
+            write!(formatter, "; failed container cleanup: {error}")?;
+        }
+        Ok(())
     }
 }
 
@@ -140,9 +162,51 @@ fn start_container(
     } else if let Some(host_port) = host_port {
         request = request.with_mapped_port(host_port, 6379.tcp());
     }
-    request
-        .start()
-        .map_err(|source| classify_start_error(image_tag, source))
+    let container_name = unique_container_name();
+    request.with_container_name(&container_name).start().map_err(|source| {
+        // StartContainer can fail after Docker creates a container but before
+        // Testcontainers returns its RAII handle. Remove that owned attempt by name.
+        let cleanup = cleanup_failed_container(&container_name).err();
+        let mut error = classify_start_error(image_tag, source);
+        match &mut error {
+            ContainerStartError::Unavailable { container_name: name, cleanup_error, .. }
+            | ContainerStartError::Fixture { container_name: name, cleanup_error, .. } => {
+                *name = Some(container_name);
+                *cleanup_error = cleanup;
+            }
+        }
+        error
+    })
+}
+
+fn unique_container_name() -> String {
+    static ATTEMPT: AtomicU64 = AtomicU64::new(0);
+    let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+    format!("rer-redis-{}-{timestamp}-{}", std::process::id(), ATTEMPT.fetch_add(1, Ordering::Relaxed))
+}
+
+fn cleanup_failed_container(container_name: &str) -> Result<(), String> {
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .name("redis-container-cleanup".into())
+            .spawn_scoped(scope, || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|error| error.to_string())?;
+                runtime.block_on(async {
+                    let docker = docker_client_instance().await.map_err(|error| error.to_string())?;
+                    let options = RemoveContainerOptionsBuilder::new().force(true).v(true).build();
+                    match docker.remove_container(container_name, Some(options)).await {
+                        Ok(()) | Err(DockerError::DockerResponseServerError { status_code: 404, .. }) => Ok(()),
+                        Err(error) => Err(error.to_string()),
+                    }
+                })
+            })
+            .map_err(|error| error.to_string())?
+            .join()
+            .map_err(|_| "container cleanup thread panicked".to_owned())?
+    })
 }
 
 fn classify_start_error(image_tag: &str, source: TestcontainersError) -> ContainerStartError {
@@ -157,10 +221,14 @@ fn classify_start_error(image_tag: &str, source: TestcontainersError) -> Contain
         ) => ContainerStartError::Unavailable {
             image_tag: image_tag.to_owned(),
             source,
+            container_name: None,
+            cleanup_error: None,
         },
         _ => ContainerStartError::Fixture {
             image_tag: image_tag.to_owned(),
             source,
+            container_name: None,
+            cleanup_error: None,
         },
     }
 }
@@ -220,5 +288,23 @@ mod tests {
             assert!(error.to_string().contains("redis:7-alpine"));
             assert!(error.source().is_some());
         }
+    }
+
+    #[test]
+    fn test_cleanup_failure_preserves_original_start_error() {
+        let error = ContainerStartError::Fixture {
+            image_tag: "7-alpine".into(),
+            source: ClientError::StartContainer(std::io::Error::other("original start failure").into()).into(),
+            container_name: Some("rer-redis-attempt".into()),
+            cleanup_error: Some("cleanup denied".into()),
+        };
+        let display = error.to_string();
+        assert!(display.contains("original start failure"));
+        assert!(display.contains("rer-redis-attempt"));
+        assert!(display.contains("cleanup denied"));
+        assert!(matches!(
+            error.source().and_then(|source| source.downcast_ref::<TestcontainersError>()),
+            Some(TestcontainersError::Client(ClientError::StartContainer(_)))
+        ));
     }
 }

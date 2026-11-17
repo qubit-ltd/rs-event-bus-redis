@@ -39,6 +39,55 @@ fn test_redis_fixture_starts_with_testcontainers() -> Result<(), Box<dyn Error>>
 }
 
 #[test]
+fn test_failed_container_start_cleans_owned_attempt() -> Result<(), Box<dyn Error>> {
+    use support::testcontainers_support::ContainerStartError;
+    use support::testcontainers_support::start_redis_container_with_host_port;
+    use testcontainers::TestcontainersError;
+    use testcontainers::bollard::errors::Error as DockerError;
+    use testcontainers::core::client::docker_client_instance;
+    use testcontainers::core::error::ClientError;
+
+    let occupied = std::net::TcpListener::bind(("0.0.0.0", 0))?;
+    let port = occupied.local_addr()?.port();
+    let error = match start_redis_container_with_host_port(
+        "7-alpine",
+        ["redis-server", "--appendonly", "no"],
+        &[],
+        None,
+        port,
+    ) {
+        Ok(_) => return Err("container unexpectedly claimed the occupied host port".into()),
+        Err(error) => error,
+    };
+    let ContainerStartError::Fixture {
+        source: TestcontainersError::Client(ClientError::StartContainer(_)),
+        container_name: Some(name),
+        cleanup_error,
+        ..
+    } = &error
+    else {
+        return Err(format!("expected a post-creation port conflict, got: {error}").into());
+    };
+    assert!(cleanup_error.is_none(), "{error}");
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    let inspection = runtime.block_on(async {
+        let docker = docker_client_instance().await?;
+        docker.inspect_container(name, None).await.map_err(ClientError::InspectContainer)
+    });
+    assert!(
+        matches!(
+            inspection,
+            Err(ClientError::InspectContainer(DockerError::DockerResponseServerError {
+                status_code: 404,
+                ..
+            }))
+        ),
+        "failed start leaked its owned container {name}: {inspection:?}"
+    );
+    Ok(())
+}
+
+#[test]
 fn test_smol_consumer_uses_isolated_production_features() -> Result<(), Box<dyn Error>> {
     let server = RedisServer::start()?;
     run_fixture_consumer("async_smol_consumer", server.url(), true)

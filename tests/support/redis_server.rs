@@ -421,6 +421,8 @@ impl RedisServer {
                             ContainerStartError::Fixture {
                                 image_tag: image_tag.to_owned(),
                                 source,
+                                container_name: None,
+                                cleanup_error: None,
                             }
                         })?;
                         Ok::<_, ContainerStartError>((container, port))
@@ -430,7 +432,14 @@ impl RedisServer {
             .map_err(|_| DockerStartError::Fixture("Redis container startup thread panicked".into()))?;
             let (container, port) = match result {
                 Ok(started) => started,
-                Err(error) if is_port_allocation_conflict(&error.to_string()) => {
+                Err(error)
+                    if is_port_allocation_conflict(&error.to_string())
+                        && matches!(
+                            error,
+                            ContainerStartError::Unavailable { cleanup_error: None, .. }
+                                | ContainerStartError::Fixture { cleanup_error: None, .. }
+                        ) =>
+                {
                     last_error = Some(error);
                     continue;
                 }
