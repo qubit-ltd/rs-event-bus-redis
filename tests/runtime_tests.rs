@@ -24,17 +24,59 @@ use support::redis_server::RedisServer;
 
 #[test]
 fn test_redis_fixture_starts_with_testcontainers() -> Result<(), Box<dyn Error>> {
-    let container = crate::support::testcontainers_support::start_redis_container(
+    use crate::support::testcontainers_support::{
+        start_redis_container, start_redis_container_with_host_port,
+    };
+
+    let container = start_redis_container(
         "7-alpine",
         ["redis-server", "--appendonly", "no"],
         &[],
         None,
     )?;
+    assert_redis_port_is_loopback_only(&container)?;
     let port = container.get_host_port_ipv4(6379)?;
     let client = Client::open(format!("redis://127.0.0.1:{port}/"))?;
     let mut connection = client.get_connection()?;
     let response: String = cmd("PING").query(&mut connection)?;
     assert_eq!(response, "PONG");
+
+    let occupied = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+    let fixed_port = occupied.local_addr()?.port();
+    drop(occupied);
+    let fixed_container = start_redis_container_with_host_port(
+        "7-alpine",
+        ["redis-server", "--appendonly", "no"],
+        &[],
+        None,
+        fixed_port,
+    )?;
+    assert_redis_port_is_loopback_only(&fixed_container)?;
+    Ok(())
+}
+
+fn assert_redis_port_is_loopback_only(
+    container: &crate::support::testcontainers_support::RedisContainer,
+) -> Result<(), Box<dyn Error>> {
+    use testcontainers::core::client::docker_client_instance;
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let docker = runtime.block_on(docker_client_instance())?;
+    let inspection = runtime.block_on(docker.inspect_container(container.id(), None))?;
+    let bindings = inspection
+        .network_settings
+        .and_then(|settings| settings.ports)
+        .and_then(|ports| ports.get("6379/tcp").cloned().flatten())
+        .ok_or("Redis container has no published port binding")?;
+    assert!(
+        !bindings.is_empty()
+            && bindings
+                .iter()
+                .all(|binding| binding.host_ip.as_deref() == Some("127.0.0.1")),
+        "expected Redis host bindings to use loopback only, got {bindings:?}"
+    );
     Ok(())
 }
 

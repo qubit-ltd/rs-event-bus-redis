@@ -7,6 +7,7 @@
 // =============================================================================
 //! Shared Testcontainers lifecycle and startup errors for Redis test fixtures.
 
+use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
 use std::sync::atomic::AtomicU64;
@@ -20,6 +21,7 @@ use testcontainers::GenericImage;
 use testcontainers::ImageExt;
 use testcontainers::TestcontainersError;
 use testcontainers::bollard::errors::Error as DockerError;
+use testcontainers::bollard::models::PortBinding;
 use testcontainers::bollard::query_parameters::RemoveContainerOptionsBuilder;
 use testcontainers::core::IntoContainerPort;
 use testcontainers::core::Mount;
@@ -159,8 +161,21 @@ fn start_container(
             host_config.publish_all_ports = Some(false);
             host_config.port_bindings = None;
         });
-    } else if let Some(host_port) = host_port {
-        request = request.with_mapped_port(host_port, 6379.tcp());
+    } else {
+        let mapped_port = host_port.unwrap_or(0);
+        if let Some(host_port) = host_port {
+            request = request.with_mapped_port(host_port, 6379.tcp());
+        }
+        request = request.with_host_config_modifier(move |host_config| {
+            host_config.publish_all_ports = Some(false);
+            host_config.port_bindings = Some(HashMap::from([(
+                "6379/tcp".to_owned(),
+                Some(vec![PortBinding {
+                    host_ip: Some("127.0.0.1".to_owned()),
+                    host_port: Some(mapped_port.to_string()),
+                }]),
+            )]));
+        });
     }
     let container_name = unique_container_name();
     request.with_container_name(&container_name).start().map_err(|source| {
