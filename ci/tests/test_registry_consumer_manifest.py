@@ -27,11 +27,19 @@ example={version="1",path="../example"}
 
     def test_prepared_registry_fixture_has_no_local_dependency(self):
         fixture = Path(__file__).resolve().parents[2] / "tests/fixtures/registry_consumer"
+        source = TARGET.load_manifest(fixture.parents[2] / "Cargo.toml")
+
+        def dependency_version(name):
+            entry = source["dependencies"][name]
+            requirement = entry["version"] if isinstance(entry, dict) else entry
+            parts = requirement.removeprefix("^").split(".")
+            return ".".join(parts + ["0"] * (3 - len(parts)))
+
         with tempfile.TemporaryDirectory() as output:
             TARGET.prepare(SimpleNamespace(
-                provider_version=TARGET.load_manifest(fixture.parents[2] / "Cargo.toml")["package"]["version"],
-                core_version="0.21.0",
-                spi_version="0.14.0",
+                provider_version=source["package"]["version"],
+                core_version=dependency_version("qubit-event-bus"),
+                spi_version=dependency_version("qubit-spi"),
                 mode="source-candidate",
                 source_manifest=str(fixture.parents[2] / "Cargo.toml"),
                 fixture=str(fixture),

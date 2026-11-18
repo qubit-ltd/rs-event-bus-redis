@@ -18,14 +18,25 @@ SOURCE_MANIFEST = TARGET.load_manifest(ROOT / "Cargo.toml")
 def dependency_version(name):
     dependency = SOURCE_MANIFEST["dependencies"][name]
     requirement = dependency.get("version") if isinstance(dependency, dict) else dependency
-    return requirement.removeprefix("^").split(".")
+    parts = requirement.removeprefix("^").split(".")
+    return parts + ["0"] * (3 - len(parts))
 
 
 VERSIONS = {
     "provider": SOURCE_MANIFEST["package"]["version"],
-    "core": ".".join(dependency_version("qubit-event-bus")[:2] + ["0"]),
+    "core": ".".join(dependency_version("qubit-event-bus")),
     "spi": ".".join(dependency_version("qubit-spi")),
 }
+
+
+# Generate mismatches so future releases cannot turn negative cases into matches.
+def different_minor(version):
+    major, minor, _ = map(int, version.split("."))
+    return f"{major}.{minor + 1}.0"
+
+
+OTHER_CORE = different_minor(VERSIONS["core"])
+OTHER_PROVIDER = different_minor(VERSIONS["provider"])
 
 
 def args(**overrides):
@@ -36,19 +47,19 @@ def args(**overrides):
 
 
 def metadata(double_core=False, bad_edge=False, git_target=None):
-    core_id = "qubit-event-bus 0.21.0 (registry+https://github.com/rust-lang/crates.io-index)"
+    core_id = f"qubit-event-bus {VERSIONS['core']} (registry+https://github.com/rust-lang/crates.io-index)"
     provider_id = f"qubit-event-bus-redis {VERSIONS['provider']} (registry+https://github.com/rust-lang/crates.io-index)"
-    spi_id = "qubit-spi 0.14.0 (registry+https://github.com/rust-lang/crates.io-index)"
+    spi_id = f"qubit-spi {VERSIONS['spi']} (registry+https://github.com/rust-lang/crates.io-index)"
     root_id = "registry-consumer 0.1.0 (path+file:///tmp/consumer)"
-    other_core_id = "qubit-event-bus 0.20.1 (registry+https://github.com/rust-lang/crates.io-index)"
+    other_core_id = f"qubit-event-bus {OTHER_CORE} (registry+https://github.com/rust-lang/crates.io-index)"
     packages = [
         {"id": root_id, "name": "registry-consumer", "version": "0.1.0", "source": None},
-        {"id": core_id, "name": "qubit-event-bus", "version": "0.21.0", "source": TARGET.REGISTRY},
+        {"id": core_id, "name": "qubit-event-bus", "version": VERSIONS["core"], "source": TARGET.REGISTRY},
         {"id": provider_id, "name": "qubit-event-bus-redis", "version": VERSIONS["provider"], "source": TARGET.REGISTRY},
-        {"id": spi_id, "name": "qubit-spi", "version": "0.14.0", "source": TARGET.REGISTRY},
+        {"id": spi_id, "name": "qubit-spi", "version": VERSIONS["spi"], "source": TARGET.REGISTRY},
     ]
     if double_core:
-        packages.append({"id": other_core_id, "name": "qubit-event-bus", "version": "0.20.1", "source": TARGET.REGISTRY})
+        packages.append({"id": other_core_id, "name": "qubit-event-bus", "version": OTHER_CORE, "source": TARGET.REGISTRY})
     target_id = {"core": core_id, "provider": provider_id, "spi": spi_id}.get(git_target, core_id)
     if git_target == "provider":
         packages[2]["source"] = "git+https://example.invalid/repo"
@@ -64,7 +75,7 @@ def metadata(double_core=False, bad_edge=False, git_target=None):
         {"id": provider_id, "deps": [{"name": "qubit-event-bus", "pkg": provider_core}]},
     ]
     if bad_edge and not double_core:
-        packages.append({"id": other_core_id, "name": "qubit-event-bus", "version": "0.20.1", "source": TARGET.REGISTRY})
+        packages.append({"id": other_core_id, "name": "qubit-event-bus", "version": OTHER_CORE, "source": TARGET.REGISTRY})
     return {"packages": packages, "resolve": {"root": root_id, "nodes": resolve_nodes}}
 
 
@@ -81,25 +92,25 @@ class RegistryConsumerTargetTests(unittest.TestCase):
 
     def test_rejects_core_minor_mismatch_and_provider_source_mismatch(self):
         with self.assertRaisesRegex(TARGET.TargetError, "does not match"):
-            TARGET.check_source_versions(ROOT / "Cargo.toml", TARGET.arguments_versions(args(core_version="0.20.1")))
+            TARGET.check_source_versions(ROOT / "Cargo.toml", TARGET.arguments_versions(args(core_version=OTHER_CORE)))
         with self.assertRaisesRegex(TARGET.TargetError, "does not equal"):
-            TARGET.check_source_versions(ROOT / "Cargo.toml", TARGET.arguments_versions(args(provider_version="0.8.0")))
+            TARGET.check_source_versions(ROOT / "Cargo.toml", TARGET.arguments_versions(args(provider_version=OTHER_PROVIDER)))
 
-    def test_published_prepare_accepts_historical_versions_without_source_constraint(self):
+    def test_published_prepare_accepts_other_versions_without_source_constraint(self):
         fixture = ROOT / "tests/fixtures/registry_consumer"
-        historical = args(core_version="0.20.1", mode="published")
+        published = args(core_version=OTHER_CORE, mode="published")
         with tempfile.TemporaryDirectory() as directory:
             TARGET.prepare(SimpleNamespace(source_manifest=str(ROOT / "Cargo.toml"), fixture=str(fixture),
-                                          output=directory, **vars(historical)))
+                                          output=directory, **vars(published)))
             manifest = (Path(directory) / "Cargo.toml").read_text()
             self.assertIn(f'version = "={VERSIONS["provider"]}"', manifest)
-            self.assertIn('version = "=0.20.1"', manifest)
+            self.assertIn(f'version = "={OTHER_CORE}"', manifest)
 
-    def test_source_candidate_prepare_rejects_historical_core_combination(self):
+    def test_source_candidate_prepare_rejects_other_core_minor(self):
         fixture = ROOT / "tests/fixtures/registry_consumer"
         with tempfile.TemporaryDirectory() as directory, self.assertRaisesRegex(TARGET.TargetError, "does not match"):
             TARGET.prepare(SimpleNamespace(source_manifest=str(ROOT / "Cargo.toml"), fixture=str(fixture),
-                                          output=directory, **vars(args(core_version="0.20.1"))))
+                                          output=directory, **vars(args(core_version=OTHER_CORE))))
 
     def test_prepare_rejects_unknown_mode(self):
         fixture = ROOT / "tests/fixtures/registry_consumer"
@@ -123,8 +134,8 @@ class RegistryConsumerTargetTests(unittest.TestCase):
                                           output=directory, **{f"{key}_version": value for key, value in versions.items()}))
             manifest = (Path(directory) / "Cargo.toml").read_text()
             self.assertIn(f'version = "={VERSIONS["provider"]}"', manifest)
-            self.assertIn('version = "=0.21.0"', manifest)
-            self.assertIn('qubit-spi = "=0.14.0"', manifest)
+            self.assertIn(f'version = "={VERSIONS["core"]}"', manifest)
+            self.assertIn(f'qubit-spi = "={VERSIONS["spi"]}"', manifest)
             self.assertEqual((Path(directory) / "src/main.rs").read_bytes(), (fixture / "src/main.rs").read_bytes())
 
     def assert_metadata_rejected(self, payload, pattern):
@@ -150,7 +161,7 @@ class RegistryConsumerTargetTests(unittest.TestCase):
         with patch("sys.stdin") as stdin:
             stdin.read.return_value = json.dumps(metadata())
             with self.assertRaisesRegex(TARGET.TargetError, "resolved version"):
-                TARGET.verify(args(core_version="0.20.1", mode="published"))
+                TARGET.verify(args(core_version=OTHER_CORE, mode="published"))
 
     def test_rejects_target_path_or_git_source(self):
         self.assert_metadata_rejected(metadata(git_target="provider"), "expected registry source")

@@ -1,16 +1,19 @@
+import importlib.util
 import json
 import os
 import subprocess
 import tempfile
 import textwrap
-import tomllib
 import unittest
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "ci/check-registry-consumer.sh"
-SOURCE_MANIFEST = tomllib.loads((ROOT / "Cargo.toml").read_text())
+SPEC = importlib.util.spec_from_file_location("registry_consumer_target", ROOT / "ci/registry_consumer_target.py")
+TARGET = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(TARGET)
+SOURCE_MANIFEST = TARGET.load_manifest(ROOT / "Cargo.toml")
 
 
 def dependency_version(name):
@@ -28,16 +31,16 @@ VERSIONS = (
 
 
 def metadata():
-    core = "qubit-event-bus 0.21.0 (registry+https://github.com/rust-lang/crates.io-index)"
+    core = f"qubit-event-bus {VERSIONS[1]} (registry+https://github.com/rust-lang/crates.io-index)"
     provider = f"qubit-event-bus-redis {VERSIONS[0]} (registry+https://github.com/rust-lang/crates.io-index)"
-    spi = "qubit-spi 0.14.0 (registry+https://github.com/rust-lang/crates.io-index)"
+    spi = f"qubit-spi {VERSIONS[2]} (registry+https://github.com/rust-lang/crates.io-index)"
     root = "registry-consumer 0.1.0 (path+file:///tmp/consumer)"
     return {
         "packages": [
             {"id": root, "name": "registry-consumer", "version": "0.1.0", "source": None},
-            {"id": core, "name": "qubit-event-bus", "version": "0.21.0", "source": "registry+https://github.com/rust-lang/crates.io-index"},
+            {"id": core, "name": "qubit-event-bus", "version": VERSIONS[1], "source": "registry+https://github.com/rust-lang/crates.io-index"},
             {"id": provider, "name": "qubit-event-bus-redis", "version": VERSIONS[0], "source": "registry+https://github.com/rust-lang/crates.io-index"},
-            {"id": spi, "name": "qubit-spi", "version": "0.14.0", "source": "registry+https://github.com/rust-lang/crates.io-index"},
+            {"id": spi, "name": "qubit-spi", "version": VERSIONS[2], "source": "registry+https://github.com/rust-lang/crates.io-index"},
         ],
         "resolve": {
             "root": root,
