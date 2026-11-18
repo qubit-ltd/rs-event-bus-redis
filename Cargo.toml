@@ -20,6 +20,8 @@ include = [
   "/tests/**",
   "/examples/**",
   "/benches/**",
+  # Nested fixture builds must not be included in the published crate.
+  "!**/target/**",
 ]
 
 [workspace]
