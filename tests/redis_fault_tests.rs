@@ -696,7 +696,9 @@ fn test_async_invalid_claim_shape_preserves_cursor_and_subscription() {
             ));
             let error = match subscription.receive(Duration::ZERO).await {
                 Err(error) => error,
-                Ok(ReceiveOutcome::Message(_)) => panic!("malformed claim must not return a message"),
+                Ok(ReceiveOutcome::Message(_)) => {
+                    panic!("malformed claim must not return a message")
+                }
                 Ok(ReceiveOutcome::Gap(_)) => panic!("malformed claim must not return a gap"),
                 Ok(ReceiveOutcome::TimedOut) => panic!("malformed claim must return an error"),
                 Ok(_) => panic!("malformed claim must not return another outcome"),

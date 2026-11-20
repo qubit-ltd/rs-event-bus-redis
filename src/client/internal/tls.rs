@@ -308,6 +308,70 @@ mod tests {
         );
     }
 
+    /// Sanitizes errors from malformed certificate encoding and from files
+    /// that cannot be read as byte streams.
+    #[test]
+    fn test_tls_malformed_certificate_and_unreadable_file_are_sanitized() {
+        let directory = tempdir().expect("temporary directory");
+        let malformed_path = directory.path().join("malformed-ca.pem");
+        fs::write(
+            &malformed_path,
+            b"-----BEGIN CERTIFICATE-----\n%%%\n-----END CERTIFICATE-----\n",
+        )
+        .expect("write malformed certificate PEM");
+        let error = load_certificates(Some(malformed_path.to_str().expect("UTF-8 temporary path")), None, None)
+            .expect_err("malformed base64 is rejected");
+        assert_eq!(
+            error.to_string(),
+            "invalid Redis TLS configuration - InvalidClientConfig"
+        );
+        assert!(!error.to_string().contains(malformed_path.to_str().expect("path")));
+
+        let error = load_certificates(
+            Some(directory.path().to_str().expect("UTF-8 temporary path")),
+            None,
+            None,
+        )
+        .expect_err("a directory cannot be read as a PEM file");
+        assert_eq!(
+            error.to_string(),
+            "invalid Redis TLS configuration - InvalidClientConfig"
+        );
+        assert!(!error.to_string().contains(directory.path().to_str().expect("path")));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let unreadable_path = directory.path().join("unreadable.pem");
+            fs::write(&unreadable_path, b"certificate data").expect("write unreadable PEM");
+            fs::set_permissions(&unreadable_path, fs::Permissions::from_mode(0o000)).expect("remove read permissions");
+            let error = load_certificates(
+                Some(unreadable_path.to_str().expect("UTF-8 temporary path")),
+                None,
+                None,
+            )
+            .expect_err("unreadable PEM is rejected");
+            assert_eq!(
+                error.to_string(),
+                "invalid Redis TLS configuration - InvalidClientConfig"
+            );
+            assert!(!error.to_string().contains(unreadable_path.to_str().expect("path")));
+        }
+    }
+
+    /// Rejects incomplete client identities before attempting file access.
+    #[test]
+    fn test_tls_client_identity_requires_certificate_and_key_pair() {
+        let error =
+            load_certificates(None, Some("client-cert.pem"), None).expect_err("certificate without a key is rejected");
+        assert_eq!(
+            error.to_string(),
+            "invalid Redis TLS configuration - InvalidClientConfig"
+        );
+        assert!(!error.to_string().contains("client-cert.pem"));
+    }
+
     /// Leaves the dependency's default roots selected with no client identity
     /// when no custom TLS material is configured.
     #[test]

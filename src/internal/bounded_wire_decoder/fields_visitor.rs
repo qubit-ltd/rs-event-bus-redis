@@ -190,3 +190,34 @@ fn duplicate<T, E: de::Error>(value: &Option<T>, field: &'static str) -> Result<
 fn required<T, E: de::Error>(value: Option<T>, field: &'static str) -> Result<T, E> {
     value.ok_or_else(|| E::missing_field(field))
 }
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use serde::Deserializer;
+
+    use super::FieldsVisitor;
+    use crate::bounded_wire_decoder::fields_seed::FieldsSeed;
+    use crate::wire_limits::WireLimits;
+
+    /// Keeps the visitor's type-mismatch diagnostic useful when a non-map is
+    /// supplied directly to the version-one field visitor.
+    #[test]
+    fn test_fields_visitor_describes_expected_wire_map() {
+        let exceeded = Cell::new(false);
+        let seed = FieldsSeed {
+            limits: WireLimits {
+                wire: 1024,
+                payload: 16,
+                headers: 16,
+            },
+            exceeded: &exceeded,
+        };
+        let error = serde_json::Deserializer::from_str("[]")
+            .deserialize_map(FieldsVisitor(seed))
+            .expect_err("an array is not a version-one field map");
+
+        assert!(error.to_string().contains("version 1 wire fields"));
+    }
+}

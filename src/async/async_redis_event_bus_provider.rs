@@ -103,7 +103,7 @@ impl AsyncServiceProvider<EventBusSpec> for AsyncRedisEventBusProvider {
             })?;
             client
                 .attach_diagnostics(RedisProviderMode::Async, settings.namespace())
-                .map_err(|error| ProviderFailure::invalid_configuration(EventBusProviderError::provider(error)))?;
+                .map_err(crate::error::diagnostics_provider_failure)?;
             Ok(Arc::new(AsyncRedisEventBus {
                 client: Arc::new(client),
                 settings,

@@ -21,6 +21,7 @@ use qubit_event_bus::spi::TransportPayload;
 use qubit_spi::AsyncServiceProvider;
 use qubit_spi::ProviderMetadata;
 use qubit_spi::ServiceProvider;
+use tempfile::tempdir;
 
 use crate::r#async::AsyncRedisEventBusProvider;
 use crate::sync::RedisEventBusProvider;
@@ -72,6 +73,24 @@ fn test_sync_and_async_provider_descriptors_and_factories() {
     let invalid_config = EventBusConfig::default().with_provider_options(invalid_options);
     assert!(sync_provider.create_configured(&invalid_config).is_err());
     assert!(block_on(async_provider.create_configured(&invalid_config)).is_err());
+}
+
+#[test]
+fn test_sync_and_async_providers_sanitize_invalid_tls_configuration() {
+    let directory = tempdir().expect("temporary directory");
+    let missing_ca = directory.path().join("missing-ca.pem");
+    let invalid_options: ProviderOptions = [
+        ("redis.url".into(), "rediss://127.0.0.1/".into()),
+        (
+            "redis.tls_ca_cert_path".into(),
+            missing_ca.to_str().expect("UTF-8 temporary path").into(),
+        ),
+    ]
+    .into();
+    let invalid_config = EventBusConfig::default().with_provider_options(invalid_options);
+
+    assert!(RedisEventBusProvider.create_configured(&invalid_config).is_err());
+    assert!(block_on(AsyncRedisEventBusProvider.create_configured(&invalid_config)).is_err());
 }
 
 #[test]

@@ -8,11 +8,15 @@
 //! Public Redis provider errors.
 
 #[cfg(any(feature = "sync", feature = "async"))]
+use qubit_event_bus::EventBusProviderError;
+#[cfg(any(feature = "sync", feature = "async"))]
 use qubit_event_bus::error::SpiError;
 #[cfg(any(feature = "sync", feature = "async"))]
 use qubit_event_bus::model::PublishEffect;
 #[cfg(any(feature = "sync", feature = "async"))]
 use qubit_event_bus::spi::TopicAddress;
+#[cfg(any(feature = "sync", feature = "async"))]
+use qubit_spi::error::ProviderFailure;
 #[cfg(any(feature = "sync", feature = "async"))]
 use redis::ErrorKind;
 #[cfg(any(feature = "sync", feature = "async"))]
@@ -21,6 +25,35 @@ use redis::RedisError;
 pub use crate::redis_provider_error::RedisProviderError;
 #[cfg(any(feature = "sync", feature = "async"))]
 use crate::redis_provider_error::from_redis_error as classify_redis_error;
+
+/// Converts a diagnostics registration failure into a sanitized provider
+/// configuration failure shared by the synchronous and asynchronous factories.
+///
+/// # Parameters
+///
+/// - `error`: Secret-safe failure returned while registering diagnostics.
+///
+/// # Returns
+///
+/// An invalid-configuration failure suitable for a provider factory.
+#[cfg(any(feature = "sync", feature = "async"))]
+pub(crate) fn diagnostics_provider_failure(error: RedisProviderError) -> ProviderFailure<EventBusProviderError> {
+    ProviderFailure::invalid_configuration(EventBusProviderError::provider(error))
+}
+
+#[cfg(all(test, any(feature = "sync", feature = "async")))]
+mod diagnostics_provider_failure_tests {
+    use qubit_spi::error::ProviderFailureKind;
+
+    use super::diagnostics_provider_failure;
+    use crate::error::RedisProviderError;
+
+    #[test]
+    fn test_diagnostics_registration_failure_is_invalid_configuration() {
+        let failure = diagnostics_provider_failure(RedisProviderError::Operation("registration failed"));
+        assert_eq!(failure.kind(), ProviderFailureKind::InvalidConfiguration);
+    }
+}
 
 /// Converts a sanitized provider failure into the facade's stable SPI shape.
 ///
