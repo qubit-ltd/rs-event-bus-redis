@@ -663,7 +663,21 @@ fn test_sync_block_adds_command_margin_and_next_poll_restores_short_wait() {
     let result = receiver.recv_timeout(Duration::from_millis(1800));
     gate.release();
     worker.join().expect("receive worker");
-    assert!(reached, "zero poll must send the short claim query");
+    let result_summary = match &result {
+        Ok(Ok(ReceiveOutcome::TimedOut)) => "timed out",
+        Ok(Ok(_)) => "unexpected receive outcome",
+        Ok(Err(_)) => "receive returned an error",
+        Err(_) => "receive worker did not report within watchdog",
+    };
+    assert!(
+        reached,
+        "zero poll must send the short claim query; result: {result_summary}; observed requests: {:?}",
+        proxy
+            .request_observations()
+            .iter()
+            .map(|request| String::from_utf8_lossy(&request.command).into_owned())
+            .collect::<Vec<_>>()
+    );
     assert_error(
         result
             .expect("1s short timeout must beat 1.8s watchdog; stale BLOCK budget exceeds 2s")
@@ -707,7 +721,21 @@ fn test_async_block_adds_command_margin_and_next_poll_restores_short_wait() {
     let result = receiver.recv_timeout(Duration::from_millis(1800));
     gate.release();
     worker.join().expect("receive worker");
-    assert!(reached, "zero poll must send the short claim query");
+    let result_summary = match &result {
+        Ok(Ok(ReceiveOutcome::TimedOut)) => "timed out",
+        Ok(Ok(_)) => "unexpected receive outcome",
+        Ok(Err(_)) => "receive returned an error",
+        Err(_) => "receive worker did not report within watchdog",
+    };
+    assert!(
+        reached,
+        "zero poll must send the short claim query; result: {result_summary}; observed requests: {:?}",
+        proxy
+            .request_observations()
+            .iter()
+            .map(|request| String::from_utf8_lossy(&request.command).into_owned())
+            .collect::<Vec<_>>()
+    );
     assert_error(
         result
             .expect("1s short timeout must beat 1.8s watchdog; stale BLOCK budget exceeds 2s")
